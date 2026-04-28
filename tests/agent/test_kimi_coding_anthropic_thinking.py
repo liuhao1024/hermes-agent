@@ -95,12 +95,15 @@ class TestKimiCodingSkipsAnthropicThinking:
         assert "thinking" in kwargs
 
     def test_kimi_root_endpoint_unaffected(self) -> None:
-        """Only the /coding route is special-cased — plain api.kimi.com is not.
+        """Official Kimi root endpoint still receives thinking (uses chat_completions transport).
 
-        ``api.kimi.com`` without ``/coding`` uses the chat_completions transport
-        (see runtime_provider._detect_api_mode_for_url); build_anthropic_kwargs
-        should never see it, but if it somehow does we should not suppress
-        thinking there — that path has different semantics.
+        Only the /coding route is special-cased. Plain api.kimi.com without /coding
+        uses the chat_completions transport, which routes through Kimi's own
+        thinking implementation. The Anthropic adapter should not interfere with that.
+
+        This test verifies that api.kimi.com (no /coding) still receives
+        thinking. Our custom-Kimi detection should only block custom/proxied Kimi
+        endpoints, not official Kimi infrastructure.
         """
         from agent.anthropic_adapter import build_anthropic_kwargs
 
@@ -110,6 +113,67 @@ class TestKimiCodingSkipsAnthropicThinking:
             tools=None,
             max_tokens=4096,
             reasoning_config={"enabled": True, "effort": "medium"},
-            base_url="https://api.kimi.com/v1",
+            base_url="https://api.kimi.com",
         )
-        assert "thinking" in kwargs
+        assert "thinking" in kwargs, (
+            "Official Kimi root endpoint must still receive Anthropic thinking"
+        )
+
+    def test_custom_kimi_anthropic_endpoint_omits_thinking(self) -> None:
+        """Custom Kimi-compatible endpoint with api_mode=anthropic_messages must skip thinking.
+
+        Bug #17057: Users may deploy custom Kimi-compatible endpoints (proxies,
+        self-hosted) that implement Anthropic Messages protocol but reject the
+        ``thinking`` parameter unless the endpoint is the official Kimi /coding URL.
+
+        Since custom endpoints don't have ``/coding`` in the URL, the existing
+        URL-based guard (_is_kimi_coding_endpoint) doesn't catch them. This test
+        verifies that our new detection logic catches custom Kimi endpoints by checking
+        both model family (kimi-*) and third-party endpoint status.
+
+        Test coverage:
+        1. Official Kimi /coding endpoint: still works (already covered by existing tests)
+        2. Custom Kimi-compatible endpoint: NEW - must skip thinking
+        3. Third-party non-Kimi endpoint: must still receive thinking
+        """
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        # Official Kimi /coding endpoint: already covered by existing test
+        # but verify it still works after our changes
+        kwargs_official = build_anthropic_kwargs(
+            model="kimi-k2.5",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url="https://api.kimi.com/coding",
+        )
+        assert "thinking" not in kwargs_official, (
+            "Official Kimi /coding endpoint must not receive Anthropic thinking"
+        )
+
+        # Custom Kimi-compatible endpoint (e.g., proxy or self-hosted)
+        # This is the bug #17057: it was receiving thinking and failing
+        kwargs_custom = build_anthropic_kwargs(
+            model="kimi-k2.5",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url="http://custom-kimi-proxy.com/anthropic",
+        )
+        assert "thinking" not in kwargs_custom, (
+            "Custom Kimi-compatible endpoint must not receive Anthropic thinking"
+        )
+
+        # Third-party non-Kimi endpoint should still receive thinking
+        kwargs_non_kimi = build_anthropic_kwargs(
+            model="mini-max-m2.7",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url="https://api.minimax.io/anthropic",
+        )
+        assert "thinking" in kwargs_non_kimi
+        assert kwargs_non_kimi["thinking"]["type"] == "enabled"

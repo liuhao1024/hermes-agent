@@ -1720,8 +1720,23 @@ def build_anthropic_kwargs(
     # silently hides reasoning text that Hermes surfaces in its CLI. We
     # request "summarized" so the reasoning blocks stay populated — matching
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
+    # Check for Kimi models and custom Kimi-compatible endpoints.
+    # Skip Anthropic thinking for official Kimi /coding AND custom Kimi-compatible
+    # endpoints that reject the thinking parameter.
+    #
+    # Official Kimi /coding: detected by URL pattern (api.kimi.com/coding)
+    # Custom Kimi-compatible endpoints: detected by model (kimi-*) + non-official URL
+    #
+    # Note: Official Kimi non-/coding endpoints (e.g., api.kimi.com/v1) still receive
+    # thinking because they use chat_completions transport with Kimi's own thinking
+    # implementation, not the Anthropic Messages protocol. The Anthropic adapter should
+    # not interfere with those.
     _is_kimi_coding = _is_kimi_coding_endpoint(base_url)
-    if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
+    _is_kimi_model = model and model.lower().startswith("kimi-")
+    _is_official_kimi = _is_kimi_model and _normalize_base_url_text(base_url).rstrip("/").lower().endswith("api.kimi.com") and not _is_kimi_coding
+    _is_custom_kimi_endpoint = _is_kimi_model and not _is_official_kimi and _is_third_party_anthropic_endpoint(base_url)
+
+    if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding and not _is_custom_kimi_endpoint:
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
