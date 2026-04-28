@@ -282,11 +282,11 @@ class TestSlackNativeSlashes:
 
     def test_names_respect_slack_limits(self):
         for name, _desc, _hint in slack_native_slashes():
-            # Slack: lowercase a-z, 0-9, hyphens, underscores; max 32 chars
+            # Slack: lowercase a-z, 0-9, hyphens; max 32 chars
             assert len(name) <= 32, f"slash {name!r} exceeds 32 chars"
             assert name == name.lower()
             for ch in name:
-                assert ch.isalnum() or ch in "-_", f"invalid char {ch!r} in {name!r}"
+                assert ch.isalnum() or ch == "-", f"invalid char {ch!r} in {name!r}"
 
     def test_under_fifty_command_cap(self):
         """Slack allows at most 50 slash commands per app."""
@@ -310,6 +310,38 @@ class TestSlackNativeSlashes:
         assert "bg" in names
         assert "reset" in names
         assert "q" in names
+
+    def test_slack_name_sanitization_rejects_underscores(self):
+        """Slack does not allow underscores in slash command names.
+
+        Regression test for issue #17054 where Slack rejected the generated
+        manifest with "the slash command has an invalid name".
+        """
+        from hermes_cli.commands import _sanitize_slack_name
+
+        # Valid characters: lowercase letters, digits, hyphens
+        assert _sanitize_slack_name("reload-mcp") == "reload-mcp"
+        assert _sanitize_slack_name("Model") == "model"
+        assert _sanitize_slack_name("Set-Home") == "set-home"
+
+        # Underscores are NOT allowed - they should be removed
+        assert _sanitize_slack_name("reload_mcp") == "reloadmcp"
+        assert _sanitize_slack_name("set_home") == "sethome"
+        assert _sanitize_slack_name("foo_bar_baz") == "foobarbaz"
+
+        # Mixed invalid characters
+        assert _sanitize_slack_name("Foo_Bar!@#") == "foobar"
+        assert _sanitize_slack_name("Test-123_ABC") == "test-123abc"
+
+        # Leading/trailing underscores should be stripped
+        assert _sanitize_slack_name("_foo_") == "foo"
+        assert _sanitize_slack_name("-bar-") == "bar"
+        assert _sanitize_slack_name("_baz-_") == "baz"
+
+        # Length limit (32 chars)
+        long_name = "a" * 40
+        sanitized = _sanitize_slack_name(long_name)
+        assert len(sanitized) == 32
 
     def test_telegram_parity(self):
         """Every Telegram bot command must be registerable on Slack too.

@@ -820,13 +820,13 @@ def discord_skill_commands_by_category(
 # commands per app.
 _SLACK_MAX_SLASH_COMMANDS = 50
 _SLACK_NAME_LIMIT = 32
-_SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9_\-]")
+_SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 
 
 def _sanitize_slack_name(raw: str) -> str:
     """Convert a command name to a valid Slack slash command name.
 
-    Slack allows lowercase a-z, digits, hyphens, and underscores. Max 32
+    Slack allows lowercase a-z, digits, and hyphens. Max 32
     chars. Uppercase is lowercased; invalid chars are stripped.
     """
     name = raw.lower()
