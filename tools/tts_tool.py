@@ -43,6 +43,24 @@ from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home
 
+try:
+    from hermes_cli.config import get_env_value as _real_get_env_value
+except Exception:
+    _real_get_env_value = os.getenv
+
+# Wrapper that supports optional default parameter (os.getenv pattern)
+def get_env_value(key: str, default: str = "") -> str:
+    """Get environment variable value with optional default.
+
+    Uses hermes_cli.config.get_env_value() if available,
+    otherwise falls back to os.getenv().
+    """
+    try:
+        return _real_get_env_value(key) or default
+    except AttributeError:
+        # Fallback when _real_get_env_value is os.getenv (no .default support)
+        return _real_get_env_value(key, default)
+
 logger = logging.getLogger(__name__)
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway, resolve_openai_audio_api_key
@@ -312,7 +330,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     Returns:
         Path to the saved audio file.
     """
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    api_key = get_env_value("ELEVENLABS_API_KEY", "")
     if not api_key:
         raise ValueError("ELEVENLABS_API_KEY not set. Get one at https://elevenlabs.io/")
 
@@ -406,7 +424,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     """
     import requests
 
-    api_key = os.getenv("XAI_API_KEY", "").strip()
+    api_key = get_env_value("XAI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("XAI_API_KEY not set. Get one at https://console.x.ai/")
 
@@ -479,7 +497,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     """
     import requests
 
-    api_key = os.getenv("MINIMAX_API_KEY", "")
+    api_key = get_env_value("MINIMAX_API_KEY", "")
     if not api_key:
         raise ValueError("MINIMAX_API_KEY not set. Get one at https://platform.minimax.io/")
 
@@ -556,7 +574,7 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
     and writes the raw bytes to *output_path*.
     Supports native Opus output for Telegram voice bubbles.
     """
-    api_key = os.getenv("MISTRAL_API_KEY", "")
+    api_key = get_env_value("MISTRAL_API_KEY", "")
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not set. Get one at https://console.mistral.ai/")
 
@@ -651,7 +669,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     """
     import requests
 
-    api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+    api_key = (get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY") or "").strip()
     if not api_key:
         raise ValueError(
             "GEMINI_API_KEY not set. Get one at https://aistudio.google.com/app/apikey"
@@ -1148,7 +1166,7 @@ def check_tts_requirements() -> bool:
         pass
     try:
         _import_elevenlabs()
-        if os.getenv("ELEVENLABS_API_KEY"):
+        if get_env_value("ELEVENLABS_API_KEY"):
             return True
     except ImportError:
         pass
@@ -1158,15 +1176,15 @@ def check_tts_requirements() -> bool:
             return True
     except ImportError:
         pass
-    if os.getenv("MINIMAX_API_KEY"):
+    if get_env_value("MINIMAX_API_KEY"):
         return True
-    if os.getenv("XAI_API_KEY"):
+    if get_env_value("XAI_API_KEY"):
         return True
-    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+    if get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY"):
         return True
     try:
         _import_mistral_client()
-        if os.getenv("MISTRAL_API_KEY"):
+        if get_env_value("MISTRAL_API_KEY"):
             return True
     except ImportError:
         pass
@@ -1278,7 +1296,7 @@ def stream_tts_to_speaker(
             {**tts_config, "elevenlabs": {**el_config, "model_id": model_id}},
         )
 
-        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        api_key = get_env_value("ELEVENLABS_API_KEY", "")
         if not api_key:
             logger.warning("ELEVENLABS_API_KEY not set; streaming TTS audio disabled")
         else:
