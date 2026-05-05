@@ -4422,6 +4422,37 @@ class AIAgent:
             )
         return messages
 
+
+    @staticmethod
+    def _ensure_tool_user_gap(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Insert empty assistant message between consecutive tool -> user transitions.
+
+        Some providers (notably Mistral) strictly enforce OpenAI's role ordering
+        rule: an ``assistant`` message must appear between ``tool`` results and
+        the next ``user`` message.  When a session is resumed from history that
+        ends with tool results (e.g. the assistant's final text response was not
+        persisted), the sequence ``[..., tool, user]`` violates this rule and
+        produces ``HTTP 400: Unexpected role 'user' after role 'tool'``.
+
+        This fix scans for the gap and inserts a minimal empty assistant message.
+        It is safe for all providers -- an empty assistant message is valid per
+        the OpenAI chat-completions spec.
+        """
+        if len(messages) < 2:
+            return messages
+        patched: List[Dict[str, Any]] = []
+        for i, msg in enumerate(messages):
+            patched.append(msg)
+            if msg.get("role") == "tool" and i + 1 < len(messages):
+                next_role = messages[i + 1].get("role")
+                if next_role == "user":
+                    patched.append({"role": "assistant", "content": ""})
+                    logger.debug(
+                        "Pre-call sanitizer: inserted empty assistant between tool and user at index %d",
+                        i,
+                    )
+        return patched
+
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
         """Truncate excess delegate_task calls to max_concurrent_children.
@@ -9418,6 +9449,10 @@ class AIAgent:
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
+
+            # Some providers (Mistral) require an assistant message between
+            # tool results and the next user message.  Insert one if missing.
+            api_messages = self._ensure_tool_user_gap(api_messages)
 
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,
