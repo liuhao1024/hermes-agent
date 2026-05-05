@@ -513,6 +513,8 @@ function PluginRowCard(props: PluginRowCardProps) {
                 onClick={() => {
                   void setRuntimeLoading(row.name, async () => {
                     await api.setPluginVisibility(row.name, !row.user_hidden);
+                    // Notify other components (e.g., sidebar) to re-fetch plugins.
+                    window.dispatchEvent(new CustomEvent('hermes:plugins:changed'));
                   });
                 }}
               >

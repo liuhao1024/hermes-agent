@@ -34,6 +34,22 @@ export function usePlugins() {
       .catch(() => setLoading(false));
   }, []);
 
+  // Re-fetch manifests when plugins change (e.g., visibility toggle).
+  useEffect(() => {
+    const handlePluginsChanged = () => {
+      api
+        .getPlugins()
+        .then((list) => {
+          setManifests(list);
+          if (list.length === 0) setLoading(false);
+        })
+        .catch(() => setLoading(false));
+    };
+
+    window.addEventListener('hermes:plugins:changed', handlePluginsChanged);
+    return () => window.removeEventListener('hermes:plugins:changed', handlePluginsChanged);
+  }, []);
+
   // Load plugin assets when manifests arrive.
   useEffect(() => {
     if (manifests.length === 0) return;
