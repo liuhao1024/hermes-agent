@@ -1344,6 +1344,21 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    # Bare "custom" provider with explicit credentials -- not in PROVIDER_REGISTRY.
+    # GH #24092: when fallback_providers uses provider: custom with an explicit
+    # base_url, _resolve_explicit_runtime returned None because "custom" is not
+    # in PROVIDER_REGISTRY, causing the resolution to fall through to OpenRouter.
+    if provider == "custom" and explicit_base_url:
+        api_mode = _detect_api_mode_for_url(explicit_base_url) or "chat_completions"
+        return {
+            "provider": "custom",
+            "api_mode": api_mode,
+            "base_url": explicit_base_url,
+            "api_key": explicit_api_key or "",
+            "source": "explicit",
+            "requested_provider": requested_provider,
+        }
+
     runtime = _resolve_openrouter_runtime(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
