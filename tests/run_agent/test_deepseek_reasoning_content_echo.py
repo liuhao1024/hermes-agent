@@ -481,3 +481,180 @@ class TestNeedsKimiToolReasoning:
         )
         # model name contains 'moonshot' but host is openrouter — should be False
         assert agent._needs_kimi_tool_reasoning() is False
+
+
+
+class TestNeedsMimoToolReasoning:
+    """_needs_mimo_tool_reasoning() recognises MiMo / Xiaomi detection signals."""
+
+    def test_provider_xiaomi(self) -> None:
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        assert agent._needs_mimo_tool_reasoning() is True
+
+    def test_provider_mimo_alias(self) -> None:
+        agent = _make_agent(provider="mimo", model="mimo-v2-pro")
+        assert agent._needs_mimo_tool_reasoning() is True
+
+    def test_provider_xiaomi_mimo_alias(self) -> None:
+        agent = _make_agent(provider="xiaomi-mimo", model="mimo-v2-pro")
+        assert agent._needs_mimo_tool_reasoning() is True
+
+    def test_base_url_host(self) -> None:
+        agent = _make_agent(
+            provider="custom",
+            model="mimo-v2-pro",
+            base_url="https://api.xiaomimimo.com/v1",
+        )
+        assert agent._needs_mimo_tool_reasoning() is True
+
+    def test_provider_case_insensitive(self) -> None:
+        agent = _make_agent(provider="Xiaomi", model="mimo-v2-pro")
+        assert agent._needs_mimo_tool_reasoning() is True
+
+    def test_non_mimo_provider(self) -> None:
+        agent = _make_agent(
+            provider="openrouter",
+            model="xiaomi/mimo-v2-pro",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert agent._needs_mimo_tool_reasoning() is False
+
+    def test_empty_everything(self) -> None:
+        agent = _make_agent()
+        assert agent._needs_mimo_tool_reasoning() is False
+
+
+class TestCopyReasoningContentForApiMimo:
+    """_copy_reasoning_content_for_api pads reasoning_content for MiMo."""
+
+    def test_mimo_tool_call_poisoned_history_gets_space_placeholder(self) -> None:
+        """Already-poisoned history (no reasoning_content, no reasoning) gets ' '."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        source = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "terminal"}}],
+        }
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg.get("reasoning_content") == " "
+
+    def test_mimo_assistant_no_tool_call_gets_padded(self) -> None:
+        """MiMo thinking mode pads ALL assistant turns, even without tool_calls."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        source = {"role": "assistant", "content": "hello"}
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg.get("reasoning_content") == " "
+
+    def test_mimo_explicit_reasoning_content_preserved(self) -> None:
+        """When reasoning_content is already set, it's copied verbatim."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        source = {
+            "role": "assistant",
+            "reasoning_content": "<think>real chain of thought</think>",
+            "tool_calls": [{"id": "c1", "function": {"name": "terminal"}}],
+        }
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg["reasoning_content"] == "<think>real chain of thought</think>"
+
+    def test_mimo_stale_empty_placeholder_upgraded_to_space(self) -> None:
+        """Sessions with ``reasoning_content=""`` should be upgraded to " "."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        source = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "terminal"}}],
+        }
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg["reasoning_content"] == " "
+
+    def test_mimo_custom_base_url(self) -> None:
+        """Custom provider pointing at api.xiaomimimo.com is detected via host."""
+        agent = _make_agent(
+            provider="custom",
+            model="whatever",
+            base_url="https://api.xiaomimimo.com/v1",
+        )
+        source = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "terminal"}}],
+        }
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg.get("reasoning_content") == " "
+
+    def test_mimo_reasoning_field_promoted(self) -> None:
+        """When only 'reasoning' is set, it gets promoted to reasoning_content."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        source = {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "thought trace",
+        }
+        api_msg: dict = {}
+        agent._copy_reasoning_content_for_api(source, api_msg)
+        assert api_msg["reasoning_content"] == "thought trace"
+
+
+class TestBuildAssistantMessageMimoReasoningContent:
+    """_build_assistant_message handles MiMo reasoning_content correctly."""
+
+    def test_mimo_model_extra_reasoning_content_is_preserved(self) -> None:
+        """OpenAI SDK stores unknown provider fields in model_extra."""
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        assistant_message = SimpleNamespace(
+            content=None,
+            reasoning=None,
+            reasoning_content=None,
+            model_extra={"reasoning_content": "MiMo model_extra reasoning"},
+            reasoning_details=None,
+            codex_reasoning_items=None,
+            codex_message_items=None,
+            tool_calls=[
+                SimpleNamespace(
+                    id="call_1",
+                    call_id=None,
+                    response_item_id=None,
+                    type="function",
+                    function=SimpleNamespace(name="terminal", arguments="{}"),
+                )
+            ],
+        )
+
+        msg = agent._build_assistant_message(assistant_message, "tool_calls")
+
+        assert msg["reasoning_content"] == "MiMo model_extra reasoning"
+
+    def test_mimo_tool_call_without_raw_reasoning_content_gets_space_placeholder(self) -> None:
+        agent = _make_agent(provider="xiaomi", model="mimo-v2-pro")
+        assistant_message = SimpleNamespace(
+            content=None,
+            reasoning=None,
+            reasoning_content=None,
+            reasoning_details=None,
+            codex_reasoning_items=None,
+            codex_message_items=None,
+            tool_calls=[
+                SimpleNamespace(
+                    id="call_1",
+                    call_id=None,
+                    response_item_id=None,
+                    type="function",
+                    function=SimpleNamespace(name="terminal", arguments="{}"),
+                )
+            ],
+        )
+
+        msg = agent._build_assistant_message(assistant_message, "tool_calls")
+
+        assert msg["reasoning_content"] == " "
+
+
+# Add MiMo cases to the existing parametrized test
+# (appended as new parametrize entries would require modifying the existing class,
+#  so we test the same behavior via the dedicated classes above)
