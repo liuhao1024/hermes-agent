@@ -4926,3 +4926,11 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
         server._sessions.pop("sid_busy", None)
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()
+
+
+def test_probe_credentials_no_key_required_placeholder():
+    """_probe_credentials must NOT warn when api_key is the 'no-key-required'
+    placeholder used by local/custom providers (llama.cpp, llama-swap, etc.)."""
+    agent = types.SimpleNamespace(api_key="no-key-required", provider="llama.cpp")
+    result = _probe_credentials(agent)
+    assert result is None, f"Expected None for 'no-key-required' placeholder, got: {result}"
