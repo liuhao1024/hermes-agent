@@ -64,9 +64,12 @@ describe('INLINE_RE emphasis', () => {
     expect(matches('print(__file__)')).toEqual([])
   })
 
-  it('still matches asterisk emphasis intraword', () => {
-    expect(matches('a*b*c')).toEqual(['*b*'])
-    expect(matches('a**bold**c')).toEqual(['**bold**'])
+  it('keeps intraword asterisks literal (like underscores)', () => {
+    // Intraword * is now literal, matching underscore behavior.
+    // This prevents C pointer syntax (uint8_t* base) from being
+    // misinterpreted as italic emphasis.
+    expect(matches('a*b*c')).toEqual([])
+    expect(matches('a**bold**c')).toEqual([])
   })
 
   it('matches short alphanumeric subscript (H~2~O, CO~2~, X~n~)', () => {
@@ -112,9 +115,27 @@ describe('stripInlineMarkup', () => {
     expect(stripInlineMarkup('H~2~O and CO~2~')).toBe('H_2O and CO_2')
   })
 
+
+  it('preserves C/C++ pointer asterisks', () => {
+    expect(stripInlineMarkup('uint8_t* base = (uint8_t*)0x20000000;')).toBe('uint8_t* base = (uint8_t*)0x20000000;')
+    expect(stripInlineMarkup('int* ptr = &val;')).toBe('int* ptr = &val;')
+  })
   it('strips inline math delimiters but keeps the formula text', () => {
     expect(stripInlineMarkup('$\\mathbb{Z}$ is a ring')).toBe('\\mathbb{Z} is a ring')
     expect(stripInlineMarkup('see \\(a + b\\) ok')).toBe('see a + b ok')
+  })
+
+  it('does not strip asterisks from C/C++ pointer syntax', () => {
+    // uint8_t* should not be interpreted as italic start
+    expect(matches('uint8_t* base = (uint8_t*)0x20000000;')).toEqual([])
+    expect(matches('int* ptr = &val;')).toEqual([])
+    expect(matches('(char*)buf')).toEqual([])
+  })
+
+  it('still matches legitimate italic with asterisks', () => {
+    expect(matches('say *hi* there')).toEqual(['*hi*'])
+    expect(matches('very **bold** today')).toEqual(['**bold**'])
+    expect(matches('a (*nested* )')).toEqual(['*nested*'])
   })
 })
 
