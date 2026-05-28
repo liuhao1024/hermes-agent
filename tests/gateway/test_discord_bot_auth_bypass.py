@@ -231,3 +231,40 @@ def test_discord_role_config_does_not_leak_to_other_platforms(monkeypatch):
         user_id="999888777",
     )
     assert runner._is_user_authorized(telegram_user) is False
+
+
+def test_pre_authorized_source_bypasses_gateway_auth(monkeypatch):
+    """When the adapter sets pre_authorized=True on the source (e.g., after
+    verifying DISCORD_ALLOWED_ROLES at the adapter layer), the gateway
+    must trust it and skip its own allowlist check.
+
+    This is the fix for #33952: role-authorized Discord users were rejected
+    by the gateway because _is_user_authorized only checked
+    DISCORD_ALLOWED_USERS, not DISCORD_ALLOWED_ROLES.
+    """
+    runner = _make_bare_runner()
+
+    # No allowlists configured — gateway would normally deny.
+    # But pre_authorized=True means the adapter already verified.
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="123",
+        chat_type="channel",
+        user_id="999888777",
+        user_name="RoleUser",
+        is_bot=False,
+        pre_authorized=True,
+    )
+    assert runner._is_user_authorized(source) is True
+
+
+def test_pre_authorized_false_still_requires_allowlist(monkeypatch):
+    """Sanity: sources without pre_authorized still go through the normal
+    allowlist / pairing / allow-all path.
+    """
+    runner = _make_bare_runner()
+
+    monkeypatch.setenv("DISCORD_ALLOWED_ROLES", "1493705176387948674")
+    # pre_authorized defaults to False
+    source = _make_discord_human_source(user_id="999888777")
+    assert runner._is_user_authorized(source) is False

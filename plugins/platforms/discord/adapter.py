@@ -4668,6 +4668,7 @@ class DiscordAdapter(BasePlatformAdapter):
             guild_id=str(guild.id) if guild else None,
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
+            pre_authorized=True,  # Caller (on_message) already verified DISCORD_ALLOWED_USERS / DISCORD_ALLOWED_ROLES
         )
 
         # Build media URLs -- download image attachments to local cache so the

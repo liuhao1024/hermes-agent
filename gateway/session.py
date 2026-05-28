@@ -91,6 +91,7 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    pre_authorized: bool = False  # True when the adapter has already verified user authorization (e.g., Discord role-based auth)
     
     @property
     def description(self) -> str:

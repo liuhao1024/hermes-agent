@@ -6454,6 +6454,15 @@ class GatewayRunner:
         if source.platform in {Platform.HOMEASSISTANT, Platform.WEBHOOK}:
             return True
 
+        # If the adapter has already verified user authorization (e.g.,
+        # Discord role-based auth via DISCORD_ALLOWED_ROLES), trust it.
+        # The adapter's _is_allowed_user / _is_user_allowed checks both
+        # user-ID and role-based allowlists before the message reaches
+        # the gateway, so a second check here would incorrectly reject
+        # role-authorized users.
+        if source.pre_authorized:
+            return True
+
         user_id = source.user_id
 
         # Telegram (and similar) authorize entire group/forum/channel chats

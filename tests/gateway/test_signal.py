@@ -370,8 +370,9 @@ class TestSignalAuthorization:
         source = MagicMock()
         source.platform = Platform.SIGNAL
         source.user_id = "+15559999999"
+        source.pre_authorized = False  # Explicitly opt out of adapter-level auth
 
-        # No allowlists set — should check GATEWAY_ALLOW_ALL_USERS
+        # No allowlists set
         with patch.dict("os.environ", {}, clear=True):
             result = gw._is_user_authorized(source)
             assert result is False
@@ -960,9 +961,9 @@ class TestSignalTypingBackoff:
         assert "+155****4567" in adapter._typing_skip_until
 
         # Chat B is unaffected — still makes RPCs.
-        await adapter.send_typing("+155****9999")
-        await adapter.send_typing("+155****9999")
-        assert "+155****9999" not in adapter._typing_skip_until
+        await adapter.send_typing("+15559999999")
+        await adapter.send_typing("+15559999999")
+        assert "+15559999999" not in adapter._typing_skip_until
         # Chat A cooldown untouched
         assert "+155****4567" in adapter._typing_skip_until
 
@@ -1673,7 +1674,7 @@ class TestSignalContentlessEnvelope:
         # Profile key update: dataMessage exists but has no "message" field
         await adapter._handle_envelope({
             "envelope": {
-                "sourceNumber": "+155****9999",
+                "sourceNumber": "+15559999999",
                 "sourceUuid": "05668cf3-8ffa-467e-9b24-f5eefa5cf475",
                 "sourceName": "Elliott McManis",
                 "timestamp": 1777600696077,
@@ -1699,7 +1700,7 @@ class TestSignalContentlessEnvelope:
 
         await adapter._handle_envelope({
             "envelope": {
-                "sourceNumber": "+155****9999",
+                "sourceNumber": "+15559999999",
                 "sourceUuid": "05668cf3-8ffa-467e-9b24-f5eefa5cf475",
                 "sourceName": "Elliott McManis",
                 "timestamp": 1777600696077,
@@ -1724,7 +1725,7 @@ class TestSignalContentlessEnvelope:
 
         await adapter._handle_envelope({
             "envelope": {
-                "sourceNumber": "+155****9999",
+                "sourceNumber": "+15559999999",
                 "sourceUuid": "05668cf3-8ffa-467e-9b24-f5eefa5cf475",
                 "sourceName": "Elliott McManis",
                 "timestamp": 1777600696077,
@@ -1755,7 +1756,7 @@ class TestSignalContentlessEnvelope:
         with patch("gateway.platforms.signal.cache_image_from_bytes", return_value="/tmp/img.png"):
             await adapter._handle_envelope({
                 "envelope": {
-                    "sourceNumber": "+155****9999",
+                    "sourceNumber": "+15559999999",
                     "sourceUuid": "05668cf3-8ffa-467e-9b24-f5eefa5cf475",
                     "sourceName": "Elliott McManis",
                     "timestamp": 1777600696077,
@@ -1782,7 +1783,7 @@ class TestSignalContentlessEnvelope:
 
         await adapter._handle_envelope({
             "envelope": {
-                "sourceNumber": "+155****9999",
+                "sourceNumber": "+15559999999",
                 "sourceUuid": "05668cf3-8ffa-467e-9b24-f5eefa5cf475",
                 "sourceName": "Elliott McManis",
                 "timestamp": 1777600696077,
