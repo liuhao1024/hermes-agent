@@ -268,3 +268,62 @@ def test_pre_authorized_false_still_requires_allowlist(monkeypatch):
     # pre_authorized defaults to False
     source = _make_discord_human_source(user_id="999888777")
     assert runner._is_user_authorized(source) is False
+
+# -----------------------------------------------------------------------------
+# pre_authorized flag: adapter-verified allowlist bypass (#33952 / #33993)
+#
+# The Discord adapter sets pre_authorized=True ONLY when it actually
+# consulted a configured allowlist (DISCORD_ALLOWED_USERS or
+# DISCORD_ALLOWED_ROLES). When no allowlist is configured, pre_authorized
+# stays False so gateway default-deny / pairing checks still apply.
+# -----------------------------------------------------------------------------
+
+
+def test_pre_authorized_bypasses_gateway_checks_when_allowlist_configured(monkeypatch):
+    """When the adapter verified the user via a configured allowlist and set
+    pre_authorized=True, the gateway must trust it and skip its own checks."""
+    runner = _make_bare_runner()
+
+    # No gateway allowlist or allow-all — without pre_authorized this would
+    # reject the user.
+    source = _make_discord_human_source(user_id="999888777")
+    source.pre_authorized = True
+    assert runner._is_user_authorized(source) is True
+
+
+def test_pre_authorized_false_falls_through_to_normal_checks(monkeypatch):
+    """When pre_authorized=False (no adapter allowlist configured), the
+    gateway's normal checks (pairing, allowlist, allow-all) must apply."""
+    runner = _make_bare_runner()
+
+    source = _make_discord_human_source(user_id="999888777")
+    source.pre_authorized = False
+    # No pairing, no allowlist, no allow-all → must be rejected.
+    assert runner._is_user_authorized(source) is False
+
+
+def test_no_allowlist_no_pre_authorized_default_deny(monkeypatch):
+    """Regression guard for the security issue in #33993: when Discord has
+    NO DISCORD_ALLOWED_USERS and NO DISCORD_ALLOWED_ROLES configured, a
+    human source must NOT be pre_authorized. The gateway must enforce
+    default-deny / pairing."""
+    runner = _make_bare_runner()
+
+    # Simulate the adapter's behavior: no allowlist → pre_authorized stays False
+    source = _make_discord_human_source(user_id="999888777")
+    # pre_authorized defaults to False on SessionSource
+    assert source.pre_authorized is False
+    # No pairing, no allowlist, no allow-all → must be rejected.
+    assert runner._is_user_authorized(source) is False
+
+
+def test_pre_authorized_with_gateway_allow_all_still_works(monkeypatch):
+    """pre_authorized and GATEWAY_ALLOW_ALL_USERS are independent — both
+    should authorize the user."""
+    runner = _make_bare_runner()
+
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    source = _make_discord_human_source(user_id="999888777")
+    source.pre_authorized = False
+    # Gateway allow-all should still work even without pre_authorized.
+    assert runner._is_user_authorized(source) is True
