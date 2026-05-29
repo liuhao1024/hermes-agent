@@ -12846,6 +12846,7 @@ class HermesCLI:
                 if self._should_handle_steer_command_inline(text, has_images=has_images):
                     self.process_command(text)
                     event.app.current_buffer.reset(append_to_history=True)
+                    event.app.invalidate()
                     return
 
                 # Snapshot and clear attached images
