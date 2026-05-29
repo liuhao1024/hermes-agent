@@ -1832,11 +1832,13 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
 
 
 def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
-    """Build a CodexAuxiliaryClient for an xAI Grok OAuth-authenticated session.
+    """Build a plain OpenAI client for an xAI Grok OAuth-authenticated session.
 
-    xAI's ``/v1/responses`` endpoint speaks the OpenAI Responses API, so we
-    wrap a plain ``OpenAI`` client in ``CodexAuxiliaryClient`` to translate
-    ``chat.completions.create()`` calls into ``responses.stream()`` requests.
+    xAI OAuth tokens are authorized for the standard Chat Completions API
+    (``/v1/chat/completions``) but NOT the Responses API (``/v1/responses``).
+    Wrapping in ``CodexAuxiliaryClient`` would route auxiliary calls through
+    the Responses API, causing HTTP 403 errors.  Return a plain ``OpenAI``
+    client so ``chat.completions.create()`` hits the correct endpoint.
 
     The caller must pass an explicit model — pinning a default for Grok
     would silently rot when xAI's allowlist drifts.  Returns ``(None, None)``
@@ -1852,9 +1854,9 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
     if resolved is None:
         return None, None
     api_key, base_url = resolved
-    logger.debug("Auxiliary client: xAI OAuth (%s via Responses API)", model)
+    logger.debug("Auxiliary client: xAI OAuth (%s via Chat Completions API)", model)
     real_client = OpenAI(api_key=api_key, base_url=base_url)
-    return CodexAuxiliaryClient(real_client, model), model
+    return real_client, model
 
 
 def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
