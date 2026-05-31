@@ -211,7 +211,10 @@ def _parse_dialectic_depth_levels(host_val, root_val, depth: int) -> list[str] |
 # run_conversation; without a cap the agent can block indefinitely when
 # the Honcho backend is unreachable, preventing the gateway from
 # delivering the already-generated response.
-_DEFAULT_HTTP_TIMEOUT = 30.0
+# Issue #36098: Bumped from 30s to 60s — dialectic queries with
+# reasoning_level=medium can take 30-60s on rich representations,
+# causing confusing partial failures where search works but reasoning times out.
+_DEFAULT_HTTP_TIMEOUT = 60.0
 
 
 def _resolve_optional_float(*values: Any) -> float | None:
@@ -439,8 +442,13 @@ class HonchoClientConfig:
             or raw.get("aiPeer")
             or resolved_host
         )
+        # Issue #36098: Recursive fallback for apiKey
+        # Order: hosts.hermes.<profile> -> hosts.hermes -> top-level -> env
+        hosts = raw.get("hosts") or {}
+        default_block = hosts.get(HOST, {})
         api_key = (
             host_block.get("apiKey")
+            or default_block.get("apiKey")
             or raw.get("apiKey")
             or os.environ.get("HONCHO_API_KEY")
         )
@@ -828,14 +836,11 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         or "::1" in resolved_base_url
     )
     if _is_local:
-        # Check if the host block has its own apiKey (explicit local auth).
-        # Auth-skipping is loopback-only: a stored key is likely a cloud key
-        # that would break a no-auth local server, so we substitute the SDK's
-        # required-non-empty placeholder unless the host block opts in.
-        _raw = config.raw or {}
-        _host_block = (_raw.get("hosts") or {}).get(config.host, {})
-        _host_has_key = bool(_host_block.get("apiKey"))
-        effective_api_key = config.api_key if _host_has_key else "local"
+        # Issue #36098: Trust config.api_key when non-empty, regardless of _is_local.
+        # The "skip cloud key on local" intent is only triggered by an explicit
+        # localOnly flag, not by URL string matching. Self-hosted Honcho instances
+        # with AUTH_USE_AUTH require a real JWT, not the placeholder "local".
+        effective_api_key = config.api_key or "local"
     else:
         effective_api_key = config.api_key
 

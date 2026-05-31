@@ -657,8 +657,10 @@ class HonchoSessionManager:
                 result = result[:self._dialectic_max_chars].rsplit(" ", 1)[0] + " …"
             return result
         except Exception as e:
+            # Issue #36098: Return non-empty error marker to distinguish from
+            # "no relevant data" so LLM and operator can diagnose auth/timeout issues.
             logger.warning("Honcho dialectic query failed: %s", e)
-            return ""
+            return f"[honcho_error: {type(e).__name__}]"
 
     def prefetch_context(self, session_key: str, user_message: str | None = None) -> None:
         """
