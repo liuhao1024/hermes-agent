@@ -475,6 +475,55 @@ class TestWaitForCallbackNoBlocking:
                 with pytest.raises(OAuthNonInteractiveError, match="callback timed out"):
                     asyncio.run(_wait_for_callback())
 
+    def test_paste_thread_skipped_in_background_thread(self, monkeypatch):
+        """When called from a background thread, _wait_for_callback must NOT
+        start a stdin-reading paste thread — that would steal input from the
+        TUI/CLI and freeze the shell (#35927)."""
+        import tools.mcp_oauth as mod
+        import asyncio
+        import threading
+
+        mod._oauth_port = _find_free_port()
+
+        # Make stdin appear interactive so the old code would start the paste thread
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = True
+        monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
+
+        async def instant_sleep(_seconds):
+            pass
+
+        paste_started = threading.Event()
+        original_thread_init = threading.Thread.__init__
+
+        def tracking_thread_init(self, *args, **kwargs):
+            original_thread_init(self, *args, **kwargs)
+            if self.name is None or "paste" in (self._name or "").lower():
+                paste_started.set()
+
+        # Run _wait_for_callback from a background thread
+        result_holder = {}
+        error_holder = {}
+
+        def bg_target():
+            async def run():
+                with patch.object(mod.asyncio, "sleep", instant_sleep):
+                    with patch.object(threading.Thread, "__init__", tracking_thread_init):
+                        try:
+                            await _wait_for_callback()
+                        except Exception as e:
+                            error_holder["err"] = e
+            asyncio.run(run())
+
+        bg = threading.Thread(target=bg_target, daemon=True)
+        bg.start()
+        bg.join(timeout=5)
+
+        # No paste thread should have been started
+        assert not paste_started.is_set(), (
+            "Paste thread was started in a background thread — would freeze TUI"
+        )
+
 
 class TestBuildOAuthAuthNonInteractive:
     """build_oauth_auth() in non-interactive mode."""

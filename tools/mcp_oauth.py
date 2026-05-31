@@ -492,12 +492,16 @@ async def _wait_for_callback() -> tuple[str, str | None]:
     server_thread = threading.Thread(target=server.handle_request, daemon=True)
     server_thread.start()
 
-    # Optional paste-fallback thread: only on interactive TTYs. Reads one
-    # line from stdin and writes the parsed code/state into the shared
-    # result dict. The HTTP listener and this thread race for the result;
-    # whichever fills it first wins.
+    # Optional paste-fallback thread: only on interactive TTYs **and only on
+    # the main thread**.  When MCP discovery runs in a background daemon
+    # thread (the default for CLI and TUI since #35273/#35397), reading
+    # stdin here would steal input from prompt_toolkit / Ink and freeze the
+    # shell.  The HTTP callback server remains the primary OAuth path; the
+    # paste fallback is a convenience for the (rare) case where discovery
+    # runs inline on the main thread.
     paste_thread: threading.Thread | None = None
-    if _is_interactive():
+    _on_main_thread = threading.current_thread() is threading.main_thread()
+    if _is_interactive() and _on_main_thread:
         print(
             "\n  Or paste the redirect URL here (or the ``?code=...&state=...`` "
             "portion) and press Enter. Type ``skip`` + Enter to continue "
