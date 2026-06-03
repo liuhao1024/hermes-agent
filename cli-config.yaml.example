@@ -315,6 +315,15 @@ browser:
   # after this period of no activity between agent loops (default: 120 = 2 minutes)
   inactivity_timeout: 120
 
+  # Camofox browser backend configuration (requires CAMOFOX_URL in .env)
+  # camofox:
+  #   # Viewport dimensions for screenshots (default: server default, typically 1280x720)
+  #   # Set to match your display resolution for non-cropped screenshots.
+  #   # Width: 320-3840, Height: 240-2160
+  #   viewport:
+  #     width: 1920
+  #     height: 1080
+
 # =============================================================================
 # Tool Loop Guardrails
 # =============================================================================
