@@ -194,6 +194,11 @@ _MACOS_PRIVATE_SYSTEM_PATH = r'/private/(?:etc|var|tmp|home)/'
 _SYSTEM_CONFIG_PATH = (
     rf'(?:/etc/|{_MACOS_PRIVATE_SYSTEM_PATH})'
 )
+# Windows drive-letter root paths (C:/, D:\, etc.).  On Windows (git-bash),
+# paths like X:/file or X:\file bypass the Unix-only "/" root-path patterns.
+# This fragment is used in DANGEROUS_PATTERNS to catch rm, redirect, cp, mv,
+# sed -i, etc. targeting drive-letter paths.  See #38964.
+_WINDOWS_DRIVE_PATH = r'[a-zA-Z]:[\\\\/]'
 _SENSITIVE_WRITE_TARGET = (
     rf'(?:{_SYSTEM_CONFIG_PATH}|/dev/sd|'
     rf'{_SSH_SENSITIVE_PATH}|'
@@ -365,7 +370,10 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # =========================================================================
 
 DANGEROUS_PATTERNS = [
-    (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
+    # Unix root path (/) and Windows drive-letter paths (C:/, D:\).
+    # On Windows (git-bash), `rm X:/file` silently deletes without prompting
+    # because the old pattern only matched "/" as root.  See #38964.
+    (r'\brm\s+(-[^\s]*\s+)*(?:/|[a-zA-Z]:[\\/])', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
     (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
     (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
@@ -401,6 +409,11 @@ DANGEROUS_PATTERNS = [
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
     (rf'\btee\b.*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via tee"),
     (rf'>>?\s*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via redirection"),
+    # Redirect/tee to Windows drive-letter paths -- same threat class as the
+    # Unix root-path patterns above but for Windows (git-bash) environments.
+    # `> X:/Windows/System32/config` or `tee D:\file` bypass Unix-only checks.
+    (rf'\btee\b.*["\']?{_WINDOWS_DRIVE_PATH}', "tee to Windows drive path"),
+    (rf'>>?\s*["\']?{_WINDOWS_DRIVE_PATH}', "redirect to Windows drive path"),
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
     # find -exec rm / -execdir rm — the -execdir variant (same semantics,
     # runs in the directory of each match) was previously missed. Claude

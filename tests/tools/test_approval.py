@@ -58,6 +58,34 @@ class TestDetectDangerousRm:
         assert key is not None
         assert "delete" in desc.lower()
 
+    def test_rm_windows_drive_letter_forward_slash(self):
+        """Windows drive-letter paths (C:/, X:/) must be caught.  #38964."""
+        is_dangerous, key, desc = detect_dangerous_command("rm C:/Users/test/file.txt")
+        assert is_dangerous is True
+        assert "delete" in desc.lower()
+
+    def test_rm_windows_drive_letter_backslash(self):
+        """Windows backslash paths (D:\\) must be caught.  #38964."""
+        is_dangerous, key, desc = detect_dangerous_command("rm D:\\Users\\test\\file.txt")
+        assert is_dangerous is True
+        assert "delete" in desc.lower()
+
+    def test_rm_windows_drive_letter_with_flags(self):
+        """rm -f X:/path must be caught.  #38964."""
+        is_dangerous, key, desc = detect_dangerous_command("rm -f X:/PROJECTs/test/test.txt")
+        assert is_dangerous is True
+        assert "delete" in desc.lower()
+
+    def test_rm_relative_path_not_dangerous(self):
+        """Relative paths should not trigger root-path detection."""
+        is_dangerous, _, _ = detect_dangerous_command("rm relative/path/file.txt")
+        assert is_dangerous is False
+
+    def test_rm_dot_relative_not_dangerous(self):
+        """./relative paths should not trigger root-path detection."""
+        is_dangerous, _, _ = detect_dangerous_command("rm ./file.txt")
+        assert is_dangerous is False
+
 
 class TestDetectDangerousSudo:
     def test_shell_via_c_flag(self):
@@ -388,6 +416,17 @@ class TestTeePattern:
         assert dangerous is False
         assert key is None
 
+    def test_tee_windows_drive_path(self):
+        """tee to Windows drive-letter path must be caught.  #38964."""
+        dangerous, key, desc = detect_dangerous_command("echo x | tee C:/output.txt")
+        assert dangerous is True
+        assert "windows drive" in desc.lower() or "tee" in desc.lower()
+
+    def test_tee_windows_drive_backslash(self):
+        """tee to Windows backslash path must be caught.  #38964."""
+        dangerous, key, desc = detect_dangerous_command("echo x | tee D:\\output.txt")
+        assert dangerous is True
+
 
 class TestHermesConfigWriteProtection:
     """Terminal-side pairing for the file_tools write_file/patch deny on
@@ -504,6 +543,18 @@ class TestSensitiveRedirectPattern:
         assert dangerous is False
         assert key is None
         assert desc is None
+
+    def test_redirect_to_windows_drive_path(self):
+        """Redirect to Windows drive-letter path must be caught.  #38964."""
+        dangerous, key, desc = detect_dangerous_command("echo test > X:/tmp/output.txt")
+        assert dangerous is True
+        assert "windows drive" in desc.lower()
+
+    def test_append_to_windows_drive_path(self):
+        """Append to Windows drive-letter path must be caught.  #38964."""
+        dangerous, key, desc = detect_dangerous_command("echo test >> C:/log.txt")
+        assert dangerous is True
+        assert "windows drive" in desc.lower()
 
 
 class TestProjectSensitiveCopyPattern:
