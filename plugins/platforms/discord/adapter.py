@@ -6461,6 +6461,15 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
         os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
+    # max_attachment_bytes: per-attachment byte cap (0 = unlimited).
+    # The adapter reads self.config.extra then falls back to the env var;
+    # both are invisible without this YAML→env bridge.
+    mab = discord_cfg.get("max_attachment_bytes")
+    if mab is not None and not os.getenv("DISCORD_MAX_ATTACHMENT_BYTES"):
+        os.environ["DISCORD_MAX_ATTACHMENT_BYTES"] = str(mab)
+    # allow_any_attachment: bypass attachment-type restrictions.
+    if "allow_any_attachment" in discord_cfg and not os.getenv("DISCORD_ALLOW_ANY_ATTACHMENT"):
+        os.environ["DISCORD_ALLOW_ANY_ATTACHMENT"] = str(discord_cfg["allow_any_attachment"]).lower()
     return None  # all settings flow through env; nothing to merge into extras
 
 
@@ -6499,7 +6508,8 @@ def register(ctx) -> None:
         # ``discord:`` keys (require_mention, free_response_channels,
         # auto_thread, reactions, ignored_channels, allowed_channels,
         # no_thread_channels, allow_mentions.*, reply_to_mode,
-        # thread_require_mention) into ``DISCORD_*`` env vars that the
+        # thread_require_mention, max_attachment_bytes,
+        # allow_any_attachment) into ``DISCORD_*`` env vars that the
         # adapter reads via ``os.getenv()``.  Replaces the hardcoded block
         # that used to live in ``gateway/config.py``.  Hook contract: #24836.
         apply_yaml_config_fn=_apply_yaml_config,

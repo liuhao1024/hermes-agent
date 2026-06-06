@@ -529,3 +529,52 @@ class TestAllowAnyAttachment:
         adapter.config.extra["max_attachment_bytes"] = "not-a-number"
         assert adapter._discord_max_attachment_bytes() == 32 * 1024 * 1024
 
+
+# ---------------------------------------------------------------------------
+# YAML→env config bridge for max_attachment_bytes and allow_any_attachment
+# ---------------------------------------------------------------------------
+
+
+class TestYamlConfigMaxAttachmentBytes:
+    """_apply_yaml_config should bridge max_attachment_bytes to env var."""
+
+    def test_yaml_max_attachment_bytes_sets_env(self, monkeypatch):
+        """Setting discord.max_attachment_bytes in YAML should set the env var."""
+        monkeypatch.delenv("DISCORD_MAX_ATTACHMENT_BYTES", raising=False)
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        _apply_yaml_config({}, {"max_attachment_bytes": 67108864})
+        assert os.environ.get("DISCORD_MAX_ATTACHMENT_BYTES") == "67108864"
+
+    def test_yaml_max_attachment_bytes_does_not_override_env(self, monkeypatch):
+        """Explicit env var takes precedence over YAML config."""
+        monkeypatch.setenv("DISCORD_MAX_ATTACHMENT_BYTES", "134217728")
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        _apply_yaml_config({}, {"max_attachment_bytes": 67108864})
+        assert os.environ["DISCORD_MAX_ATTACHMENT_BYTES"] == "134217728"
+
+    def test_yaml_allow_any_attachment_sets_env(self, monkeypatch):
+        """Setting discord.allow_any_attachment in YAML should set the env var."""
+        monkeypatch.delenv("DISCORD_ALLOW_ANY_ATTACHMENT", raising=False)
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        _apply_yaml_config({}, {"allow_any_attachment": True})
+        assert os.environ.get("DISCORD_ALLOW_ANY_ATTACHMENT") == "true"
+
+    def test_yaml_allow_any_attachment_false(self, monkeypatch):
+        """Setting discord.allow_any_attachment=false should set env to 'false'."""
+        monkeypatch.delenv("DISCORD_ALLOW_ANY_ATTACHMENT", raising=False)
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        _apply_yaml_config({}, {"allow_any_attachment": False})
+        assert os.environ.get("DISCORD_ALLOW_ANY_ATTACHMENT") == "false"
+
+    def test_yaml_allow_any_attachment_does_not_override_env(self, monkeypatch):
+        """Explicit env var takes precedence over YAML config."""
+        monkeypatch.setenv("DISCORD_ALLOW_ANY_ATTACHMENT", "true")
+        from plugins.platforms.discord.adapter import _apply_yaml_config
+
+        _apply_yaml_config({}, {"allow_any_attachment": False})
+        assert os.environ["DISCORD_ALLOW_ANY_ATTACHMENT"] == "true"
+
