@@ -2110,7 +2110,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 _stripped = deliver_content.strip().upper()
                 if should_deliver and success and SILENT_MARKER in _stripped:
                     if _stripped == SILENT_MARKER:
-                        logger.info("Job '%s': wakeAgent=false or empty output — skipping delivery", job["id"])
+                        logger.info("Job '%s': gate or empty output returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     else:
                         logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
