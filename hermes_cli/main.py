@@ -8134,6 +8134,19 @@ def _update_via_zip(args):
     # bug --branch was added to prevent. Refuse to proceed in that case
     # rather than lie.
     branch = _resolve_update_branch(args)
+    tag = getattr(args, "tag", None)
+    if tag:
+        print(
+            f"✗ --tag={tag} is not supported on the Windows ZIP-fallback "
+            "update path."
+        )
+        print(
+            "  This path runs when git file I/O is broken on the system. "
+            "Either resolve the git-side breakage (typically an antivirus "
+            "or NTFS filter holding files open) and rerun `hermes update "
+            f"--tag {tag}`, or update against main with `hermes update`."
+        )
+        sys.exit(1)
     if branch != "main":
         print(
             f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
@@ -10030,6 +10043,60 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         print(f"  Run '{recommended_update_command()}' to install.")
 
 
+def _cmd_update_check_tag(tag: str) -> None:
+    """Implement ``hermes update --check --tag=TAG``: verify tag exists on remote."""
+    from hermes_cli.config import detect_install_method
+
+    method = detect_install_method(PROJECT_ROOT)
+    if method == "docker":
+        from hermes_cli.config import format_docker_update_message
+
+        print(format_docker_update_message())
+        sys.exit(1)
+    if method == "pip":
+        print("⚠ --tag is not supported for PyPI installs.")
+        sys.exit(1)
+
+    git_cmd = ["git"]
+    print(f"→ Fetching tags from origin...")
+    fetch_result = subprocess.run(
+        git_cmd + ["fetch", "origin", "--tags"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if fetch_result.returncode != 0:
+        stderr = fetch_result.stderr.strip()
+        if "Could not resolve host" in stderr or "unable to access" in stderr:
+            print("✗ Network error — cannot reach the remote repository.")
+        else:
+            print("✗ Failed to fetch tags.")
+            if stderr:
+                print(f"  {stderr.splitlines()[0]}")
+        sys.exit(1)
+
+    # Check if the tag exists locally (fetch --tags updates local refs).
+    verify_result = subprocess.run(
+        git_cmd + ["tag", "-l", tag],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if verify_result.stdout.strip() == tag:
+        # Get the commit the tag points to.
+        sha_result = subprocess.run(
+            git_cmd + ["rev-list", "-1", tag],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        sha = sha_result.stdout.strip()[:10]
+        print(f"✓ Tag '{tag}' found (commit {sha}).")
+    else:
+        print(f"✗ Tag '{tag}' not found on origin.")
+        sys.exit(1)
+
+
 def _ensure_fhs_path_guard() -> None:
     """Ensure /usr/local/bin is on PATH for RHEL-family root non-login shells.
 
@@ -10270,6 +10337,13 @@ def cmd_update(args):
         managed_error("update Hermes Agent")
         return
 
+    # --tag and --branch are mutually exclusive.
+    tag = getattr(args, "tag", None)
+    branch = getattr(args, "branch", None)
+    if tag and branch:
+        print("✗ --tag and --branch are mutually exclusive.")
+        sys.exit(1)
+
     # Docker users can't ``git pull`` — the image excludes ``.git`` from
     # the build context.  Bail with a friendly explanation pointing at
     # ``docker pull`` BEFORE any of the apply-path / check-path branches
@@ -10281,13 +10355,16 @@ def cmd_update(args):
         sys.exit(1)
 
     if getattr(args, "check", False):
-        # --check honors --branch so the "any new commits?" answer matches
-        # what a subsequent `hermes update --branch=<x>` would actually pull.
-        branch = _resolve_update_branch(args)
-        _cmd_update_check(
-            branch=branch,
-            branch_explicit=bool(getattr(args, "branch", None)),
-        )
+        if tag:
+            _cmd_update_check_tag(tag)
+        else:
+            # --check honors --branch so the "any new commits?" answer matches
+            # what a subsequent `hermes update --branch=<x>` would actually pull.
+            resolved_branch = _resolve_update_branch(args)
+            _cmd_update_check(
+                branch=resolved_branch,
+                branch_explicit=bool(branch),
+            )
         return
 
     gateway_mode = getattr(args, "gateway", False)
@@ -10482,10 +10559,83 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _update_via_zip(args)
         return
 
-    # Fetch and pull
-    try:
+    # --tag: tag-based update path (fetches tags, validates, checks out tag).
+    # Sets _tag_ref on success so the branch-based fetch/pull logic below
+    # is skipped and execution falls through to the shared post-update code
+    # (stash restore, pip install, node deps, desktop build, skill sync, etc.).
+    _tag_ref = None
+    tag = getattr(args, "tag", None)
+    if tag:
+        print("→ Fetching tags from origin...")
+        fetch_result = subprocess.run(
+            git_cmd + ["fetch", "origin", "--tags"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if fetch_result.returncode != 0:
+            stderr = fetch_result.stderr.strip()
+            if "Could not resolve host" in stderr or "unable to access" in stderr:
+                print("✗ Network error — cannot reach the remote repository.")
+            else:
+                print("✗ Failed to fetch tags.")
+                if stderr:
+                    print(f"  {stderr.splitlines()[0]}")
+            sys.exit(1)
 
-        print("→ Fetching updates...")
+        # Validate tag exists.
+        verify_result = subprocess.run(
+            git_cmd + ["tag", "-l", tag],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if verify_result.stdout.strip() != tag:
+            print(f"✗ Tag '{tag}' not found.")
+            suggest_result = subprocess.run(
+                git_cmd + ["tag", "-l", f"{tag}*"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            suggestions = suggest_result.stdout.strip().splitlines()
+            if suggestions:
+                print("  Did you mean one of these?")
+                for s in suggestions[:5]:
+                    print(f"    {s}")
+            sys.exit(1)
+
+        _tag_ref = tag
+
+    # Fetch and pull
+    auto_stash_ref = None
+    update_succeeded = False
+    prompt_for_restore = False
+    try:
+        if _tag_ref:
+            # Tag-based update: stash, checkout tag.
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            prompt_for_restore = (
+                auto_stash_ref is not None
+                and not assume_yes
+                and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
+            )
+            print(f"→ Checking out tag '{_tag_ref}'...")
+            checkout_result = subprocess.run(
+                git_cmd + ["checkout", _tag_ref],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if checkout_result.returncode != 0:
+                print(f"✗ Failed to checkout tag '{_tag_ref}'.")
+                if checkout_result.stderr.strip():
+                    print(f"  {checkout_result.stderr.strip().splitlines()[0]}")
+                sys.exit(1)
+            update_succeeded = True
+        else:
+
+            print("→ Fetching updates...")
         fetch_result = subprocess.run(
             git_cmd + ["fetch", "origin"],
             cwd=PROJECT_ROOT,
@@ -10714,6 +10864,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 sys.exit(1)
 
             update_succeeded = True
+        # end else (branch path)
         finally:
             if auto_stash_ref is not None:
                 # Don't attempt stash restore if the code update itself failed —
@@ -10752,8 +10903,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
+        # Fork upstream sync logic (only for main branch on forks, not tag updates)
+        if not _tag_ref and is_fork and branch == "main":
             _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra

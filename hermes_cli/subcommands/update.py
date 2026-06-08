@@ -62,6 +62,16 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         ),
     )
     update_parser.add_argument(
+        "--tag",
+        default=None,
+        metavar="TAG",
+        help=(
+            "Update to a specific git tag (e.g. v0.16.0). "
+            "Checks out the tag in detached HEAD state. "
+            "Mutually exclusive with --branch."
+        ),
+    )
+    update_parser.add_argument(
         "--force",
         action="store_true",
         default=False,
