@@ -2765,6 +2765,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enabled and the model supports Priority Processing / Anthropic fast
         mode, attach `request_overrides` so the API call is marked
         accordingly.
+
+        Also merges ``model.generation_params`` from config (e.g.
+        ``temperature``, ``top_p``, ``top_k``) into ``request_overrides``
+        so custom/local providers receive user-configured sampling defaults.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -2791,15 +2795,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         }
 
-        service_tier = getattr(self, "_service_tier", None)
-        if not service_tier:
-            route["request_overrides"] = {}
-            return route
+        overrides: dict = {}
 
+        # Fast-mode overrides (service_tier)
+        service_tier = getattr(self, "_service_tier", None)
+        if service_tier:
+            try:
+                fast_overrides = resolve_fast_mode_overrides(route["model"])
+                if fast_overrides:
+                    overrides.update(fast_overrides)
+            except Exception:
+                pass
+
+        # User-configured generation_params (temperature, top_p, top_k, etc.)
         try:
-            overrides = resolve_fast_mode_overrides(route["model"])
+            from hermes_cli.config import load_config as _load_full_config
+            _model_cfg = (_load_full_config() or {}).get("model")
+            if isinstance(_model_cfg, dict):
+                _gen_params = _model_cfg.get("generation_params")
+                if isinstance(_gen_params, dict):
+                    overrides.update(_gen_params)
         except Exception:
-            overrides = None
+            pass
+
         route["request_overrides"] = overrides or {}
         return route
 

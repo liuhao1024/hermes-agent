@@ -178,6 +178,10 @@ class CLIAgentSetupMixin:
         toggled `/fast` on and the current model supports Priority
         Processing / Anthropic fast mode, attach `request_overrides` so the
         API call is marked accordingly.
+
+        Also merges ``model.generation_params`` from config (e.g.
+        ``temperature``, ``top_p``, ``top_k``) into ``request_overrides``
+        so custom/local providers receive user-configured sampling defaults.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -203,16 +207,30 @@ class CLIAgentSetupMixin:
             ),
         }
 
-        service_tier = getattr(self, "service_tier", None)
-        if not service_tier:
-            route["request_overrides"] = None
-            return route
+        overrides: dict = {}
 
+        # Fast-mode overrides (service_tier)
+        service_tier = getattr(self, "service_tier", None)
+        if service_tier:
+            try:
+                fast_overrides = resolve_fast_mode_overrides(route["model"])
+                if fast_overrides:
+                    overrides.update(fast_overrides)
+            except Exception:
+                pass
+
+        # User-configured generation_params (temperature, top_p, top_k, etc.)
         try:
-            overrides = resolve_fast_mode_overrides(route["model"])
+            from cli import CLI_CONFIG
+            _model_cfg = CLI_CONFIG.get("model")
+            if isinstance(_model_cfg, dict):
+                _gen_params = _model_cfg.get("generation_params")
+                if isinstance(_gen_params, dict):
+                    overrides.update(_gen_params)
         except Exception:
-            overrides = None
-        route["request_overrides"] = overrides
+            pass
+
+        route["request_overrides"] = overrides or None
         return route
 
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:

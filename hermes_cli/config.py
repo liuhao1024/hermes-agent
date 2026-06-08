@@ -800,6 +800,18 @@ def _ensure_hermes_home_managed(home: Path):
 # =============================================================================
 
 DEFAULT_CONFIG = {
+    # Model configuration.  Can be a plain string (shorthand model ID) or a
+    # dict with keys: default, provider, base_url, context_length,
+    # persist_last, generation_params, etc.
+    # Example dict form:
+    #   model:
+    #     default: my-local-model
+    #     provider: custom
+    #     base_url: http://localhost:8080/v1
+    #     generation_params:        # forwarded as top-level API request params
+    #       temperature: 1.0
+    #       top_p: 0.95
+    #       top_k: 64
     "model": "",
     "providers": {},
     "fallback_providers": [],
