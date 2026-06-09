@@ -96,16 +96,19 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
             f"wouldn't round-trip through the memory tool (likely added by "
             f"the patch tool, a shell append, a manual edit, or a "
             f"concurrent session). A snapshot was saved to {bak_path}. "
-            f"Resolve the drift first — either rewrite the file as a clean "
-            f"§-delimited list of entries, or move the extra content out — "
-            f"then retry. This guard exists to prevent silent data loss "
+            f"Recovery: call memory(action='resync') to re-read the file "
+            f"from disk, normalize it, and clear this error — then retry "
+            f"your mutation. This guard exists to prevent silent data loss "
             f"(issue #26045)."
         ),
         "drift_backup": bak_path,
         "remediation": (
-            "Open the .bak file, integrate the missing entries into the "
-            "memory tool one at a time via memory(action=add, content=...), "
-            "then remove or rewrite the original file to a clean state."
+            "Call memory(action='resync', target='<target>') to normalize "
+            "the file and clear the drift, then retry your add/replace/remove. "
+            "Alternatively, open the .bak file, integrate the missing entries "
+            "into the memory tool one at a time via memory(action=add, "
+            "content=...), then remove or rewrite the original file to a "
+            "clean state."
         ),
     }
 
@@ -411,6 +414,45 @@ class MemoryStore:
 
         return self._success_response(target, "Entry replaced.")
 
+    def resync(self, target: str) -> Dict[str, Any]:
+        """Re-read the memory file from disk, normalize, and write back clean.
+
+        Recovery path for drift: when external tools (patch, shell append,
+        manual edit, sister session) modify the memory file in a way that
+        breaks the §-delimited round-trip, the drift guard refuses all
+        mutations.  Calling resync() reads the current on-disk content,
+        normalizes it into clean entries, and writes it back — clearing the
+        drift condition so future add/replace/remove calls succeed.
+
+        The .bak snapshot created by the drift detector is preserved on disk
+        for manual recovery if needed.
+        """
+        with self._file_lock(self._path_for(target)):
+            path = self._path_for(target)
+            if not path.exists():
+                return self._success_response(target, "File does not exist; nothing to resync.")
+
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, IOError) as exc:
+                return {"success": False, "error": f"Cannot read {path.name}: {exc}"}
+
+            if not raw.strip():
+                self._set_entries(target, [])
+                self.save_to_disk(target)
+                return self._success_response(target, "File was empty; entries cleared.")
+
+            # Normalize: parse with the same logic as _read_file, dedupe, write back
+            parsed = [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+            deduped = list(dict.fromkeys(parsed))
+            self._set_entries(target, deduped)
+            self.save_to_disk(target)
+
+        return self._success_response(
+            target,
+            f"Resynced from disk: {len(deduped)} entries normalized and saved.",
+        )
+
     def remove(self, target: str, old_text: str) -> Dict[str, Any]:
         """Remove the entry containing old_text substring."""
         old_text = old_text.strip()
@@ -641,8 +683,11 @@ def memory_tool(
             return tool_error("old_text is required for 'remove' action.", success=False)
         result = store.remove(target, old_text)
 
+    elif action == "resync":
+        result = store.resync(target)
+
     else:
-        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove, resync", success=False)
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -678,7 +723,7 @@ MEMORY_SCHEMA = {
         "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
         "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
-        "remove (delete -- old_text identifies it).\n\n"
+        "remove (delete -- old_text identifies it), resync (re-read from disk after drift error).\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
     "parameters": {
@@ -686,8 +731,8 @@ MEMORY_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
-                "description": "The action to perform."
+                "enum": ["add", "replace", "remove", "resync"],
+                "description": "The action to perform. 'resync' re-reads from disk and normalizes — use after drift errors."
             },
             "target": {
                 "type": "string",

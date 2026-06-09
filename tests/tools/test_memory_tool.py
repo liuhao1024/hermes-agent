@@ -8,6 +8,7 @@ from tools.memory_tool import (
     MemoryStore,
     memory_tool,
     _scan_memory_content,
+    _drift_error,
     MEMORY_SCHEMA,
 )
 
@@ -650,3 +651,181 @@ class TestLoadTimeSnapshotSanitization:
         # Block marker appears exactly once, not nested
         assert snapshot.count("[BLOCKED:") == 1
         assert "Clean fact" in snapshot
+
+
+# ════════════════════════════════════════════════════════════════════════
+# resync action — drift recovery
+# ════════════════════════════════════════════════════════════════════════
+
+
+def _inject_roundtrip_drift(path: Path):
+    """Write content that won't round-trip through the parser.
+
+    Empty §-delimited segments are stripped during parse → re-serialize
+    changes the bytes, triggering the round-trip mismatch signal.
+    """
+    raw = path.read_text()
+    path.write_text(raw + "\n§\n\n§\nextra_drift_content")
+
+
+class TestResync:
+    """Tests for the 'resync' action added to recover from drift."""
+
+    def test_resync_clean_file(self, store):
+        """resync on a clean file returns success with entry count."""
+        store.add("memory", "alpha")
+        store.add("memory", "beta")
+        result = store.resync("memory")
+        assert result["success"] is True
+        assert "2 entries" in result["message"]
+
+    def test_resync_normalizes_drifted_file(self, store):
+        """resync clears drift caused by round-trip mismatch."""
+        store.add("memory", "first")
+        store.add("memory", "second")
+
+        path = store._path_for("memory")
+        _inject_roundtrip_drift(path)
+
+        # Drift should be detected
+        assert store._detect_external_drift("memory") is not None
+
+        # Resync clears drift
+        result = store.resync("memory")
+        assert result["success"] is True
+
+        # Drift is now cleared
+        assert store._detect_external_drift("memory") is None
+
+    def test_resync_preserves_all_entries(self, store):
+        """resync keeps all parsed entries including externally-added content."""
+        store.add("memory", "original entry")
+
+        path = store._path_for("memory")
+        raw = path.read_text()
+        path.write_text(raw + "\n§\nexternally added entry")
+
+        result = store.resync("memory")
+        assert result["success"] is True
+        assert "original entry" in store.memory_entries
+        assert "externally added entry" in store.memory_entries
+
+    def test_resync_deduplicates(self, store):
+        """resync removes duplicate entries (keeps first occurrence)."""
+        store.add("memory", "dup entry")
+
+        path = store._path_for("memory")
+        raw = path.read_text()
+        path.write_text(raw + "\n§\ndup entry")
+
+        result = store.resync("memory")
+        assert result["success"] is True
+        assert store.memory_entries.count("dup entry") == 1
+
+    def test_resync_empty_file(self, store):
+        """resync on an empty file clears entries."""
+        store.add("memory", "something")
+        path = store._path_for("memory")
+        path.write_text("")
+
+        result = store.resync("memory")
+        assert result["success"] is True
+        assert store.memory_entries == []
+
+    def test_resync_nonexistent_file(self, store):
+        """resync on a nonexistent file returns success with message."""
+        path = store._path_for("memory")
+        if path.exists():
+            path.unlink()
+
+        result = store.resync("memory")
+        assert result["success"] is True
+        assert "does not exist" in result["message"]
+
+    def test_resync_user_target(self, store):
+        """resync works for user target too."""
+        store.add("user", "user fact")
+        result = store.resync("user")
+        assert result["success"] is True
+        assert "user fact" in store.user_entries
+
+    def test_add_succeeds_after_resync(self, store):
+        """add() works normally after resync clears drift."""
+        store.add("memory", "entry one")
+        path = store._path_for("memory")
+        _inject_roundtrip_drift(path)
+
+        # Before resync, add fails with drift error
+        drift_result = store.add("memory", "should fail")
+        assert drift_result["success"] is False
+        assert "round-trip" in drift_result.get("error", "").lower()
+
+        # Resync clears it
+        store.resync("memory")
+
+        # Now add succeeds
+        result = store.add("memory", "should work now")
+        assert result["success"] is True
+        assert "should work now" in store.memory_entries
+
+    def test_replace_succeeds_after_resync(self, store):
+        """replace() works normally after resync clears drift."""
+        store.add("memory", "replaceable content")
+        path = store._path_for("memory")
+        _inject_roundtrip_drift(path)
+
+        store.resync("memory")
+
+        result = store.replace("memory", "replaceable", "new content")
+        assert result["success"] is True
+        assert "new content" in store.memory_entries
+
+    def test_remove_succeeds_after_resync(self, store):
+        """remove() works normally after resync clears drift."""
+        store.add("memory", "removable entry")
+        path = store._path_for("memory")
+        _inject_roundtrip_drift(path)
+
+        store.resync("memory")
+
+        result = store.remove("memory", "removable")
+        assert result["success"] is True
+        assert "removable entry" not in store.memory_entries
+
+    def test_drift_error_suggests_resync(self):
+        """_drift_error message mentions resync as recovery path."""
+        err = _drift_error(Path("/fake/MEMORY.md"), "/fake/MEMORY.md.bak.123")
+        assert "resync" in err["error"]
+        assert "resync" in err["remediation"]
+
+    def test_memory_tool_dispatch_resync(self, store):
+        """memory_tool('resync') dispatches to store.resync()."""
+        store.add("memory", "test entry")
+        result_str = memory_tool(action="resync", target="memory", store=store)
+        result = json.loads(result_str)
+        assert result["success"] is True
+        assert "1 entries" in result["message"]
+
+    def test_memory_tool_dispatch_resync_invalid_target(self, store):
+        """memory_tool('resync') rejects invalid target."""
+        result_str = memory_tool(action="resync", target="invalid", store=store)
+        result = json.loads(result_str)
+        assert result["success"] is False
+        assert "Invalid target" in result["error"]
+
+    def test_unknown_action_error_includes_resync(self, store):
+        """Error for unknown action lists resync as valid option."""
+        result_str = memory_tool(action="bogus", target="memory", store=store)
+        result = json.loads(result_str)
+        assert result["success"] is False
+        assert "resync" in result["error"]
+
+    def test_schema_enum_includes_resync(self):
+        """MEMORY_SCHEMA action enum includes 'resync'."""
+        actions = MEMORY_SCHEMA["parameters"]["properties"]["action"]["enum"]
+        assert "resync" in actions
+
+    def test_schema_description_mentions_resync(self):
+        """MEMORY_SCHEMA description mentions resync."""
+        desc = MEMORY_SCHEMA["description"]
+        assert "resync" in desc
