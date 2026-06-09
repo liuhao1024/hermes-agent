@@ -165,7 +165,7 @@ class TestRecoveryKeySecurity:
              patch.object(matrix_mod, "_STORE_DIR", tmp_path), \
              patch.object(adapter, "_refresh_dm_cache", AsyncMock()), \
              patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)), \
-             patch("pathlib.Path.write_text", side_effect=raise_os_error), \
+             patch("os.open", side_effect=raise_os_error), \
              patch("gateway.platforms.matrix.logger") as mock_logger:
             await adapter.connect()
 
@@ -272,5 +272,38 @@ class TestRecoveryKeySecurity:
         # No .recovery_key_once file should be created
         secret_file = tmp_path / ".recovery_key_once"
         assert not secret_file.exists()
+
+        await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_symlink_attack_prevented_by_o_excl(self, tmp_path):
+        """Pre-existing symlink at .recovery_key_once must cause OSError (O_EXCL)."""
+        adapter, _, _, fake_mautrix = _setup_adapter_and_stubs(tmp_path)
+        from gateway.platforms import matrix as matrix_mod
+
+        # Create a symlink at the target path pointing to an arbitrary file
+        target_file = tmp_path / "attacker_target.txt"
+        target_file.write_text("attacker data")
+        secret_file = tmp_path / ".recovery_key_once"
+        secret_file.symlink_to(target_file)
+
+        with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True), \
+             patch.dict("sys.modules", fake_mautrix), \
+             patch.object(matrix_mod, "_STORE_DIR", tmp_path), \
+             patch.object(adapter, "_refresh_dm_cache", AsyncMock()), \
+             patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)), \
+             patch("gateway.platforms.matrix.logger") as mock_logger:
+            # connect() should handle the OSError internally and fall back
+            result = await adapter.connect()
+
+        # The attacker's file should NOT contain the recovery key
+        assert target_file.read_text() == "attacker data"
+
+        # A warning about write failure should have been logged
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        write_failed = any("could not write" in c for c in warning_calls)
+        assert write_failed, (
+            f"Expected write failure warning, got: {warning_calls}"
+        )
 
         await adapter.disconnect()
