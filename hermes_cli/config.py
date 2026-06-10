@@ -589,7 +589,7 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home  # noqa: F811,E402
+from hermes_constants import get_hermes_home, get_default_hermes_root  # noqa: F811,E402
 from utils import atomic_replace
 
 def get_config_path() -> Path:
@@ -5332,6 +5332,30 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             return copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
 
         config = copy.deepcopy(DEFAULT_CONFIG)
+
+        # When loading a profile config, first merge the root (default
+        # profile) config so that dict-valued keys like ``providers``,
+        # ``custom_providers``, and ``credential_pool_strategies`` are
+        # inherited instead of replaced.
+        _root_config_path = get_default_hermes_root() / "config.yaml"
+        _is_profile = config_path != _root_config_path
+        if _is_profile and _root_config_path.is_file():
+            try:
+                with open(_root_config_path, encoding="utf-8") as f:
+                    _root_config = yaml.safe_load(f) or {}
+                if isinstance(_root_config, dict) and _root_config:
+                    config = _deep_merge(config, _root_config)
+                    # Extend cache key with root config mtime so root
+                    # config changes invalidate the profile cache.
+                    if cache_key is not None:
+                        try:
+                            _rst = _root_config_path.stat()
+                            cache_key = (cache_key[0] ^ _rst.st_mtime_ns,
+                                         cache_key[1] ^ _rst.st_size)
+                        except (FileNotFoundError, OSError):
+                            pass
+            except Exception:
+                pass  # Root config is optional; don't break profile loading
 
         if cache_key is not None:
             try:
