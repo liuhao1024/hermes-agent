@@ -2183,3 +2183,73 @@ class TestPreflightSentinelGuard:
         compressor.last_prompt_tokens = 50_000
         result = self._seed(compressor.last_prompt_tokens, 10_000)
         assert result == 50_000
+
+
+class TestMaxTokensReservation:
+    """Context compaction threshold should account for output-token reservation."""
+
+    def test_init_subtracts_max_tokens_from_input_budget(self):
+        """With max_tokens and context_length, threshold uses the reduced input budget.
+        context=262144, max_tokens=65536 -> input_budget=196608, threshold=196608*0.5=98304."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=262144):
+            c = ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                quiet_mode=True,
+                max_tokens=65536,
+            )
+        assert c.context_length == 262144
+        assert c.threshold_tokens == 98304
+
+    def test_init_without_max_tokens_uses_full_context(self):
+        """Without max_tokens, threshold uses the full context_length."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=262144):
+            c = ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                quiet_mode=True,
+            )
+        assert c.threshold_tokens == 131072
+
+    def test_update_model_subtracts_max_tokens(self):
+        """update_model should also respect max_tokens reservation."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=262144):
+            c = ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                quiet_mode=True,
+            )
+        assert c.threshold_tokens == 131072
+
+        c.update_model(
+            model="test/model-v2",
+            context_length=262144,
+            max_tokens=65536,
+        )
+        assert c.context_length == 262144
+        # (262144 - 65536) * 0.50 = 98304
+        assert c.threshold_tokens == 98304
+
+    def test_update_model_without_max_tokens_uses_full_context(self):
+        """update_model without max_tokens uses full context_length."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=262144):
+            c = ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                quiet_mode=True,
+            )
+        c.update_model(model="test/model-v2", context_length=262144)
+        assert c.threshold_tokens == 131072
+
+    def test_small_max_tokens_does_not_go_below_minimum(self):
+        """Very large max_tokens should not push threshold below MINIMUM."""
+        from agent.context_compressor import MINIMUM_CONTEXT_LENGTH
+        with patch("agent.context_compressor.get_model_context_length", return_value=131072):
+            c = ContextCompressor(
+                model="test/model",
+                threshold_percent=0.50,
+                quiet_mode=True,
+                max_tokens=130000,  # leaves only 1072 tokens input budget
+            )
+        # 1072 * 0.50 = 536, but MINIMUM_CONTEXT_LENGTH should kick in
+        assert c.threshold_tokens >= MINIMUM_CONTEXT_LENGTH

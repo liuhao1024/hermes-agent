@@ -577,6 +577,7 @@ class ContextCompressor(ContextEngine):
         api_key: Any = "",
         provider: str = "",
         api_mode: str = "",
+        max_tokens: int | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
         self.model = model
@@ -585,8 +586,11 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
+        # Reserve output tokens from the input budget so compaction triggers
+        # before the provider rejects the request for exceeding context+output.
+        _input_budget = context_length - max_tokens if max_tokens else context_length
         self.threshold_tokens = max(
-            int(context_length * self.threshold_percent),
+            int(_input_budget * self.threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
         )
         # Recalculate token budgets for the new context length so the
@@ -612,6 +616,7 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        max_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -628,18 +633,22 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+        self.max_tokens = max_tokens
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
             config_context_length=config_context_length,
             provider=provider,
         )
+        # Reserve output tokens from the input budget so compaction triggers
+        # before the provider rejects the request for exceeding context+output.
+        _input_budget = self.context_length - max_tokens if max_tokens else self.context_length
         # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
         # the percentage would suggest a lower value.  This prevents premature
         # compression on large-context models at 50% while keeping the % sane
         # for models right at the minimum.
         self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
+            int(_input_budget * threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
         )
         self.compression_count = 0
