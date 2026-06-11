@@ -13237,6 +13237,7 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    effort: str = None,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -13369,6 +13370,16 @@ def main(
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
     )
+
+    # --effort: override reasoning_config for this session (ephemeral)
+    if effort:
+        from hermes_constants import parse_reasoning_effort
+
+        effort_config = parse_reasoning_effort(effort)
+        if effort_config is None:
+            valid = "none, minimal, low, medium, high, xhigh"
+            raise ValueError(f"Invalid --effort value '{effort}'. Valid: {valid}")
+        cli.reasoning_config = effort_config
 
     if parsed_skills:
         skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(

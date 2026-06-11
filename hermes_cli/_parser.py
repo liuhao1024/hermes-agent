@@ -393,5 +393,14 @@ def build_top_level_parser():
         default=False,
         help="With --tui: run TypeScript sources via tsx (skip dist build)",
     )
+    chat_parser.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        default=None,
+        help=(
+            "Set reasoning effort for this session (ephemeral, not persisted). "
+            "Valid values: none, minimal, low, medium, high, xhigh."
+        ),
+    )
 
     return parser, subparsers, chat_parser
