@@ -553,3 +553,91 @@ async def test_gating_isolated_per_platform():
     tg_src = _make_source(platform=Platform.TELEGRAM, user_id="999", chat_id="t1")
     result = await runner._handle_message(_make_event("/whoami", tg_src))
     assert "Tier: unrestricted" in result
+
+
+# ---------------------------------------------------------------------------
+# Quick commands access control (security fix for #44727)
+#
+# Quick commands must respect the same admin/user policy as built-in
+# slash commands.  Without the fix, a non-admin can execute exec-type
+# quick commands that run arbitrary shell commands in the gateway process.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_quick_command_exec_denied_for_non_admin():
+    """Non-admin user cannot run exec-type quick commands when policy is active."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    # Add quick_commands to the GatewayConfig object
+    runner.config.quick_commands = {
+        "shell": {"type": "exec", "command": "echo quick-command-bypass-confirmed"},
+    }
+    src = _make_source(user_id="999")  # non-admin
+
+    result = await runner._handle_message(_make_event("/shell", src))
+    assert result is not None
+    assert "⛔" in result
+    assert "quick-command-bypass-confirmed" not in result
+
+
+@pytest.mark.asyncio
+async def test_quick_command_exec_allowed_for_admin():
+    """Admin user CAN run exec-type quick commands."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    runner.config.quick_commands = {
+        "hello": {"type": "exec", "command": "echo hello-admin"},
+    }
+    src = _make_source(user_id="111")  # admin
+
+    result = await runner._handle_message(_make_event("/hello", src))
+    assert result is not None
+    assert "⛔" not in result
+    assert "hello-admin" in result
+
+
+@pytest.mark.asyncio
+async def test_quick_command_exec_backward_compat_no_policy():
+    """When no admin policy is set, quick commands work for everyone (backward compat)."""
+    runner = _make_runner(
+        platform_extra={},  # no allow_admin_from → policy disabled
+    )
+    runner.config.quick_commands = {
+        "ping": {"type": "exec", "command": "echo pong"},
+    }
+    src = _make_source(user_id="999")
+
+    result = await runner._handle_message(_make_event("/ping", src))
+    assert result is not None
+    assert "⛔" not in result
+    assert "pong" in result
+
+
+@pytest.mark.asyncio
+async def test_quick_command_in_user_allowed_list():
+    """Quick command explicitly listed in user_allowed_commands is allowed for non-admin."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": ["shell"],  # explicitly allow /shell
+        }
+    )
+    runner.config.quick_commands = {
+        "shell": {"type": "exec", "command": "echo allowed"},
+    }
+    src = _make_source(user_id="999")  # non-admin
+
+    result = await runner._handle_message(_make_event("/shell", src))
+    assert result is not None
+    assert "⛔" not in result
+    assert "allowed" in result
+

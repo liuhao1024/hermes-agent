@@ -7356,6 +7356,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not isinstance(quick_commands, dict):
                 quick_commands = {}
             if command in quick_commands:
+                # Security: apply admin/user slash-access policy to quick commands
+                # (same gate as built-in commands at line 7067). Without this,
+                # non-admin users can bypass allow_admin_from via exec-type
+                # quick commands. Fixes #44727.
+                _denied = self._check_slash_access(source, command)
+                if _denied is not None:
+                    return _denied
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
                     exec_cmd = qcmd.get("command", "")
