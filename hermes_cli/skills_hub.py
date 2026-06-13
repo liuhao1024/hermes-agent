@@ -400,10 +400,19 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     # Paginate
     total = len(deduped)
     total_pages = max(1, (total + page_size - 1) // page_size)
+    _requested_page = page
     page = max(1, min(page, total_pages))
     start = (page - 1) * page_size
     end = min(start + page_size, total)
     page_items = deduped[start:end]
+
+    # Hint when --page was clamped (e.g. official catalog fits on one page)
+    if _requested_page > total_pages:
+        c.print(
+            f"  [dim]page {_requested_page} requested; "
+            f"only {total_pages} page(s) available. "
+            f"Showing page {page}.[/]"
+        )
 
     # Count official vs other
     official_count = sum(1 for r in deduped if r.source == "official")
