@@ -741,10 +741,15 @@ class SessionStore:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for key, entry_data in data.items():
+                        if not isinstance(entry_data, dict):
+                            # Skip corrupted entries (e.g. bare bool/null
+                            # values from a partial write) — #46994
+                            continue
                         try:
                             self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
-                            # Skip entries with unknown/removed platform values
+                        except (ValueError, KeyError, TypeError):
+                            # Skip entries with unknown/removed platform
+                            # values or type mismatches in nested fields
                             continue
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")

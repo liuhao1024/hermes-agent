@@ -1309,3 +1309,73 @@ class TestRewriteTranscriptPreservesReasoning:
             "before user",
             "before assistant",
         ]
+
+
+class TestSessionStoreCorruptedEntries:
+    """Regression: corrupted sessions.json entries (bool/null) must not
+    prevent loading valid sessions.  (#46994)"""
+
+    def test_bool_entry_skipped_without_error(self, tmp_path, monkeypatch, capsys):
+        """A sessions.json containing a bare ``true`` value must load
+        cleanly — the corrupted entry is skipped, valid entries survive."""
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+
+        from datetime import datetime, timezone
+
+        valid_entry = {
+            "session_key": "tg:123:dm",
+            "session_id": "sess_valid",
+            "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "chat_type": "dm",
+        }
+
+        sessions_file = tmp_path / "sessions.json"
+        sessions_file.write_text(
+            __import__("json").dumps({
+                "tg:123:dm": valid_entry,
+                "corrupted_bool": True,
+                "corrupted_null": None,
+                "corrupted_string": "not a dict",
+            }),
+            encoding="utf-8",
+        )
+
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        # Trigger load via _ensure_loaded_locked (needs lock held)
+        with store._lock:
+            store._ensure_loaded_locked()
+
+        # Valid entry survived
+        assert "tg:123:dm" in store._entries
+        assert store._entries["tg:123:dm"].session_id == "sess_valid"
+
+        # Corrupted entries were silently skipped
+        assert "corrupted_bool" not in store._entries
+        assert "corrupted_null" not in store._entries
+        assert "corrupted_string" not in store._entries
+
+        # No "Failed to load sessions" warning printed
+        captured = capsys.readouterr()
+        assert "Failed to load sessions" not in captured.out
+
+    def test_all_corrupted_entries_load_empty(self, tmp_path, monkeypatch, capsys):
+        """When every entry in sessions.json is corrupted, the store
+        loads as empty without raising."""
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+
+        sessions_file = tmp_path / "sessions.json"
+        sessions_file.write_text(
+            __import__("json").dumps({"a": True, "b": False, "c": None}),
+            encoding="utf-8",
+        )
+
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        with store._lock:
+            store._ensure_loaded_locked()
+
+        assert len(store._entries) == 0
+        captured = capsys.readouterr()
+        assert "Failed to load sessions" not in captured.out
