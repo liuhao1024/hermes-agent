@@ -134,3 +134,63 @@ class TestPortBindingHardError:
                   "wecom_callback", "bluebubbles", "sms"):
             assert p in _PORT_BINDING_PLATFORM_VALUES
 
+
+
+class _ConfigTokenAdapter:
+    """Simulates adapters like Telegram that store the token at config.token."""
+    def __init__(self, token=None):
+        class _Cfg:
+            pass
+        self.config = _Cfg()
+        self.config.token = token
+
+
+class TestCredentialFingerprintConfigToken:
+    """Regression test for #51030: _adapter_credential_fingerprint must also
+    probe adapter.config.token for adapters that store credentials there
+    (Telegram, and any plugin adapter following the config.token convention)."""
+
+    def test_finds_token_at_config_token(self):
+        a = _ConfigTokenAdapter(token="telegram-bot-token")
+        fp = GatewayRunner._adapter_credential_fingerprint(a)
+        assert fp is not None
+        assert len(fp) == 16
+        assert "telegram-bot-token" not in fp
+
+    def test_none_when_config_token_empty(self):
+        a = _ConfigTokenAdapter(token="")
+        assert GatewayRunner._adapter_credential_fingerprint(a) is None
+
+    def test_none_when_no_config(self):
+        class _NoConfigAdapter:
+            pass
+        assert GatewayRunner._adapter_credential_fingerprint(_NoConfigAdapter()) is None
+
+    def test_direct_attr_takes_precedence_over_config(self):
+        """If an adapter has both self.token and self.config.token, the direct
+        attribute wins (first match in the loop)."""
+        a = _ConfigTokenAdapter(token="config-tok")
+        a.token = "direct-tok"
+        fp = GatewayRunner._adapter_credential_fingerprint(a)
+        fp_direct = GatewayRunner._adapter_credential_fingerprint(
+            _FakeAdapter(token="direct-tok")
+        )
+        assert fp == fp_direct  # direct attr wins
+
+    def test_stable_fingerprint_for_config_token(self):
+        fp1 = GatewayRunner._adapter_credential_fingerprint(
+            _ConfigTokenAdapter(token="same-tok")
+        )
+        fp2 = GatewayRunner._adapter_credential_fingerprint(
+            _ConfigTokenAdapter(token="same-tok")
+        )
+        assert fp1 == fp2
+
+    def test_distinct_config_tokens_distinct_fp(self):
+        fp_a = GatewayRunner._adapter_credential_fingerprint(
+            _ConfigTokenAdapter(token="tok-A")
+        )
+        fp_b = GatewayRunner._adapter_credential_fingerprint(
+            _ConfigTokenAdapter(token="tok-B")
+        )
+        assert fp_a != fp_b

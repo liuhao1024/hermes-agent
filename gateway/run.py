@@ -7102,6 +7102,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if isinstance(val, str) and val.strip():
                 token = val.strip()
                 break
+        # Plugin adapters (Telegram, etc.) store the token at
+        # adapter.config.token rather than as a direct instance attribute.
+        if not token:
+            cfg = getattr(adapter, "config", None)
+            cfg_token = getattr(cfg, "token", None)
+            if isinstance(cfg_token, str) and cfg_token.strip():
+                token = cfg_token.strip()
         if not token:
             return None
         import hashlib
