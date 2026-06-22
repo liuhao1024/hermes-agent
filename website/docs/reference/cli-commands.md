@@ -540,7 +540,7 @@ The cron **trigger** is pluggable via the `cron.provider` config key. Empty
 (the default) uses the built-in in-process ticker. Set it to `chronos` (the
 NAS-managed provider for scale-to-zero hosted gateways) — configured via the
 `cron.chronos.*` keys (`portal_url`, `callback_url`, `expected_audience`,
-`nas_jwks_url`) — or name a custom provider under `plugins/cron/<name>/` or
+`nas_jwks_url`) — or name a custom provider under `plugins/cron_providers/<name>/` or
 `$HERMES_HOME/plugins/<name>/`. An unknown or unavailable provider falls back to
 the built-in, so cron is never left without a trigger. See the
 [cron internals](../developer-guide/cron-internals.md#gateway-integration) doc.
