@@ -88,6 +88,29 @@ RUN set -eu; \
     # ENTRYPOINT. Safe to drop once the affected catalogs are updated.\
     ln -sf /init /usr/bin/tini
 
+# ---------- tirith security scanner ----------
+# tirith is a pre-exec security scanner (sheeki03/tirith).  It has a
+# runtime auto-install that downloads from GitHub releases on first use,
+# but Docker sets HERMES_DISABLE_LAZY_INSTALLS=1 and /opt/hermes is
+# immutable, so the binary must be present at build time.  Checksums are
+# verified against the upstream-published checksums.txt.  Fixes #50831.
+ARG TIRITH_VERSION=0.3.3
+ARG TIRITH_X86_64_SHA256=6cdbe35e8f9ccf42e70ad95b501c93cd218ac18201c3df958d54f6ba0d995ce2
+ARG TIRITH_AARCH64_SHA256=c784233083003a6a1533db9ebba30b1a7bb7cefaa239db6ca121598b384cca1a
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) tirith_arch="x86_64"; tirith_sha="${TIRITH_X86_64_SHA256}" ;; \
+        arm64) tirith_arch="aarch64"; tirith_sha="${TIRITH_AARCH64_SHA256}" ;; \
+        *) echo "Unsupported TARGETARCH=${TARGETARCH} for tirith" >&2; exit 1 ;; \
+    esac; \
+    tirith_tar="tirith-${tirith_arch}-unknown-linux-gnu.tar.gz"; \
+    curl -fsSL --retry 3 -o "/tmp/${tirith_tar}" \
+        "https://github.com/sheeki03/tirith/releases/download/v${TIRITH_VERSION}/${tirith_tar}"; \
+    printf '%s  %s\n' "${tirith_sha}" "/tmp/${tirith_tar}" | sha256sum -c -; \
+    tar -C /usr/local/bin -xzf "/tmp/${tirith_tar}" tirith; \
+    chmod +x /usr/local/bin/tirith; \
+    rm -f "/tmp/${tirith_tar}"
+
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
 
