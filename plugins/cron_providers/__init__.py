@@ -19,7 +19,7 @@ Only ONE provider can be active at a time, selected via ``cron.provider`` in
 config.yaml (empty = built-in). See ``cron.scheduler_provider.resolve_cron_scheduler``.
 
 Usage:
-    from plugins.cron import discover_cron_schedulers, load_cron_scheduler
+    from plugins.cron_providers import discover_cron_schedulers, load_cron_scheduler
 
     available = discover_cron_schedulers()   # [(name, desc, available), ...]
     provider = load_cron_scheduler("chronos")  # CronScheduler instance
@@ -223,7 +223,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  #
     # Use a separate namespace for user-installed plugins so they don't
     # collide with bundled providers in sys.modules.
     _is_bundled = _CRON_PLUGINS_DIR in provider_dir.parents or provider_dir.parent == _CRON_PLUGINS_DIR
-    module_name = f"plugins.cron.{name}" if _is_bundled else f"{_USER_NAMESPACE}.{name}"
+    module_name = f"plugins.cron_providers.{name}" if _is_bundled else f"{_USER_NAMESPACE}.{name}"
     init_file = provider_dir / "__init__.py"
 
     if not init_file.exists():
@@ -236,7 +236,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  #
         mod = cached
     else:
         # Ensure the parent packages are registered (for relative imports)
-        for parent in ("plugins", "plugins.cron"):
+        for parent in ("plugins", "plugins.cron_providers"):
             if parent not in sys.modules:
                 parent_path = Path(__file__).parent
                 if parent == "plugins":
