@@ -7990,6 +7990,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._show_gateway_status()
         elif canonical == "status":
             self._show_session_status()
+        elif canonical == "whoami":
+            self._handle_whoami_command(cmd_original)
         elif canonical == "statusbar":
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"
@@ -8163,6 +8165,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_subgoal_command(cmd_original)
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
+        elif canonical == "indicator":
+            self._handle_indicator_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
         elif canonical == "busy":

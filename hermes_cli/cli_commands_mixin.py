@@ -2069,6 +2069,36 @@ class CLICommandsMixin:
         if self._apply_tui_skin_style():
             print("  Prompt + TUI colors updated.")
 
+    def _handle_indicator_command(self, cmd: str):
+        """Handle /indicator — show or change the TUI busy-indicator style.
+
+        Usage:
+            /indicator                  Show current style and available options
+            /indicator <kaomoji|emoji|unicode|ascii>   Set style
+        """
+        from cli import _ACCENT, _DIM, _RST, _cprint, save_config_value
+
+        _VALID_STYLES = ("kaomoji", "emoji", "unicode", "ascii")
+        parts = cmd.strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not arg:
+            current = (self.config.get("display") or {}).get("tui_status_indicator", "kaomoji")
+            _cprint(f"  {_ACCENT}Indicator style: {current}{_RST}")
+            _cprint(f"  {_DIM}Available: {' | '.join(_VALID_STYLES)}{_RST}")
+            _cprint(f"  {_DIM}Usage: /indicator <style>{_RST}")
+            return
+
+        if arg not in _VALID_STYLES:
+            _cprint(f"  {_DIM}(._.) Unknown style: {arg}{_RST}")
+            _cprint(f"  {_DIM}Available: {' | '.join(_VALID_STYLES)}{_RST}")
+            return
+
+        if save_config_value("display.tui_status_indicator", arg):
+            _cprint(f"  {_ACCENT}✓ Indicator style set to '{arg}' (saved){_RST}")
+        else:
+            _cprint(f"  {_ACCENT}✓ Indicator style set to '{arg}' (session only){_RST}")
+
     def _compose_in_editor(self, initial_text: str = "") -> str:
         """Open ``$VISUAL``/``$EDITOR`` on a temp markdown file and return the
         saved buffer (comment lines starting with ``#!`` stripped).
@@ -2471,6 +2501,16 @@ class CLICommandsMixin:
         # sys.exit inside a non-main thread does not exit the process).
         self._pending_relaunch = ["update"]
         return True
+
+    def _handle_whoami_command(self, cmd: str):
+        """Handle /whoami — show your slash command access (CLI/Desktop/TUI context).
+
+        In CLI context the user is always the local operator with full access.
+        """
+        from cli import _ACCENT, _DIM, _RST, _cprint
+        _cprint(f"  {_ACCENT}You{_RST} — local CLI/TUI")
+        _cprint(f"  {_DIM}Tier: admin (local operator){_RST}")
+        _cprint(f"  {_DIM}Slash commands: all available{_RST}")
 
     def _handle_voice_command(self, command: str):
         """Handle /voice [on|off|tts|status] command."""
