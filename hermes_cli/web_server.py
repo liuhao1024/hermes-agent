@@ -7638,29 +7638,26 @@ def _annotate_cron_job(job: Dict[str, Any], profile: str, home: Path) -> Dict[st
 
 
 def _call_cron_for_profile(profile: Optional[str], func_name: str, *args, **kwargs):
-    """Run cron.jobs helpers against the selected profile's cron directory.
+    """Run cron.jobs helpers against the shared root cron store.
 
-    cron.jobs keeps CRON_DIR/JOBS_FILE/OUTPUT_DIR as module globals resolved
-    from the process HERMES_HOME at import time. The dashboard is a single
-    process that can inspect many profiles, so temporarily retarget those
-    globals while holding a lock and restore them immediately after the call.
+    Since the cron storage migration (#32091), all cron jobs live in the
+    shared root-level store (``~/.hermes/cron/jobs.json``), not in
+    per-profile directories.  The dashboard must read from the same store
+    the scheduler and CLI use; otherwise jobs created via the CLI/scheduler
+    are invisible in the Desktop UI, and legacy profile-local files appear
+    active even though the scheduler never runs them (#51032).
+
+    ``cron.jobs`` keeps CRON_DIR/JOBS_FILE/OUTPUT_DIR as module globals
+    resolved from the process HERMES_HOME at import time.  The dashboard is
+    a single process, so we hold a lock while calling into cron helpers to
+    avoid tearing.  We do NOT retarget to a profile-local path — all
+    profiles share the root store.
     """
     profile_name, home = _cron_profile_home(profile)
     with _CRON_PROFILE_LOCK:
         from cron import jobs as cron_jobs
 
-        old_cron_dir = cron_jobs.CRON_DIR
-        old_jobs_file = cron_jobs.JOBS_FILE
-        old_output_dir = cron_jobs.OUTPUT_DIR
-        cron_jobs.CRON_DIR = home / "cron"
-        cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
-        cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
-        try:
-            result = getattr(cron_jobs, func_name)(*args, **kwargs)
-        finally:
-            cron_jobs.CRON_DIR = old_cron_dir
-            cron_jobs.JOBS_FILE = old_jobs_file
-            cron_jobs.OUTPUT_DIR = old_output_dir
+        result = getattr(cron_jobs, func_name)(*args, **kwargs)
 
     if isinstance(result, list):
         return [_annotate_cron_job(j, profile_name, home) for j in result]
@@ -7670,13 +7667,11 @@ def _call_cron_for_profile(profile: Optional[str], func_name: str, *args, **kwar
 
 
 def _find_cron_job_profile(job_id: str) -> Optional[str]:
-    for profile in _cron_profile_dicts():
-        name = str(profile.get("name") or "")
-        if not name:
-            continue
-        jobs = _call_cron_for_profile(name, "list_jobs", True)
-        if any(j.get("id") == job_id or j.get("name") == job_id for j in jobs):
-            return name
+    # All profiles share the root cron store after migration (#32091).
+    # Check the root store once instead of iterating every profile.
+    jobs = _call_cron_for_profile("default", "list_jobs", True)
+    if any(j.get("id") == job_id or j.get("name") == job_id for j in jobs):
+        return "default"
     return None
 
 
@@ -7686,16 +7681,10 @@ async def list_cron_jobs(profile: str = "all"):
     if requested.lower() != "all":
         return _call_cron_for_profile(requested, "list_jobs", True)
 
-    jobs: List[Dict[str, Any]] = []
-    for item in _cron_profile_dicts():
-        name = str(item.get("name") or "")
-        if not name:
-            continue
-        try:
-            jobs.extend(_call_cron_for_profile(name, "list_jobs", True))
-        except Exception:
-            _log.exception("Failed to list cron jobs for profile %s", name)
-    return jobs
+    # All profiles share the root cron store after migration (#32091).
+    # Read once from the default (root) store instead of iterating every
+    # profile, which would return the same jobs N times (#51032).
+    return _call_cron_for_profile("default", "list_jobs", True)
 
 
 @app.get("/api/cron/jobs/{job_id}")
