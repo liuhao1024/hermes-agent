@@ -210,4 +210,36 @@ describe('preprocessMarkdown', () => {
 
     expect(() => preprocessMarkdown(input)).not.toThrow()
   })
+
+  it('escapes lone tildes in prose to prevent strikethrough rendering', () => {
+    const output = preprocessMarkdown('分组：1~10, 11~20, 21~30')
+
+    expect(output).toContain('\\~')
+    expect(output).not.toMatch(/[^\\]~10/)
+  })
+
+  it('preserves intentional ~~strikethrough~~ markup', () => {
+    const output = preprocessMarkdown('This is ~~deleted~~ text')
+
+    expect(output).toContain('~~deleted~~')
+  })
+
+  it('escapes lone tildes but keeps strikethrough in mixed content', () => {
+    const output = preprocessMarkdown('Range 1~10 and ~~deleted~~ text')
+
+    expect(output).toContain('~~deleted~~')
+    expect(output).toContain('\\~10')
+  })
+
+  it('escapes a tilde at the start of text', () => {
+    const output = preprocessMarkdown('~leading tilde')
+
+    expect(output).toContain('\\~leading tilde')
+  })
+
+  it('escapes a tilde at the end of text', () => {
+    const output = preprocessMarkdown('trailing tilde~')
+
+    expect(output).toContain('trailing tilde\\~')
+  })
 })

@@ -345,6 +345,34 @@ function escapeCurrencyDollars(text: string): string {
   return text.replace(CURRENCY_DOLLAR_RE, '$1\\$')
 }
 
+// Escape lone `~` characters so the markdown renderer does not misinterpret
+// them as GFM strikethrough delimiters.  Chinese-language responses commonly
+// use `~` as a range separator (e.g. `1~10,11~20`) which, left unescaped,
+// renders as strikethrough when the renderer supports single-tilde syntax.
+//
+// Strategy: split on `~~` and `<…>` (autolinked URLs) — even-indexed
+// segments are unprotected text where lone tildes need escaping; odd-indexed
+// segments are protected regions (strikethrough spans or URLs) that pass
+// through untouched.
+//
+// MUST run after normalizeVisibleProse so that autolinked URLs are already
+// wrapped in `<…>` and their tildes are skipped.
+function escapeLoneTildes(text: string): string {
+  const PROTECTED_RE = /(~~|<[^>]+>)/g
+  const parts = text.split(PROTECTED_RE)
+
+  return parts
+    .map((part, index) => {
+      // Odd indices are captured groups (~~ or <...>) — pass through.
+      if (index % 2 === 1) {
+        return part
+      }
+      // Even indices are unprotected text — escape lone tildes.
+      return part.replace(/~/g, '\\~')
+    })
+    .join('')
+}
+
 export function preprocessMarkdown(text: string): string {
   const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
   const scrubbed = scrubBacktickNoise(cleaned)
@@ -381,8 +409,10 @@ export function preprocessMarkdown(text: string): string {
       // we don't accidentally touch `\(` inside a code block.
       // escapeCurrencyDollars likewise only runs on prose, so legit
       // `$5` literals inside fenced code stay intact.
-      const transformed = normalizeVisibleProse(
-        stripPreviewTargets(rewriteLatexBracketDelimiters(escapeCurrencyDollars(part)))
+      const transformed = escapeLoneTildes(
+        normalizeVisibleProse(
+          stripPreviewTargets(rewriteLatexBracketDelimiters(escapeCurrencyDollars(part)))
+        )
       )
 
       return leading + transformed + trailing
