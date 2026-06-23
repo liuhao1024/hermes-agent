@@ -697,6 +697,7 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
             "key_hash": key_hash,
         }
         _save_provider_state(auth_store, "zai", state)
+        _save_auth_store(auth_store)
         logger.info("Z.AI: auto-detected endpoint %s (%s)", detected["label"], detected["base_url"])
         return detected["base_url"]
 

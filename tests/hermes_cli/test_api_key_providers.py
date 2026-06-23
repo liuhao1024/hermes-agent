@@ -17,6 +17,7 @@ from hermes_cli.auth import (
     STEPFUN_STEP_PLAN_INTL_BASE_URL,
     STEPFUN_STEP_PLAN_CN_BASE_URL,
     _resolve_kimi_base_url,
+    _load_auth_store as _REAL_LOAD_AUTH_STORE,
 )
 from hermes_cli.copilot_auth import _try_gh_cli_token
 
@@ -1296,3 +1297,98 @@ class TestMinimaxOAuthProvider:
             "doesn't fire the 'No auxiliary LLM provider configured' warning "
             "for every minimax-oauth session."
         )
+
+
+# =============================================================================
+# Z.AI endpoint cache persistence regression (#51229)
+# =============================================================================
+
+class TestZaiEndpointCachePersistence:
+    """Verify that _resolve_zai_base_url persists the detected endpoint to
+    auth.json so that subsequent process starts reuse the cache instead of
+    re-probing.  Regression test for #51229."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_auth_store(self, monkeypatch):
+        """Override the module-level _clear_provider_env fixture that patches
+        _load_auth_store to return {}.  These tests need real disk I/O."""
+        import hermes_cli.auth as _auth
+        monkeypatch.setattr(_auth, "_load_auth_store", _REAL_LOAD_AUTH_STORE)
+
+    def test_detected_endpoint_persisted_to_disk(self, tmp_path, monkeypatch):
+        """After endpoint detection, the result must survive a fresh
+        _load_auth_store() call — i.e. it is written to disk."""
+        import hashlib
+        import json
+
+        from hermes_cli import auth as auth_mod
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        api_key = "test-zai-key-12345"
+        expected_url = "https://api.z.ai/api/coding/paas/v4"
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+        call_count = {"n": 0}
+
+        def fake_detect(key):
+            call_count["n"] += 1
+            return {
+                "base_url": expected_url,
+                "id": "coding-global",
+                "model": "glm-4.7",
+                "label": "Global (Coding Plan)",
+            }
+
+        monkeypatch.setattr(auth_mod, "detect_zai_endpoint", fake_detect)
+
+        result = auth_mod._resolve_zai_base_url(api_key, "https://default.example/v4", "")
+        assert result == expected_url
+        assert call_count["n"] == 1
+
+        # Verify the endpoint was persisted to disk by reading auth.json
+        # from a fresh dict (simulating a new process start).
+        auth_file = tmp_path / "auth.json"
+        assert auth_file.exists(), "auth.json must be written after endpoint detection"
+        on_disk = json.loads(auth_file.read_text())
+        stored = on_disk.get("providers", {}).get("zai", {}).get("detected_endpoint", {})
+        assert stored.get("base_url") == expected_url
+        assert stored.get("key_hash") == key_hash
+        assert stored.get("endpoint_id") == "coding-global"
+
+    def test_second_call_uses_persisted_cache(self, tmp_path, monkeypatch):
+        """A second _resolve_zai_base_url call (simulating a new process)
+        must read from the on-disk cache and skip detect_zai_endpoint."""
+        from hermes_cli import auth as auth_mod
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        api_key = "test-zai-key-67890"
+        expected_url = "https://api.z.ai/api/coding/paas/v4"
+
+        call_count = {"n": 0}
+
+        def fake_detect(key):
+            call_count["n"] += 1
+            return {
+                "base_url": expected_url,
+                "id": "coding-global",
+                "model": "glm-4.7",
+                "label": "Global (Coding Plan)",
+            }
+
+        monkeypatch.setattr(auth_mod, "detect_zai_endpoint", fake_detect)
+
+        # First call — detects and persists.
+        result1 = auth_mod._resolve_zai_base_url(api_key, "https://default.example/v4", "")
+        assert result1 == expected_url
+        assert call_count["n"] == 1
+
+        # Simulate new process: the on-disk auth.json now contains the
+        # cached endpoint.  A fresh call should read it and skip probing.
+        # Replace detect_zai_endpoint with a guard that raises if called.
+        monkeypatch.setattr(auth_mod, "detect_zai_endpoint", lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("detect_zai_endpoint should NOT be called when cache is valid")
+        ))
+
+        result2 = auth_mod._resolve_zai_base_url(api_key, "https://default.example/v4", "")
+        assert result2 == expected_url
