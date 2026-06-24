@@ -106,7 +106,7 @@ function buildGatewayWsUrlWithTicket(baseUrl, ticket) {
  * @returns {Promise<string|null>}
  */
 async function resolveTestWsUrl(baseUrl, authMode, token, deps = {}) {
-  if (authMode === 'oauth') {
+  if (authMode === 'oauth' || authMode === 'basic') {
     const mintTicket = deps.mintTicket
     if (typeof mintTicket !== 'function') {
       throw new Error('resolveTestWsUrl: a mintTicket function is required in OAuth mode.')
@@ -137,9 +137,9 @@ function connectionScopeKey(profile) {
   return String(profile ?? '').trim() || null
 }
 
-// Coerce a remote auth mode to one of the two supported values ('token' default).
+// Coerce a remote auth mode to one of the three supported values ('token' default).
 function normAuthMode(mode) {
-  return mode === 'oauth' ? 'oauth' : 'token'
+  return mode === 'oauth' || mode === 'basic' ? mode : 'token'
 }
 
 /**
@@ -225,8 +225,10 @@ function authModeFromStatus(statusBody) {
  */
 function resolveAuthMode(inputAuthMode, existingAuthMode) {
   if (inputAuthMode === 'oauth') return 'oauth'
+  if (inputAuthMode === 'basic') return 'basic'
   if (inputAuthMode === 'token') return 'token'
   if (existingAuthMode === 'oauth') return 'oauth'
+  if (existingAuthMode === 'basic') return 'basic'
   return 'token'
 }
 

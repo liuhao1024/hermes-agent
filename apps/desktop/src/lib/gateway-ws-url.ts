@@ -57,7 +57,7 @@ export async function resolveGatewayWsUrl(
   // backend.
   const profile = conn.profile ?? null
 
-  if (conn.authMode === 'oauth') {
+  if (conn.authMode === 'oauth' || conn.authMode === 'basic') {
     if (!mint) {
       // OAuth gateway but no way to mint a fresh ticket: the cached ticket is
       // dead, so connecting with it cannot succeed. Surface a reauth error

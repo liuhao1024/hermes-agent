@@ -85,6 +85,11 @@ test('profileRemoteOverride preserves an explicit oauth auth mode', () => {
   assert.equal(profileRemoteOverride(config, 'coder').authMode, 'oauth')
 })
 
+test('profileRemoteOverride preserves an explicit basic auth mode', () => {
+  const config = { profiles: { coder: { mode: 'remote', url: 'https://x', authMode: 'basic' } } }
+  assert.equal(profileRemoteOverride(config, 'coder').authMode, 'basic')
+})
+
 test('profileRemoteOverride tolerates a missing/!object profiles map', () => {
   assert.equal(profileRemoteOverride({}, 'coder'), null)
   assert.equal(profileRemoteOverride({ profiles: null }, 'coder'), null)
@@ -231,11 +236,14 @@ test('authModeFromStatus returns token when auth_required is false/missing', () 
 test('resolveAuthMode: explicit input wins over existing', () => {
   assert.equal(resolveAuthMode('oauth', 'token'), 'oauth')
   assert.equal(resolveAuthMode('token', 'oauth'), 'token')
+  assert.equal(resolveAuthMode('basic', 'token'), 'basic')
+  assert.equal(resolveAuthMode('basic', 'oauth'), 'basic')
 })
 
 test('resolveAuthMode: falls back to existing when input absent', () => {
   assert.equal(resolveAuthMode(undefined, 'oauth'), 'oauth')
   assert.equal(resolveAuthMode(undefined, 'token'), 'token')
+  assert.equal(resolveAuthMode(undefined, 'basic'), 'basic')
   assert.equal(resolveAuthMode('', 'oauth'), 'oauth')
 })
 

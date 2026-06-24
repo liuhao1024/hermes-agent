@@ -31,6 +31,14 @@ describe('isRemoteReauthFailure', () => {
     expect(isRemoteReauthFailure(config({ mode: 'local' }))).toBe(false)
   })
 
+  it('true for a remote, basic-auth, disconnected gateway with a URL', () => {
+    expect(isRemoteReauthFailure(config({ remoteAuthMode: 'basic' }))).toBe(true)
+  })
+
+  it('false when the basic-auth session is still connected', () => {
+    expect(isRemoteReauthFailure(config({ remoteAuthMode: 'basic', remoteOauthConnected: true }))).toBe(false)
+  })
+
   it('false for a token (non-gated) remote gateway', () => {
     expect(isRemoteReauthFailure(config({ remoteAuthMode: 'token' }))).toBe(false)
   })

@@ -303,7 +303,7 @@ export interface HermesConnection {
   baseUrl: string
   isFullscreen: boolean
   mode?: 'local' | 'remote'
-  authMode?: 'oauth' | 'token'
+  authMode?: 'oauth' | 'token' | 'basic'
   nativeOverlayWidth: number
   source?: 'env' | 'local' | 'settings'
   token: string
@@ -338,7 +338,7 @@ export interface DesktopConnectionConfig {
   // The profile this config describes, or null for the global/default
   // connection. Per-profile entries let a profile point at its own backend.
   profile: null | string
-  remoteAuthMode: 'oauth' | 'token'
+  remoteAuthMode: 'oauth' | 'token' | 'basic'
   remoteOauthConnected: boolean
   remoteTokenPreview: string | null
   remoteTokenSet: boolean
@@ -350,7 +350,7 @@ export interface DesktopConnectionConfigInput {
   // When set, the save/apply/test targets this profile's per-profile remote
   // override instead of the global connection.
   profile?: null | string
-  remoteAuthMode?: 'oauth' | 'token'
+  remoteAuthMode?: 'oauth' | 'token' | 'basic'
   remoteToken?: string
   remoteUrl?: string
 }
@@ -374,7 +374,7 @@ export interface DesktopAuthProvider {
 export interface DesktopConnectionProbeResult {
   baseUrl: string
   reachable: boolean
-  authMode: 'oauth' | 'token' | 'unknown'
+  authMode: 'oauth' | 'token' | 'basic' | 'unknown'
   providers: DesktopAuthProvider[]
   version: string | null
   error: string | null

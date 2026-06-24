@@ -14,7 +14,7 @@ import { CONTROL_TEXT } from './constants'
 import { EmptyState, ListRow, LoadingState, Pill, SettingsContent } from './primitives'
 
 type Mode = 'local' | 'remote'
-type AuthMode = 'oauth' | 'token'
+type AuthMode = 'oauth' | 'token' | 'basic'
 type ProbeStatus = 'idle' | 'probing' | 'done' | 'error'
 
 interface GatewaySettingsState {
@@ -272,7 +272,7 @@ export function GatewaySettings() {
       return false
     }
 
-    if (authMode === 'oauth') {
+    if (authMode === 'oauth' || authMode === 'basic') {
       return oauthConnected
     }
 
@@ -336,11 +336,11 @@ export function GatewaySettings() {
 
     try {
       // Save (don't apply/restart) so the login window has a URL to use and the
-      // oauth mode is persisted, without yet flipping the live connection.
+      // auth mode is persisted, without yet flipping the live connection.
       const saved = await window.hermesDesktop.saveConnectionConfig({
         mode: state.mode,
         profile: scope ?? undefined,
-        remoteAuthMode: 'oauth',
+        remoteAuthMode: authMode === 'basic' ? 'basic' : 'oauth',
         remoteUrl: trimmedUrl
       })
 

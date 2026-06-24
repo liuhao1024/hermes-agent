@@ -26,12 +26,12 @@ const DEFAULT_SIGN_IN_COPY: SignInCopy = {
   withProvider: provider => `Sign in with ${provider}`
 }
 
-// A remote, gated (oauth-bucket), not-currently-connected gateway is a
+// A remote, gated (oauth/basic-bucket), not-currently-connected gateway is a
 // remote-reauth boot failure: the access cookie lapsed (e.g. the remote
 // dashboard restarted) and the local-recovery buttons (Retry/Repair) can't
-// fix it — only re-establishing the remote session can. A connected oauth
-// session, or a token/local gateway, boots for some other reason the
-// local-recovery buttons address, so those return false here.
+// fix it — only re-establishing the remote session can. A connected session,
+// or a token/local gateway, boots for some other reason the local-recovery
+// buttons address, so those return false here.
 export function isRemoteReauthFailure(config: DesktopConnectionConfig | null | undefined): boolean {
   if (!config) {
     return false
@@ -39,7 +39,7 @@ export function isRemoteReauthFailure(config: DesktopConnectionConfig | null | u
 
   return (
     config.mode === 'remote' &&
-    config.remoteAuthMode === 'oauth' &&
+    (config.remoteAuthMode === 'oauth' || config.remoteAuthMode === 'basic') &&
     !config.remoteOauthConnected &&
     Boolean(config.remoteUrl)
   )

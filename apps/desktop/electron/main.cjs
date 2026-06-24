@@ -4249,7 +4249,7 @@ async function freshGatewayWsUrl(profile) {
   // the wrong profile's DB. A null/empty profile resolves to the primary, so
   // legacy callers and single-profile users are unchanged.
   const connection = await ensureBackend(profile)
-  if (connection.authMode === 'oauth') {
+  if (connection.authMode === 'oauth' || connection.authMode === 'basic') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl)
     return buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
   }
@@ -4338,10 +4338,11 @@ function readDesktopConnectionConfig() {
 
     if (parsed && typeof parsed === 'object') {
       const remote = parsed.remote && typeof parsed.remote === 'object' ? parsed.remote : {}
-      // authMode lives on the remote sub-object: 'oauth' (cookie + ws-ticket)
-      // or 'token' (legacy static session token). Default to 'token' for
-      // backward compatibility with configs written before OAuth support.
-      remote.authMode = remote.authMode === 'oauth' ? 'oauth' : 'token'
+      // authMode lives on the remote sub-object: 'oauth' (cookie + ws-ticket),
+      // 'basic' (username/password + cookie + ws-ticket), or 'token' (legacy
+      // static session token). Default to 'token' for backward compatibility
+      // with configs written before OAuth support.
+      remote.authMode = remote.authMode === 'oauth' || remote.authMode === 'basic' ? remote.authMode : 'token'
       config = {
         mode: parsed.mode === 'remote' ? 'remote' : 'local',
         remote,
@@ -4417,7 +4418,7 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
   const mode = envOverride || (key ? scoped?.mode : config.mode) === 'remote' ? 'remote' : 'local'
 
   let remoteOauthConnected = false
-  if (authMode === 'oauth' && remoteUrl) {
+  if ((authMode === 'oauth' || authMode === 'basic') && remoteUrl) {
     try {
       // Display signal: treat a live RT cookie as "connected" even if the AT
       // cookie has lapsed — the gateway refreshes the AT on the next request,
@@ -4448,7 +4449,7 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
 // authenticate via the login-window session cookie (verified at connect time in
 // resolveRemoteBackend), so only token-auth remotes require a saved token.
 function buildRemoteBlock(remoteUrl, authMode, token) {
-  if (authMode !== 'oauth' && !decryptDesktopSecret(token)) {
+  if (authMode !== 'oauth' && authMode !== 'basic' && !decryptDesktopSecret(token)) {
     throw new Error('Remote gateway session token is required.')
   }
   return { url: normalizeRemoteBaseUrl(remoteUrl), authMode, token }
@@ -4500,19 +4501,21 @@ function coerceDesktopConnectionConfig(input = {}, existing = readDesktopConnect
 async function buildRemoteConnection(rawUrl, authMode, token, source) {
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
 
-  if (authMode === 'oauth') {
-    // OAuth gateway: auth comes from the session cookies in the OAuth
-    // partition. Liveness is NOT "is the access-token cookie present?" —
-    // Portal issues a 24h rotating refresh token (hermes #37247), and the
-    // gateway middleware transparently rotates a fresh ~15-min access token
-    // from it on the next authenticated request. So a session with an expired
-    // AT cookie but a live RT cookie is still perfectly connectable. We
-    // early-out only when neither cookie is present, then mint a ws-ticket as
-    // the authoritative liveness check.
+  if (authMode === 'oauth' || authMode === 'basic') {
+    // OAuth and basic-auth gateways both authenticate via session cookies.
+    // Liveness is NOT "is the access-token cookie present?" — the gateway
+    // issues a 24h rotating refresh token, and the middleware transparently
+    // rotates a fresh ~15-min access token from it on the next authenticated
+    // request. So a session with an expired AT cookie but a live RT cookie is
+    // still perfectly connectable. We early-out only when neither cookie is
+    // present, then mint a ws-ticket as the authoritative liveness check.
     if (!(await hasLiveOauthSession(baseUrl))) {
       const err = new Error(
-        'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
-          'Open Settings → Gateway and click "Sign in", or switch back to Local.'
+        authMode === 'basic'
+          ? 'Remote Hermes gateway requires sign-in. ' +
+            'Open Settings → Gateway and click "Sign in", or switch back to Local.'
+          : 'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
+            'Open Settings → Gateway and click "Sign in", or switch back to Local.'
       )
       err.needsOauthLogin = true
       throw err
@@ -4573,7 +4576,7 @@ async function resolveRemoteBackend(profile) {
   //    reaches its intended backend.
   const override = profileRemoteOverride(config, profile)
   if (override) {
-    const token = override.authMode === 'oauth' ? null : decryptDesktopSecret(override.token)
+    const token = override.authMode === 'oauth' || override.authMode === 'basic' ? null : decryptDesktopSecret(override.token)
     return buildRemoteConnection(override.url, override.authMode, token, 'profile')
   }
 
@@ -4595,7 +4598,7 @@ async function resolveRemoteBackend(profile) {
     return null
   }
   const authMode = normAuthMode(config.remote?.authMode)
-  const token = authMode === 'oauth' ? null : decryptDesktopSecret(config.remote?.token)
+  const token = authMode === 'oauth' || authMode === 'basic' ? null : decryptDesktopSecret(config.remote?.token)
   return buildRemoteConnection(config.remote?.url, authMode, token, 'settings')
 }
 
@@ -4632,7 +4635,7 @@ async function requestJsonForProfile(profile, path, method, body) {
   const conn = await ensureBackend(profile)
   const url = `${conn.baseUrl}${path}`
   const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
-  return conn.authMode === 'oauth' ? fetchJsonViaOauthSession(url, opts) : fetchJson(url, conn.token, opts)
+  return conn.authMode === 'oauth' || conn.authMode === 'basic' ? fetchJsonViaOauthSession(url, opts) : fetchJson(url, conn.token, opts)
 }
 
 async function probeRemoteAuthMode(rawUrl) {
@@ -4693,7 +4696,11 @@ async function probeRemoteAuthMode(rawUrl) {
   return {
     baseUrl,
     reachable: true,
-    authMode: authRequired ? 'oauth' : 'token',
+    authMode: authRequired
+      ? providers.length > 0 && providers.every(p => p.supportsPassword)
+        ? 'basic'
+        : 'oauth'
+      : 'token',
     providers,
     version: status?.version || null,
     error: null
@@ -6090,11 +6097,11 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     profileRemoteOverride: profileHasRemoteOverride(profile)
   })
   const url = `${connection.baseUrl}${requestPath}`
-  // OAuth gateways authenticate REST via the HttpOnly session cookie held in
-  // the OAuth partition — route through Electron's net stack bound to that
-  // session so the cookie attaches automatically. Token/local modes keep using
-  // the static session-token header.
-  if (connection.authMode === 'oauth') {
+  // OAuth and basic-auth gateways authenticate REST via the HttpOnly session
+  // cookie held in the OAuth partition — route through Electron's net stack
+  // bound to that session so the cookie attaches automatically. Token/local
+  // modes keep using the static session-token header.
+  if (connection.authMode === 'oauth' || connection.authMode === 'basic') {
     return fetchJsonViaOauthSession(url, {
       method: request?.method,
       body: request?.body,
