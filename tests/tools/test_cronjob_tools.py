@@ -581,3 +581,50 @@ class TestLocalDeliveryNotice:
         )
         assert created["deliver"] == "origin"
         assert "local-only cron job" not in created["message"]
+
+
+# =========================================================================
+# Script path validation error messages
+# =========================================================================
+
+
+class TestValidateCronScriptPathMessages:
+    """Regression: error messages must use display_hermes_home(), not hardcode ~/.hermes."""
+
+    def test_absolute_path_error_uses_dynamic_hermes_home(self):
+        from tools.cronjob_tools import _validate_cron_script_path
+        from hermes_constants import display_hermes_home
+
+        err = _validate_cron_script_path("/tmp/evil.sh")
+        assert err is not None
+        assert "~/.hermes/scripts/" not in err
+        assert f"{display_hermes_home()}/scripts/" in err
+
+    def test_tilde_path_error_uses_dynamic_hermes_home(self):
+        from tools.cronjob_tools import _validate_cron_script_path
+        from hermes_constants import display_hermes_home
+
+        err = _validate_cron_script_path("~/payload.sh")
+        assert err is not None
+        assert "~/.hermes/scripts/" not in err
+        assert f"{display_hermes_home()}/scripts/" in err
+
+    def test_windows_drive_path_error_uses_dynamic_hermes_home(self):
+        from tools.cronjob_tools import _validate_cron_script_path
+        from hermes_constants import display_hermes_home
+
+        err = _validate_cron_script_path("C:\\payload.sh")
+        assert err is not None
+        assert "~/.hermes/scripts/" not in err
+        assert f"{display_hermes_home()}/scripts/" in err
+
+    def test_relative_path_passes(self):
+        from tools.cronjob_tools import _validate_cron_script_path
+
+        assert _validate_cron_script_path("my_script.sh") is None
+
+    def test_empty_path_passes(self):
+        from tools.cronjob_tools import _validate_cron_script_path
+
+        assert _validate_cron_script_path("") is None
+        assert _validate_cron_script_path(None) is None
