@@ -301,3 +301,44 @@ class TestSecretRedactionInDisplay:
 
         captured = capsys.readouterr()
         assert "Set model.reasoning_effort = high" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Unknown key warning (issue #51636)
+# ---------------------------------------------------------------------------
+
+class TestUnknownKeyWarning:
+    """`config set` should warn when the key is not in the known schema."""
+
+    def test_unknown_key_with_alias_suggests_correct_key(
+        self, _isolated_hermes_home, capsys
+    ):
+        """terminal.working_dir should suggest terminal.cwd."""
+        set_config_value("terminal.working_dir", "/some/path")
+
+        captured = capsys.readouterr()
+        assert "Did you mean 'terminal.cwd'?" in captured.err
+        # Value is still written so the user doesn't lose data.
+        assert "Set terminal.working_dir" in captured.out
+
+    def test_known_key_emits_no_warning(self, _isolated_hermes_home, capsys):
+        """terminal.cwd is valid — no warning should appear."""
+        set_config_value("terminal.cwd", "/some/path")
+
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_unknown_key_fuzzy_match(self, _isolated_hermes_home, capsys):
+        """terminal.timout should fuzzy-match to terminal.timeout."""
+        set_config_value("terminal.timout", "120")
+
+        captured = capsys.readouterr()
+        assert "Did you mean 'terminal.timeout'?" in captured.err
+
+    def test_unknown_key_no_match(self, _isolated_hermes_home, capsys):
+        """Completely unknown key should show generic warning."""
+        set_config_value("nonexistent", "value")
+
+        captured = capsys.readouterr()
+        assert "not a recognized config key" in captured.err
+        assert "hermes config check" in captured.err

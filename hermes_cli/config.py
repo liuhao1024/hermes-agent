@@ -6806,6 +6806,85 @@ def edit_config():
     subprocess.run([editor, str(config_path)])
 
 
+def _get_known_dotted_keys(config: dict, prefix: str = "") -> set:
+    """Recursively collect all known dotted keys from a config dict."""
+    keys: set = set()
+    for k, v in config.items():
+        full_key = f"{prefix}.{k}" if prefix else k
+        keys.add(full_key)
+        if isinstance(v, dict):
+            keys.update(_get_known_dotted_keys(v, full_key))
+    return keys
+
+
+# Common aliases that users might try instead of the real config key.
+# Maps (section, attempted_leaf) → canonical_leaf.
+_CONFIG_LEAF_ALIASES: dict[tuple[str, str], str] = {
+    ("terminal", "working_dir"): "cwd",
+    ("terminal", "workdir"): "cwd",
+    ("terminal", "directory"): "cwd",
+    ("terminal", "dir"): "cwd",
+    ("model", "default_model"): "default",
+    ("model", "model_name"): "default",
+    ("model", "provider_name"): "provider",
+    ("display", "theme"): "color_scheme",
+}
+
+
+def _warn_unknown_config_key(key: str) -> None:
+    """Warn if *key* is not in the known config schema.
+
+    Uses ``difflib.get_close_matches`` to suggest the correct key when
+    the user makes a typo (e.g. ``terminal.working_dir`` → ``terminal.cwd``).
+    """
+    import difflib
+
+    known = _get_known_dotted_keys(DEFAULT_CONFIG)
+    if key in known:
+        return
+
+    parts = key.split(".")
+    if len(parts) >= 2:
+        section = parts[0]
+        leaf = parts[-1]
+        # Check explicit alias table first
+        alias = _CONFIG_LEAF_ALIASES.get((section, leaf))
+        if alias:
+            print(
+                f"⚠ '{key}' is not a known config key. "
+                f"Did you mean '{section}.{alias}'?",
+                file=sys.stderr,
+            )
+            return
+        # Fuzzy match on leaf key within the same section
+        section_known = {k for k in known if k.startswith(f"{section}.")}
+        section_leaves = {k.split(".")[-1]: k for k in section_known}
+        close_leaf = difflib.get_close_matches(
+            leaf, list(section_leaves.keys()), n=1, cutoff=0.6
+        )
+        if close_leaf:
+            print(
+                f"⚠ '{key}' is not a known config key. "
+                f"Did you mean '{section_leaves[close_leaf[0]]}'?",
+                file=sys.stderr,
+            )
+            return
+    # Fallback: search all known keys
+    close = difflib.get_close_matches(key, known, n=1, cutoff=0.6)
+    if close:
+        print(
+            f"⚠ '{key}' is not a known config key. "
+            f"Did you mean '{close[0]}'?",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"⚠ '{key}' is not a recognized config key and will have no effect. "
+            f"Run 'hermes config check' to see known keys.",
+            file=sys.stderr,
+        )
+
+
 def set_config_value(key: str, value: str):
     """Set a configuration value."""
     if is_managed():
@@ -6873,6 +6952,10 @@ def set_config_value(key: str, value: str):
         value = float(value)
 
     _set_nested(user_config, key, value)
+    # Warn if the key is not in the known config schema (e.g. a typo like
+    # terminal.working_dir instead of terminal.cwd).  The value is still
+    # written so the user doesn't lose data, but they get a clear hint.
+    _warn_unknown_config_key(key)
     # Normalize the api_base → base_url alias at set-time too (issue #8919),
     # so a fresh `hermes config set model.api_base ...` lands on the canonical
     # key the runtime resolver actually reads, instead of being silently
