@@ -126,9 +126,10 @@ class TestPlatformNameCaseInsensitivity:
         assert target.chat_id == "12345"
 
 class RecordingAdapter:
-    def __init__(self):
+    def __init__(self, dm_topic_chat_ids=None):
         self.calls = []
         self.ensure_dm_topic_calls = []
+        self._dm_topic_chat_ids = set(dm_topic_chat_ids or [])
 
     async def send(self, chat_id, content, metadata=None):
         self.calls.append({"chat_id": chat_id, "content": content, "metadata": metadata})
@@ -161,8 +162,11 @@ class StaleTopicAdapter:
 
 @pytest.mark.asyncio
 async def test_explicit_telegram_private_thread_requires_reply_anchor(tmp_path, monkeypatch):
+    """A configured DM topic (chat_id in _dm_topic_chat_ids) still requires a
+    reply anchor — only non-DM-topic private chats skip this check (#52060).
+    """
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
-    adapter = RecordingAdapter()
+    adapter = RecordingAdapter(dm_topic_chat_ids=["722341991"])
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
     target = DeliveryTarget.parse("telegram:722341991:32344")
 
@@ -170,6 +174,22 @@ async def test_explicit_telegram_private_thread_requires_reply_anchor(tmp_path, 
         await router._deliver_to_platform(target, "hello", metadata=None)
 
     assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_forum_topic_in_private_chat_uses_thread_id(tmp_path, monkeypatch):
+    """#52060: a private chat with forum-style threads (NOT a configured DM
+    topic) should route via thread_id, not require a reply anchor.
+    """
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    adapter = RecordingAdapter()  # no _dm_topic_chat_ids
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
+    target = DeliveryTarget.parse("telegram:722341991:32344")
+
+    await router._deliver_to_platform(target, "hello", metadata=None)
+
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0]["metadata"]["thread_id"] == "32344"
 
 
 @pytest.mark.asyncio
@@ -216,8 +236,9 @@ async def test_named_telegram_private_topic_refreshes_stale_thread_id(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_explicit_telegram_private_thread_uses_reply_fallback_with_anchor(tmp_path, monkeypatch):
+    """A configured DM topic with a reply anchor uses the DM topic fallback."""
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
-    adapter = RecordingAdapter()
+    adapter = RecordingAdapter(dm_topic_chat_ids=["722341991"])
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
     target = DeliveryTarget.parse("telegram:722341991:32344")
 

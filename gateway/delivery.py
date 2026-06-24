@@ -430,6 +430,13 @@ class DeliveryRouter:
                 and "thread_id" not in send_metadata
                 and "message_thread_id" not in send_metadata
                 and not has_explicit_direct_topic
+                # Only treat as a DM topic when the chat is actually
+                # configured as one — a plain private chat with forum
+                # threads should use message_thread_id, not require a
+                # reply anchor (#52060).
+                and target.chat_id in getattr(
+                    adapter, '_dm_topic_chat_ids', set()
+                )
             ):
                 # Legacy private topic/thread ids that were not created by this
                 # send path may still need a reply anchor to stay visible in the

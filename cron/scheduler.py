@@ -900,6 +900,16 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 and thread_id is not None
                 and _looks_like_telegram_private_chat_id(str(chat_id))
                 and _looks_like_int(str(thread_id))
+                # Only route via direct_messages_topic_id when the chat is
+                # actually configured as a Bot API 10.0 DM topic (present in
+                # the adapter's _dm_topic_chat_ids).  A plain private chat
+                # with forum-style threads enabled should keep using
+                # message_thread_id — without this guard the heuristic
+                # mis-classifies threaded-DM forum topics and cron nudges
+                # land in the General topic (#52060).
+                and str(chat_id) in getattr(
+                    runtime_adapter, '_dm_topic_chat_ids', set()
+                )
             )
             if is_private_dm_topic:
                 # Routed via direct_messages_topic_id (mode 2), no bare thread_id.

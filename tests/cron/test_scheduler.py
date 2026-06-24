@@ -3038,6 +3038,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         send_result = SendResult(success=True, message_id="42")
         adapter = MagicMock()
         adapter.send = AsyncMock(return_value=send_result)
+        adapter._dm_topic_chat_ids = {"226252250"}  # chat is a configured DM topic
 
         pconfig = MagicMock()
         pconfig.enabled = True
@@ -3106,6 +3107,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         adapter = AsyncMock()
         adapter.send.return_value = SendResult(success=True, message_id="1")
         adapter.send_image_file.return_value = SendResult(success=True, message_id="2")
+        adapter._dm_topic_chat_ids = {"226252250"}  # chat is a configured DM topic
 
         pconfig = MagicMock()
         pconfig.enabled = True
@@ -3146,7 +3148,66 @@ class TestDeliverResultTimeoutCancelsFuture:
         assert not media_metadata.get("message_thread_id")
         assert not media_metadata.get("thread_id")
 
-    def test_live_adapter_forum_thread_fallback_records_delivery_error(self):
+    def test_live_adapter_forum_topic_in_private_chat_uses_message_thread_id(self):
+        """#52060: a cron target to a PRIVATE Telegram chat with forum-style
+        threads enabled (positive chat_id + numeric thread_id) must use
+        ``message_thread_id``, NOT ``direct_messages_topic_id``.  The #22773
+        heuristic mis-classified these as Bot API 10.0 DM topics, causing cron
+        nudges to land in the General topic.  The fix checks the adapter's
+        ``_dm_topic_chat_ids`` — if the chat is NOT configured as a DM topic,
+        the default ``message_thread_id`` path is used.
+        """
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+        from concurrent.futures import Future
+
+        send_result = SendResult(success=True, message_id="42")
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=send_result)
+        # Chat is NOT in _dm_topic_chat_ids — it's a forum topic, not a DM topic
+        adapter._dm_topic_chat_ids = set()
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.filter_silence_narration = False
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        job = {
+            "id": "forum-topic-job",
+            "deliver": "telegram:226252250:41920",  # private chat + forum topic
+        }
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:  # noqa: BLE001
+                future.set_exception(_e)
+            return future
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            result = _deliver_result(
+                job,
+                "Cron nudge",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result is None, f"expected clean delivery, got: {result!r}"
+        adapter.send.assert_called_once()
+        sent_metadata = adapter.send.call_args[1]["metadata"]
+        # Must use thread_id (routed as a forum topic), NOT direct_messages_topic_id
+        assert str(sent_metadata.get("thread_id")) == "41920"
+        assert not sent_metadata.get("direct_messages_topic_id")
+
+    def test_live_adapter_thread_fallback_records_delivery_error(self):
         """A forum/supergroup cron target whose configured topic is gone must
         NOT be reported as a clean delivery: when the Telegram adapter falls
         back to the base chat (raw_response thread_fallback), the scheduler must
