@@ -2514,8 +2514,14 @@ install_desktop() {
     #    flake) — leaving tsc/typescript unresolved and `npm run pack`'s
     #    `tsc -b` failing with no obvious cause. Fall back to `npm install`
     #    only if `npm ci` is unavailable or the lockfile is out of sync.
+    #
+    #    --ignore-engines: some transitive deps (e.g.
+    #    @icons-pack/react-simple-icons >=13.13.0) declare engine
+    #    requirements (node >=24) that exceed Hermes's own floor (^20).
+    #    npm ci/npm install hard-fail on EBADENGINE unless the flag is
+    #    set, even though the package works fine on Node 20-22.
     log_info "Installing desktop workspace dependencies (includes Electron ~150MB, 1-3min)..."
-    if ( cd "$INSTALL_DIR" && npm ci ) || ( cd "$INSTALL_DIR" && npm install ); then
+    if ( cd "$INSTALL_DIR" && npm ci --ignore-engines ) || ( cd "$INSTALL_DIR" && npm install --ignore-engines ); then
         log_success "Desktop workspace dependencies installed"
     elif _electron_pkg_staged_missing_dist "$INSTALL_DIR"; then
         log_warn "Desktop dependency install failed with a missing Electron dist; attempting self-heal..."

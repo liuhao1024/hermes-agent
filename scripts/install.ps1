@@ -2481,16 +2481,22 @@ function Install-Desktop {
         # no obvious cause. Fall back to `npm install` only if `npm ci`
         # fails (lockfile out of sync / very old npm without ci).
         #
+        # --ignore-engines: some transitive deps (e.g.
+        # @icons-pack/react-simple-icons >=13.13.0) declare engine
+        # requirements (node >=24) that exceed Hermes's own floor (^20).
+        # npm ci/npm install hard-fail on EBADENGINE unless the flag is
+        # set, even though the package works fine on Node 20-22.
+        #
         # Tee the merged output into $npmOut while still emitting every line
         # live. We don't need a side log file (the bootstrap streaming sink
         # is the artifact), but on failure we scan $npmOut for the TLS-trust
         # signature so corporate-proxy users get the NODE_EXTRA_CA_CERTS hint
         # instead of an opaque "exit 1" (issue #38016).
-        & $npmExe ci 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
+        & $npmExe ci --ignore-engines 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
         $code = $LASTEXITCODE
         if ($code -ne 0) {
             Write-Info "  npm ci failed (exit $code) -- retrying with npm install..."
-            & $npmExe install 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
+            & $npmExe install --ignore-engines 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
             $code = $LASTEXITCODE
         }
         $ErrorActionPreference = $prevEAP
