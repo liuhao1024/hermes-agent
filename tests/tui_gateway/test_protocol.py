@@ -1214,7 +1214,7 @@ def test_slash_exec_plugin_handler_error_returns_output(server):
     assert worker.calls == []
 
 
-@pytest.mark.parametrize("cmd", ["retry", "queue hello", "q hello", "steer fix the test", "plan"])
+@pytest.mark.parametrize("cmd", ["retry", "queue hello", "q hello", "steer fix the test", "plan", "learn create a skill from this"])
 def test_slash_exec_routes_pending_input_commands_to_dispatch(server, cmd):
     """slash.exec must route _pending_input commands to command.dispatch
     internally instead of returning the old 4018 "use command.dispatch"
@@ -1256,6 +1256,14 @@ def test_slash_exec_routes_pending_input_commands_to_dispatch(server, cmd):
     assert routed.get("error") == direct.get("error")
 
 
+def test_learn_in_pending_input_commands(server):
+    """Registry sanity: /learn must be in _PENDING_INPUT_COMMANDS so
+    slash.exec routes it to command.dispatch instead of the slash worker.
+    The worker subprocess has no reader for _pending_input, so the learn
+    prompt would be silently lost (#51829)."""
+    assert "learn" in server._PENDING_INPUT_COMMANDS
+
+
 def test_command_dispatch_queue_sends_message(server):
     """command.dispatch /queue returns {type: 'send', message: ...} for the TUI."""
     sid = "test-session"
@@ -1286,6 +1294,30 @@ def test_command_dispatch_queue_requires_arg(server):
 
     assert "error" in resp
     assert resp["error"]["code"] == 4004
+
+
+def test_command_dispatch_learn_sends_prompt(server):
+    """command.dispatch /learn returns {type: 'send', message: <learn prompt>}.
+
+    The learn prompt is built by agent.learn_prompt.build_learn_prompt()
+    and submitted as a normal agent turn.  The TUI gateway handles this
+    directly because the slash worker subprocess has no reader for
+    _pending_input (#51829)."""
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid}
+
+    resp = server.handle_request({
+        "id": "r1",
+        "method": "command.dispatch",
+        "params": {"name": "learn", "arg": "create a skill from https://example.com", "session_id": sid},
+    })
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["type"] == "send"
+    # The message should be the learn prompt built by build_learn_prompt()
+    assert "skill" in result["message"].lower()
+    assert "example.com" in result["message"]
 
 
 def test_skills_manage_search_uses_tools_hub_sources(server):
