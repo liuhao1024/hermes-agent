@@ -162,7 +162,15 @@ def _xai_curated_models() -> list[str]:
         xai = data.get("xai") if isinstance(data, dict) else None
         models = xai.get("models") if isinstance(xai, dict) else None
         if isinstance(models, dict) and models:
-            ids = [mid for mid in models.keys() if isinstance(mid, str)]
+            ids = [
+                mid
+                for mid in models.keys()
+                if isinstance(mid, str)
+                # Exclude media-generation models (grok-imagine-*) — they
+                # have tiny context windows (1K–8K) that fail Hermes'
+                # 64K minimum and don't support tool calling.  (#52595)
+                and "imagine" not in mid.lower()
+            ]
             if ids:
                 return _xai_merge_curated_extras(_xai_promote_top(sorted(ids)))
     except Exception:
