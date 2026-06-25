@@ -571,18 +571,39 @@ def _copy_dist_payload(
 
         dest = target / name
         if entry.is_dir():
+            backup = None
             if dest.exists():
-                shutil.rmtree(dest)
+                # Move old directory to a temporary backup before replacing.
+                # On Windows, shutil.rmtree() can fail transiently with
+                # WinError 145 ("directory is not empty") due to held handles
+                # from antivirus, search indexers, or Explorer.  A rename is a
+                # metadata operation that succeeds even when delete cannot, so
+                # we move the old tree out of the way first and clean it up
+                # after the new copy lands.
+                backup = target / f".__install_backup_{name}"
+                if backup.exists():
+                    shutil.rmtree(backup, ignore_errors=True)
+                dest.rename(backup)
             staged_resolved = staged.resolve()
-            shutil.copytree(
-                entry,
-                dest,
-                ignore=lambda d, names: (
-                    [n for n in names if n in USER_OWNED_EXCLUDE]
-                    if Path(d).resolve() == staged_resolved
-                    else []
-                ),
-            )
+            try:
+                shutil.copytree(
+                    entry,
+                    dest,
+                    ignore=lambda d, names: (
+                        [n for n in names if n in USER_OWNED_EXCLUDE]
+                        if Path(d).resolve() == staged_resolved
+                        else []
+                    ),
+                )
+            except Exception:
+                if backup is not None:
+                    if dest.exists():
+                        shutil.rmtree(dest, ignore_errors=True)
+                    backup.rename(dest)
+                raise
+            finally:
+                if backup is not None:
+                    shutil.rmtree(backup, ignore_errors=True)
         else:
             shutil.copy2(entry, dest)
 

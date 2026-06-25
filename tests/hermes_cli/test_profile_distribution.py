@@ -10,6 +10,7 @@ mocking git would just test the mock.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -347,6 +348,68 @@ class TestInstall:
         staged = _make_staging_dir(profile_env, "future", manifest=mf)
         with pytest.raises(DistributionError, match="requires Hermes"):
             install_distribution(str(staged), name="future")
+
+    def test_install_force_uses_rename_backup_on_existing_dir(self, profile_env):
+        """Verify --force uses rename-to-backup instead of rmtree before copy.
+
+        On Windows, shutil.rmtree() can fail transiently with WinError 145.
+        The fix moves the old directory to a backup via rename (metadata op)
+        before copying the new content.
+        """
+        staged = _make_staging_dir(profile_env, "src")
+        plan = install_distribution(str(staged), name="target")
+
+        # Add user data to the installed skills/ dir
+        (plan.target_dir / "skills" / "demo" / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: original\n---\n# Original\n"
+        )
+
+        # Build a new staged version with different skill content
+        staged2 = _make_staging_dir(profile_env, "v2")
+        (staged2 / "skills" / "demo" / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: updated\n---\n# Updated\n"
+        )
+
+        # Install with --force should succeed using rename-backup approach
+        plan2 = install_distribution(str(staged2), name="target", force=True)
+        assert plan2.target_dir.is_dir()
+
+        # The new content should be installed
+        skill_md = plan2.target_dir / "skills" / "demo" / "SKILL.md"
+        assert "updated" in skill_md.read_text()
+
+        # No backup directories should remain after successful install
+        backups = list(plan2.target_dir.glob(".__install_backup_*"))
+        assert backups == [], f"Leftover backups: {backups}"
+
+    def test_install_force_rollback_on_copy_failure(self, profile_env, monkeypatch):
+        """Verify rollback restores old directory when copytree fails."""
+        staged = _make_staging_dir(profile_env, "src")
+        plan = install_distribution(str(staged), name="target")
+        original_skill = (plan.target_dir / "skills" / "demo" / "SKILL.md").read_text()
+
+        # Build a new staged version
+        staged2 = _make_staging_dir(profile_env, "v2")
+
+        # Monkeypatch copytree to fail after rename has happened
+        real_copytree = shutil.copytree
+        def failing_copytree(*args, **kwargs):
+            raise OSError("simulated copy failure")
+        monkeypatch.setattr(shutil, "copytree", failing_copytree)
+
+        with pytest.raises(OSError, match="simulated copy failure"):
+            install_distribution(str(staged2), name="target", force=True)
+
+        # Restore real copytree to verify rollback
+        monkeypatch.setattr(shutil, "copytree", real_copytree)
+
+        # The original content should be restored (rollback worked)
+        restored_skill = (plan.target_dir / "skills" / "demo" / "SKILL.md").read_text()
+        assert restored_skill == original_skill
+
+        # No backup directories should remain after rollback
+        backups = list(plan.target_dir.glob(".__install_backup_*"))
+        assert backups == [], f"Leftover backups after rollback: {backups}"
 
 
 # ===========================================================================
