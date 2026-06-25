@@ -235,6 +235,7 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    default_headers: dict = None,
 ):
     """
     Initialize the AI Agent.
@@ -774,6 +775,10 @@ def init_agent(
                 }
             else:
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
+            # Seed with config-level provider headers (providers.<name>.default_headers)
+            # so host-specific headers below can override when they apply.
+            if isinstance(default_headers, dict) and default_headers:
+                client_kwargs["default_headers"] = dict(default_headers)
             if _provider_timeout is not None:
                 client_kwargs["timeout"] = _provider_timeout
             if agent.provider == "copilot-acp":

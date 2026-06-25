@@ -1782,7 +1782,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         if isinstance(_runtime_mot, int) and _runtime_mot > 0:
             max_tokens = _runtime_mot
 
-    return {
+    result = {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
@@ -1792,6 +1792,9 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "credential_pool": runtime.get("credential_pool"),
         "max_tokens": max_tokens,
     }
+    if isinstance(runtime.get("default_headers"), dict):
+        result["default_headers"] = runtime["default_headers"]
+    return result
 
 
 def _try_resolve_fallback_provider() -> dict | None:
@@ -1830,7 +1833,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
                 )
-                return {
+                fb_result = {
                     "api_key": runtime.get("api_key"),
                     "base_url": runtime.get("base_url"),
                     "provider": runtime.get("provider"),
@@ -1840,6 +1843,9 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "credential_pool": runtime.get("credential_pool"),
                     "model": entry.get("model"),
                 }
+                if isinstance(runtime.get("default_headers"), dict):
+                    fb_result["default_headers"] = runtime["default_headers"]
+                return fb_result
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
                 continue
@@ -3469,6 +3475,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "credential_pool": runtime_kwargs.get("credential_pool"),
             "max_tokens": runtime_kwargs.get("max_tokens"),
         }
+        if isinstance(runtime_kwargs.get("default_headers"), dict):
+            runtime["default_headers"] = runtime_kwargs["default_headers"]
         route = {
             "model": model,
             "runtime": runtime,

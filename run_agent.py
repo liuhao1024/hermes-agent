@@ -426,6 +426,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        default_headers: dict = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -440,6 +441,7 @@ class AIAgent:
             command=command,
             args=args,
             model=model,
+            default_headers=default_headers,
             max_iterations=max_iterations,
             tool_delay=tool_delay,
             enabled_toolsets=enabled_toolsets,

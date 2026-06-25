@@ -2479,6 +2479,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             prefill_messages=prefill_messages,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
+            default_headers=runtime.get("default_headers") if isinstance(runtime.get("default_headers"), dict) else None,
             providers_allowed=pr.get("only"),
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),

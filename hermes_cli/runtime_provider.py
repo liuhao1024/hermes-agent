@@ -570,6 +570,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     extra_body = entry.get("extra_body")
                     if isinstance(extra_body, dict):
                         result["extra_body"] = dict(extra_body)
+                    _dh = entry.get("default_headers")
+                    if isinstance(_dh, dict) and _dh:
+                        result["default_headers"] = dict(_dh)
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -599,6 +602,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         extra_body = entry.get("extra_body")
                         if isinstance(extra_body, dict):
                             result["extra_body"] = dict(extra_body)
+                        _dh = entry.get("default_headers")
+                        if isinstance(_dh, dict) and _dh:
+                            result["default_headers"] = dict(_dh)
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
@@ -646,6 +652,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         extra_body = entry.get("extra_body")
         if isinstance(extra_body, dict):
             result["extra_body"] = dict(extra_body)
+        _dh = entry.get("default_headers")
+        if isinstance(_dh, dict) and _dh:
+            result["default_headers"] = dict(_dh)
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
@@ -917,6 +926,8 @@ def _resolve_named_custom_runtime(
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = request_overrides
+    if isinstance(custom_provider.get("default_headers"), dict):
+        result["default_headers"] = custom_provider["default_headers"]
     return result
 
 

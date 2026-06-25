@@ -2893,3 +2893,74 @@ def test_resolve_runtime_provider_bedrock_nonclaude_target_model_uses_converse(m
     assert resolved["provider"] == "bedrock"
     assert resolved["api_mode"] == "bedrock_converse"
     assert resolved.get("bedrock_anthropic") is not True
+
+
+def test_named_custom_provider_propagates_default_headers(monkeypatch):
+    """providers.<name>.default_headers from config.yaml must propagate through
+    the runtime resolution chain so init_agent() can pass them to the OpenAI
+    client.  Regression for #52686: headers silently dropped on cron/CLI paths.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "wandb": {
+                    "base_url": "https://api.inference.wandb.ai/v1",
+                    "api_mode": "openai-completions",
+                    "api_key": "wandb-test-key",
+                    "default_headers": {
+                        "OpenAI-Project": "my-org/my-project",
+                    },
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("resolve_provider should not be called for named custom providers")
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="wandb")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "https://api.inference.wandb.ai/v1"
+    assert resolved["api_key"] == "wandb-test-key"
+    assert resolved["default_headers"] == {"OpenAI-Project": "my-org/my-project"}
+
+
+def test_named_custom_provider_without_default_headers_has_no_key(monkeypatch):
+    """When config has no default_headers, the runtime dict must NOT contain
+    the key (avoid sending empty dict to the SDK).
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "local": {
+                    "base_url": "http://localhost:8080/v1",
+                    "api_key": "local-key",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("resolve_provider should not be called")
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="local")
+
+    assert resolved["provider"] == "custom"
+    assert "default_headers" not in resolved
