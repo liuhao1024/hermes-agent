@@ -2908,7 +2908,7 @@ DEFAULT_CONFIG = {
 
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 30,
+    "_config_version": 31,
 }
 
 # =============================================================================
@@ -5229,6 +5229,68 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     "  ✓ Seeded curator.consolidate: false "
                     "(LLM consolidation is now opt-in; pruning stays on)"
                 )
+
+    # ── Version 30 → 31: prune stale toolset names from platform_toolsets / agent.enabled_toolsets ──
+    # PR #47856 removed the ``messaging`` toolset but left stale entries in
+    # users' persisted ``platform_toolsets.*`` / ``agent.enabled_toolsets``.
+    # validate_toolset() then rejects the name on every launch, printing a
+    # red "Warning: Unknown toolsets: messaging" that never goes away.
+    # This migration generically prunes *any* toolset name that no longer
+    # resolves — covering future removals/renames too, not just ``messaging``.
+    if current_ver < 31:
+        config = read_raw_config()
+        try:
+            from toolsets import validate_toolset as _validate_ts
+        except Exception:
+            _validate_ts = None
+        if _validate_ts:
+            mcp_names = set((config.get("mcp_servers") or {}).keys())
+            pruned: list[str] = []
+
+            # Prune platform_toolsets.<platform> lists
+            pt = config.get("platform_toolsets")
+            if isinstance(pt, dict):
+                for plat, ts_list in pt.items():
+                    if not isinstance(ts_list, list):
+                        continue
+                    original_len = len(ts_list)
+                    pt[plat] = [t for t in ts_list if _validate_ts(str(t)) or str(t) in mcp_names]
+                    removed = original_len - len(pt[plat])
+                    if removed:
+                        pruned.extend(
+                            t for t in ts_list
+                            if not _validate_ts(str(t)) and str(t) not in mcp_names
+                        )
+                config["platform_toolsets"] = pt
+
+            # Prune agent.enabled_toolsets
+            agent_cfg = config.get("agent")
+            if isinstance(agent_cfg, dict):
+                ets = agent_cfg.get("enabled_toolsets")
+                if isinstance(ets, list):
+                    original_len = len(ets)
+                    agent_cfg["enabled_toolsets"] = [
+                        t for t in ets if _validate_ts(str(t)) or str(t) in mcp_names
+                    ]
+                    removed = original_len - len(agent_cfg["enabled_toolsets"])
+                    if removed:
+                        pruned.extend(
+                            t for t in ets
+                            if not _validate_ts(str(t)) and str(t) not in mcp_names
+                        )
+                    config["agent"] = agent_cfg
+
+            if pruned:
+                save_config(config)
+                unique_pruned = sorted(set(pruned))
+                results["config_added"].append(
+                    f"pruned stale toolsets: {', '.join(unique_pruned)}"
+                )
+                if not quiet:
+                    print(
+                        f"  ✓ Pruned stale toolset(s) from config: "
+                        f"{', '.join(unique_pruned)}"
+                    )
 
     # ── Post-migration: disable exfiltration-shaped MCP stdio entries ──
     # Users can hand-edit mcp_servers, and older installs may already contain a
