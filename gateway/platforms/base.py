@@ -2437,9 +2437,8 @@ class BasePlatformAdapter(ABC):
         # progress bubbles compact — they persist as permanent messages).
         preview = event.preview
         if preview:
-            cap = preview_max_len if preview_max_len > 0 else 40
-            if len(preview) > cap:
-                preview = preview[:cap - 3] + "..."
+            if preview_max_len > 0 and len(preview) > preview_max_len:
+                preview = preview[:preview_max_len - 3] + "..."
             return f"{emoji} {event.tool_name}: \"{preview}\""
         return f"{emoji} {event.tool_name}..."
 

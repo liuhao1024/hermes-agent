@@ -522,20 +522,14 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     return adapter, result
 
 
-def test_all_mode_default_truncation_40_chars(monkeypatch, tmp_path):
-    """When tool_preview_length is 0 (default), all/new mode truncates to 40 chars."""
+def test_all_mode_default_no_truncation_when_zero(monkeypatch, tmp_path):
+    """When tool_preview_length is 0 (default), all/new mode does NOT truncate — 0 means unlimited."""
     adapter, result = _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0)
     assert result["final_response"] == "done"
     assert adapter.sent
     content = adapter.sent[0]["content"]
-    # The long command should be truncated — total preview <= 40 chars
-    assert "..." in content
-    # Extract the preview part between quotes
-    import re
-    match = re.search(r'"(.+)"', content)
-    assert match, f"No quoted preview found in: {content}"
-    preview_text = match.group(1)
-    assert len(preview_text) <= 40, f"Preview too long ({len(preview_text)}): {preview_text}"
+    # With tool_preview_length=0 (unlimited), the full command should appear
+    assert "..." not in content
 
 
 def test_all_mode_respects_custom_preview_length(monkeypatch, tmp_path):
