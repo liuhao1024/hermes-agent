@@ -199,3 +199,89 @@ class TestEnvVarOrder:
         assert copilot.api_key_env_vars == (
             "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"
         )
+
+
+
+class TestSuppressedSources:
+    """Suppressed credential sources are skipped during token resolution."""
+
+    def test_suppressed_env_var_skipped(self, monkeypatch):
+        """Env vars marked suppressed should be skipped."""
+        from hermes_cli.copilot_auth import resolve_copilot_token
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_copilot_token")
+        monkeypatch.setenv("GH_TOKEN", "gho_gh_fallback")
+
+        with patch(
+            "hermes_cli.copilot_auth._source_suppressed",
+            side_effect=lambda s: s == "env:COPILOT_GITHUB_TOKEN",
+        ):
+            token, source = resolve_copilot_token()
+
+        assert token == "gho_gh_fallback"
+        assert source == "GH_TOKEN"
+
+    def test_suppressed_gh_cli_skipped(self, monkeypatch):
+        """gh_cli source suppressed → returns empty without spawning subprocess."""
+        from hermes_cli.copilot_auth import resolve_copilot_token
+
+        for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+
+        with patch(
+            "hermes_cli.copilot_auth._source_suppressed",
+            side_effect=lambda s: s == "gh_cli",
+        ):
+            token, source = resolve_copilot_token()
+
+        assert token == ""
+        assert source == ""
+
+    def test_all_env_suppressed_gh_cli_also_suppressed(self, monkeypatch):
+        """When all sources suppressed, returns empty."""
+        from hermes_cli.copilot_auth import resolve_copilot_token
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_token")
+        monkeypatch.setenv("GH_TOKEN", "gho_token2")
+
+        with patch(
+            "hermes_cli.copilot_auth._source_suppressed",
+            return_value=True,
+        ):
+            token, source = resolve_copilot_token()
+
+        assert token == ""
+        assert source == ""
+
+    def test_no_suppression_works_normally(self, monkeypatch):
+        """When nothing suppressed, normal resolution order applies."""
+        from hermes_cli.copilot_auth import resolve_copilot_token
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_normal")
+
+        with patch(
+            "hermes_cli.copilot_auth._source_suppressed",
+            return_value=False,
+        ):
+            token, source = resolve_copilot_token()
+
+        assert token == "gho_normal"
+        assert source == "COPILOT_GITHUB_TOKEN"
+
+    def test_suppressed_env_with_value_present_but_skipped(self, monkeypatch):
+        """Suppressed env var with a valid token is still skipped."""
+        from hermes_cli.copilot_auth import resolve_copilot_token
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_suppressed")
+        monkeypatch.setenv("GH_TOKEN", "gho_next")
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        with patch(
+            "hermes_cli.copilot_auth._source_suppressed",
+            side_effect=lambda s: s == "env:COPILOT_GITHUB_TOKEN",
+        ):
+            with patch("hermes_cli.copilot_auth._try_gh_cli_token", return_value=None):
+                token, source = resolve_copilot_token()
+
+        assert token == "gho_next"
+        assert source == "GH_TOKEN"

@@ -43,6 +43,16 @@ _DEVICE_CODE_POLL_INTERVAL = 5  # seconds
 _DEVICE_CODE_POLL_SAFETY_MARGIN = 3  # seconds
 
 
+def _source_suppressed(source: str) -> bool:
+    """Return True when the user removed/suppressed a Copilot credential source."""
+    try:
+        from hermes_cli.auth import is_source_suppressed
+
+        return is_source_suppressed("copilot", source)
+    except Exception:
+        return False
+
+
 def validate_copilot_token(token: str) -> tuple[bool, str]:
     """Validate that a token is usable with the Copilot API.
 
@@ -70,8 +80,12 @@ def resolve_copilot_token() -> tuple[str, str]:
     Returns (token, source) where source describes where the token came from.
     Raises ValueError if only a classic PAT is available.
     """
-    # 1. Check env vars in priority order
+    # 1. Check env vars in priority order — respect explicit removals from
+    # `hermes auth remove copilot <N>` so dashboard/status probes do not
+    # silently re-enable Copilot after the user opted out.
     for env_var in COPILOT_ENV_VARS:
+        if _source_suppressed(f"env:{env_var}"):
+            continue
         val = os.getenv(env_var, "").strip()
         if val:
             valid, msg = validate_copilot_token(val)
@@ -82,7 +96,9 @@ def resolve_copilot_token() -> tuple[str, str]:
                 continue
             return val, env_var
 
-    # 2. Fall back to gh auth token
+    # 2. Fall back to gh auth token — skip if user suppressed the gh_cli source
+    if _source_suppressed("gh_cli"):
+        return "", ""
     token = _try_gh_cli_token()
     if token:
         valid, msg = validate_copilot_token(token)
