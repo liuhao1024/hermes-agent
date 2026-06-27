@@ -10252,6 +10252,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         launchd_restart,
                         get_launchd_label,
                         get_launchd_plist_path,
+                        _launchd_domain,
+                        _probe_launchd_service_running,
                     )
 
                     plist_path = get_launchd_plist_path()
@@ -10269,6 +10271,49 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             except subprocess.CalledProcessError as e:
                                 stderr = (getattr(e, "stderr", "") or "").strip()
                                 print(f"  ⚠ Gateway restart failed: {stderr}")
+
+                            # Verify the gateway actually came back up.
+                            # launchd may defer the respawn when the GUI
+                            # domain is in on-demand-only mode (display
+                            # sleep / screen lock).  Poll for a live PID
+                            # and retry kickstart if absent (#53861).
+                            label = get_launchd_label()
+                            target = f"{_launchd_domain()}/{label}"
+                            import time as _time
+
+                            deadline = _time.monotonic() + 10.0
+                            gateway_alive = False
+                            while _time.monotonic() < deadline:
+                                if _probe_launchd_service_running():
+                                    gateway_alive = True
+                                    break
+                                _time.sleep(1.0)
+
+                            if not gateway_alive:
+                                # Retry: kickstart without -k (no signal
+                                # to existing — there is none).
+                                try:
+                                    subprocess.run(
+                                        ["launchctl", "kickstart", target],
+                                        check=True,
+                                        timeout=30,
+                                    )
+                                    _time.sleep(3.0)
+                                    if _probe_launchd_service_running():
+                                        gateway_alive = True
+                                    else:
+                                        print(
+                                            "  ⚠ Gateway did not restart after update. "
+                                            "macOS launchd may have deferred the respawn "
+                                            "(display sleep / session inactive). "
+                                            "Run: hermes gateway start"
+                                        )
+                                except (subprocess.CalledProcessError,
+                                        subprocess.TimeoutExpired, OSError):
+                                    print(
+                                        "  ⚠ Gateway did not restart after update. "
+                                        "Run: hermes gateway start"
+                                    )
                 except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
                     pass
 
