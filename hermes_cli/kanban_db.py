@@ -5441,6 +5441,24 @@ def _resolve_worktree_workspace(
     requested_resolved = requested.resolve(strict=False)
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
+        # When the inherited workspace_path belongs to a *different* task
+        # (e.g. a child task that inherited its parent's worktree path),
+        # derive the repo root and create a *new* worktree for this task
+        # so that concurrent subtasks don't share a directory.
+        if requested.name != task.id:
+            repo_root = None
+            # The parent worktree lives at <repo>/.worktrees/<parent-id>;
+            # climb up to the repo root so we create <repo>/.worktrees/<child-id>.
+            if requested.parent.name == ".worktrees":
+                candidate = requested.parent.parent
+                if _git_toplevel(candidate) is not None:
+                    repo_root = candidate
+            if repo_root is None:
+                repo_root = _repo_root_for_worktree_target(requested)
+            if repo_root is not None:
+                target = repo_root / ".worktrees" / task.id
+                _ensure_git_worktree(repo_root, target, branch_name)
+                return target, branch_name
         actual_branch = _git_current_branch(requested)
         return requested_resolved, actual_branch or branch_name
 

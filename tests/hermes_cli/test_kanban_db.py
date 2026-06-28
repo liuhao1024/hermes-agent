@@ -2322,6 +2322,67 @@ def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch
     assert f"branch refs/heads/{actual_branch}" in listed
 
 
+def test_decomposed_children_get_separate_worktrees(kanban_home, tmp_path):
+    """When a parent worktree task is decomposed, each child must get its own
+    worktree — not share the parent's directory.  Regression test for #53983."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="parent",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            triage=True,
+        )
+        # Resolve the parent worktree so it materialises at
+        # <repo>/.worktrees/<parent_id>.
+        parent_task = kb.get_task(conn, parent_id)
+        assert parent_task is not None
+        parent_ws = kb.resolve_workspace(parent_task)
+        assert parent_ws == repo / ".worktrees" / parent_id
+        kb.set_workspace_path(conn, parent_id, str(parent_ws))
+
+        # Decompose into two children (they inherit parent's workspace_path).
+        child_ids = kb.decompose_triage_task(
+            conn,
+            parent_id,
+            root_assignee=None,
+            children=[
+                {"title": "child-A"},
+                {"title": "child-B"},
+            ],
+        )
+        assert child_ids is not None and len(child_ids) == 2
+
+        # Resolve each child workspace — each must be a *separate* worktree.
+        child_a_task = kb.get_task(conn, child_ids[0])
+        child_b_task = kb.get_task(conn, child_ids[1])
+        assert child_a_task is not None
+        assert child_b_task is not None
+
+        ws_a = kb.resolve_workspace(child_a_task)
+        ws_b = kb.resolve_workspace(child_b_task)
+
+    expected_a = repo / ".worktrees" / child_ids[0]
+    expected_b = repo / ".worktrees" / child_ids[1]
+    assert ws_a == expected_a
+    assert ws_b == expected_b
+    assert ws_a != ws_b, "children must NOT share a worktree"
+    assert ws_a.exists()
+    assert ws_b.exists()
+
+    # Both must be linked worktrees under the same repo.
+    listed = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert f"worktree {expected_a}" in listed
+    assert f"worktree {expected_b}" in listed
+
+
 # ---------------------------------------------------------------------------
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------
