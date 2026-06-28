@@ -2040,16 +2040,80 @@ class ShellFileOperations(FileOperations):
         # default, and has parallel directory traversal (~200x faster than
         # find on wide trees).  Mirrors _search_content which already uses rg.
         if self._has_command('rg'):
-            return self._search_files_rg(search_pattern, path, limit, offset)
-
-        # Fallback: find (slower, no .gitignore awareness)
-        if not self._has_command('find'):
+            result = self._search_files_rg(search_pattern, path, limit, offset)
+        elif self._has_command('find'):
+            result = self._search_files_find(
+                search_pattern, path, limit, offset,
+                has_hidden_path_ancestor, search_root,
+            )
+        else:
             return SearchResult(
                 error="File search requires 'rg' (ripgrep) or 'find'. "
                       "Install ripgrep for best results: "
                       "https://github.com/BurntSushi/ripgrep#installation"
             )
 
+        # Include directories matching the pattern so empty dirs are visible
+        # (the tool description says "use this instead of ls").
+        dirs = self._find_matching_dirs(
+            search_pattern, path, has_hidden_path_ancestor, search_root,
+        )
+        if dirs:
+            existing = set(result.files)
+            new_dirs = [d for d in dirs if d not in existing]
+            if new_dirs:
+                result.files.extend(new_dirs)
+                result.total_count += len(new_dirs)
+
+        return result
+
+    def _find_matching_dirs(
+        self, pattern: str, path: str,
+        has_hidden_path_ancestor: bool, search_root: Path,
+    ) -> List[str]:
+        """Find directories whose name matches *pattern* under *path*."""
+        hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
+        hidden_filter_expr = f" {hidden_exclude}" if hidden_exclude else ""
+
+        cmd = (
+            f"find {self._escape_shell_arg(path)}{hidden_filter_expr} "
+            f"-type d -name {self._escape_shell_arg(pattern)} "
+            f"2>/dev/null"
+        )
+        result = self._exec(cmd, timeout=30)
+        if result.exit_code != 0 or not result.stdout.strip():
+            return []
+
+        dirs = []
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            # Exclude . and .. (find doesn't return them, but be safe)
+            if line in ('.', '..'):
+                continue
+            dirs.append(line)
+
+        # Hidden-ancestor filtering (same logic as _search_files)
+        if has_hidden_path_ancestor:
+            normalized_root = search_root.resolve()
+            filtered = []
+            for d in dirs:
+                try:
+                    rel_parts = Path(d).resolve().relative_to(normalized_root).parts
+                except ValueError:
+                    rel_parts = Path(d).parts
+                if any(p not in {".", ".."} and p.startswith(".") for p in rel_parts):
+                    continue
+                filtered.append(d)
+            dirs = filtered
+
+        return dirs
+
+    def _search_files_find(
+        self, search_pattern: str, path: str, limit: int, offset: int,
+        has_hidden_path_ancestor: bool, search_root: Path,
+    ) -> SearchResult:
+        """Search for files using the find fallback (slower, no .gitignore)."""
         # Exclude hidden directories (matching ripgrep's default behavior).
         hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
         hidden_filter_expr = f" {hidden_exclude}" if hidden_exclude else ""
@@ -2064,15 +2128,15 @@ class ShellFileOperations(FileOperations):
         cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
-        result = self._exec(cmd, timeout=60)
-        stdout, limit_reason = _search_stdout_and_limit(result)
+        exec_result = self._exec(cmd, timeout=60)
+        stdout, limit_reason = _search_stdout_and_limit(exec_result)
 
         if not stdout.strip() and not limit_reason:
             # Try without -printf (BSD find compatibility -- macOS)
             cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
                         f"2>/dev/null | sort -rn{pagination_expr}"
-            result = self._exec(cmd_simple, timeout=60)
-            stdout, limit_reason = _search_stdout_and_limit(result)
+            exec_result = self._exec(cmd_simple, timeout=60)
+            stdout, limit_reason = _search_stdout_and_limit(exec_result)
 
         files = []
         for line in stdout.strip().split('\n'):
