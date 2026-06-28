@@ -15,6 +15,7 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import os
 import random
 import shutil
@@ -946,6 +947,30 @@ class SignalAdapter(BasePlatformAdapter):
         if not self.client:
             logger.warning("Signal: RPC called but client not connected")
             return None
+
+        # Inline outbound attachments as data: URIs so a signal-cli running in a
+        # SEPARATE container (no shared filesystem) receives them by value instead
+        # of by local path.  Mirrors the inbound base64-decode path (_fetch_attachment).
+        if method == "send" and isinstance(params, dict) and params.get("attachments"):
+            converted: list[str] = []
+            for att in params["attachments"]:
+                if isinstance(att, str) and not att.startswith("data:") and os.path.isfile(att):
+                    try:
+                        with open(att, "rb") as fh:
+                            raw = fh.read()
+                        mime = mimetypes.guess_type(att)[0] or "application/octet-stream"
+                        converted.append(
+                            "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+                        )
+                        logger.info(
+                            "Signal: inlined attachment %s (%d bytes, %s)",
+                            att, len(raw), mime,
+                        )
+                        continue
+                    except Exception as exc:
+                        logger.warning("Signal: failed to inline attachment %s: %s", att, exc)
+                converted.append(att)
+            params = dict(params, attachments=converted)
 
         if rpc_id is None:
             rpc_id = f"{method}_{int(time.time() * 1000)}"

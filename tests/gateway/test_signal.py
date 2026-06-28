@@ -2565,3 +2565,165 @@ class TestRecentSentTimestampRing:
         adapter._track_sent_timestamp({"timestamp": 3})
         # Both 1 and 2 should be evicted on TTL, only 3 remains
         assert list(adapter._recent_sent_timestamps.keys()) == [3]
+
+
+# ---------------------------------------------------------------------------
+# Attachment data-URI inlining in _rpc (issue #53988)
+# ---------------------------------------------------------------------------
+
+class TestRpcAttachmentInlining:
+    """Verify that _rpc converts local file paths to data: URIs for send calls."""
+
+    @pytest.mark.asyncio
+    async def test_rpc_inlines_local_file_as_data_uri(self, monkeypatch, tmp_path):
+        """A local file path in attachments[] should become a data: URI."""
+        adapter = _make_signal_adapter(monkeypatch)
+
+        # Create a small test file
+        test_file = tmp_path / "test.ogg"
+        test_file.write_bytes(b"\x4f\x67\x67\x53fake-ogg-data")
+
+        captured_payloads = []
+
+        class FakeResponse:
+            status_code = 200
+            def json(self):
+                return {"result": {"timestamp": 1234567890}}
+            def raise_for_status(self):
+                pass
+
+        class FakeClient:
+            async def post(self, url, json=None, **kw):
+                captured_payloads.append(json)
+                return FakeResponse()
+
+        adapter.client = FakeClient()
+        adapter.http_url = "http://localhost:8080"
+
+        params = {
+            "account": "+155****4567",
+            "message": "test",
+            "attachments": [str(test_file)],
+        }
+        result = await adapter._rpc("send", params)
+
+        assert result == {"timestamp": 1234567890}
+        assert len(captured_payloads) == 1
+
+        att = captured_payloads[0]["params"]["attachments"][0]
+        assert att.startswith("data:audio/ogg;base64,"), f"Expected data URI, got: {att[:60]}"
+
+        # Verify the base64 decodes to the original content
+        import base64 as b64
+        b64_part = att.split(",", 1)[1]
+        assert b64.b64decode(b64_part) == b"\x4f\x67\x67\x53fake-ogg-data"
+
+    @pytest.mark.asyncio
+    async def test_rpc_preserves_existing_data_uri(self, monkeypatch):
+        """An attachment already prefixed with data: should pass through unchanged."""
+        adapter = _make_signal_adapter(monkeypatch)
+
+        captured_payloads = []
+
+        class FakeResponse:
+            status_code = 200
+            def json(self):
+                return {"result": {"timestamp": 99}}
+            def raise_for_status(self):
+                pass
+
+        class FakeClient:
+            async def post(self, url, json=None, **kw):
+                captured_payloads.append(json)
+                return FakeResponse()
+
+        adapter.client = FakeClient()
+        adapter.http_url = "http://localhost:8080"
+
+        existing_uri = "data:image/png;base64,iVBORw0KGgo="
+        params = {
+            "account": "+155****4567",
+            "message": "test",
+            "attachments": [existing_uri],
+        }
+        await adapter._rpc("send", params)
+
+        att = captured_payloads[0]["params"]["attachments"][0]
+        assert att == existing_uri
+
+    @pytest.mark.asyncio
+    async def test_rpc_skips_conversion_for_non_send_methods(self, monkeypatch, tmp_path):
+        """Non-send RPC methods should not touch attachments."""
+        adapter = _make_signal_adapter(monkeypatch)
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"hello")
+
+        captured_payloads = []
+
+        class FakeResponse:
+            status_code = 200
+            def json(self):
+                return {"result": {}}
+            def raise_for_status(self):
+                pass
+
+        class FakeClient:
+            async def post(self, url, json=None, **kw):
+                captured_payloads.append(json)
+                return FakeResponse()
+
+        adapter.client = FakeClient()
+        adapter.http_url = "http://localhost:8080"
+
+        params = {"attachments": [str(test_file)]}
+        await adapter._rpc("other_method", params)
+
+        att = captured_payloads[0]["params"]["attachments"][0]
+        assert att == str(test_file), "Non-send methods should not inline attachments"
+
+    @pytest.mark.asyncio
+    async def test_rpc_falls_back_on_read_error(self, monkeypatch, tmp_path):
+        """When file read fails, the original path is preserved (fail-open)."""
+        adapter = _make_signal_adapter(monkeypatch)
+
+        captured_payloads = []
+
+        class FakeResponse:
+            status_code = 200
+            def json(self):
+                return {"result": {"timestamp": 1}}
+            def raise_for_status(self):
+                pass
+
+        class FakeClient:
+            async def post(self, url, json=None, **kw):
+                captured_payloads.append(json)
+                return FakeResponse()
+
+        adapter.client = FakeClient()
+        adapter.http_url = "http://localhost:8080"
+
+        # Use a path that exists (passes os.path.isfile) but will fail to read
+        existing_file = tmp_path / "unreadable.bin"
+        existing_file.write_bytes(b"x")
+
+        original_open = open
+        def mock_open(path, mode="r", *a, **kw):
+            if str(path) == str(existing_file) and mode == "rb":
+                raise PermissionError("denied")
+            return original_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", mock_open)
+
+        params = {
+            "account": "+155****4567",
+            "message": "test",
+            "attachments": [str(existing_file)],
+        }
+        await adapter._rpc("send", params)
+
+        # Should fall back to original path on read error
+        att = captured_payloads[0]["params"]["attachments"][0]
+        assert att == str(existing_file)
