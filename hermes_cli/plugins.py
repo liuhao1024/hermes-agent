@@ -1281,7 +1281,22 @@ class PluginManager:
                 loaded = LoadedPlugin(manifest=manifest, enabled=False)
                 loaded.error = "disabled via config"
                 self._plugins[lookup_key] = loaded
-                logger.debug("Skipping disabled plugin '%s'", lookup_key)
+                # Bundled platform plugins auto-load for gateway — a stale
+                # entry in ``plugins.disabled`` silently breaks a configured
+                # platform after migration (e.g. hermes_plugins.discord_platform
+                # → discord-platform).  Emit a visible warning so users can
+                # remove the stale entry from their config.yaml.
+                if manifest.source == "bundled" and manifest.kind == "platform":
+                    logger.warning(
+                        "Bundled platform plugin '%s' is disabled via "
+                        "plugins.disabled in config.yaml — the corresponding "
+                        "gateway platform will not connect.  Remove '%s' from "
+                        "plugins.disabled if this is unintentional.",
+                        lookup_key,
+                        lookup_key if lookup_key in disabled else manifest.name,
+                    )
+                else:
+                    logger.debug("Skipping disabled plugin '%s'", lookup_key)
                 continue
 
             # Exclusive plugins (memory providers) have their own
