@@ -2061,7 +2061,7 @@ class ShellFileOperations(FileOperations):
         if not has_hidden_path_ancestor:
             pagination_expr = f" | tail -n +{offset + 1} | head -n {limit}"
 
-        cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
+        cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} \\( -type f -o -type d \\) -name {self._escape_shell_arg(search_pattern)} " \
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
         result = self._exec(cmd, timeout=60)
@@ -2069,7 +2069,7 @@ class ShellFileOperations(FileOperations):
 
         if not stdout.strip() and not limit_reason:
             # Try without -printf (BSD find compatibility -- macOS)
-            cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
+            cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} \\( -type f -o -type d \\) -name {self._escape_shell_arg(search_pattern)} " \
                         f"2>/dev/null | sort -rn{pagination_expr}"
             result = self._exec(cmd_simple, timeout=60)
             stdout, limit_reason = _search_stdout_and_limit(result)
@@ -2147,10 +2147,38 @@ class ShellFileOperations(FileOperations):
 
         page = all_files[offset:offset + limit]
 
+        # Also search for directories — rg --files only lists regular files.
+        # Merge directory results so empty folders are discoverable (#54347).
+        # Note: path is already expanded by the caller (search()).
+        search_root = Path(path)
+        has_hidden = any(
+            p not in {".", ".."} and p.startswith(".")
+            for p in search_root.parts
+        )
+        hidden_flag = "" if has_hidden else "-not -path '*/.*'"
+        find_dir_cmd = (
+            f"find {self._escape_shell_arg(path)} {hidden_flag} "
+            f"-type d -name {self._escape_shell_arg(pattern)} "
+            f"2>/dev/null | sort -rn"
+        )
+        dir_result = self._exec(find_dir_cmd, timeout=30)
+        dir_paths = set()
+        for line in dir_result.stdout.strip().split('\n'):
+            if line:
+                dir_paths.add(line.strip())
+
+        # Merge: files first (already sorted by mtime), then new directories.
+        merged = list(all_files)
+        for d in dir_paths:
+            if d not in set(all_files):
+                merged.append(d)
+
+        page = merged[offset:offset + limit]
+
         return SearchResult(
             files=page,
-            total_count=len(all_files),
-            truncated=len(all_files) >= fetch_limit or bool(limit_reason),
+            total_count=len(merged),
+            truncated=len(merged) >= fetch_limit or bool(limit_reason),
             limit_reason=limit_reason,
         )
     

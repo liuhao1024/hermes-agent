@@ -642,6 +642,58 @@ class TestSearchPathValidation:
         assert "search failed" in result.error.lower() or "Search error" in result.error
 
 
+class TestSearchFilesIncludesDirectories:
+    """Regression: search_files with target='files' should include directories (#54347)."""
+
+    def _make_env(self):
+        env = MagicMock()
+        env.cwd = "/"
+
+        def execute(command, **kwargs):
+            completed = subprocess.run(
+                command, shell=True, text=True, capture_output=True,
+            )
+            return {
+                "output": completed.stdout,
+                "returncode": completed.returncode,
+            }
+
+        env.execute = execute
+        return env
+
+    def test_empty_directory_found_by_search(self, tmp_path):
+        """An empty directory should be discoverable via search_files."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        env = self._make_env()
+        env.cwd = str(tmp_path)
+        ops = ShellFileOperations(env)
+        result = ops.search("vault", path=str(tmp_path), target="files")
+        assert any("vault" in f for f in result.files)
+
+    def test_directory_and_file_both_found(self, tmp_path):
+        """A directory and a file with similar names should both appear."""
+        (tmp_path / "mydir").mkdir()
+        (tmp_path / "myfile.txt").write_text("x")
+        env = self._make_env()
+        env.cwd = str(tmp_path)
+        ops = ShellFileOperations(env)
+        result = ops.search("my*", path=str(tmp_path), target="files")
+        names = [os.path.basename(f) for f in result.files]
+        assert "mydir" in names
+        assert "myfile.txt" in names
+
+    def test_find_fallback_includes_directories(self, tmp_path):
+        """The find fallback (no rg) should also include directories."""
+        (tmp_path / "empty_dir").mkdir()
+        env = self._make_env()
+        env.cwd = str(tmp_path)
+        ops = ShellFileOperations(env)
+        ops._has_command = lambda cmd: cmd != "rg"  # force find fallback
+        result = ops.search("empty_dir", path=str(tmp_path), target="files")
+        assert any("empty_dir" in f for f in result.files)
+
+
 class TestSearchFilesFallbackHiddenPaths:
     def _make_env(self):
         env = MagicMock()
