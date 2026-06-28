@@ -488,6 +488,27 @@ class TestSyncSkills:
         assert "old-skill" not in result.get("updated", [])
         assert not (skills_dir / "old-skill").exists()
 
+    def test_manifest_hash_mismatch_reseeds(self, tmp_path):
+        """Skill in manifest but not on disk + manifest hash != bundled hash
+        = profile copy inconsistency.  Re-seed from bundled."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        skills_dir.mkdir(parents=True)
+        # Record a stale/different hash — simulates a profile that was
+        # copied from a manifest snapshot without the actual skill files.
+        manifest_file.write_text("old-skill:stalehash123\n")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+            # Read manifest inside patch context so MANIFEST_FILE is correct
+            manifest = _read_manifest()
+
+        assert "old-skill" in result["copied"]
+        assert (skills_dir / "old-skill" / "SKILL.md").exists()
+        # Manifest should now have the correct bundled hash
+        assert manifest["old-skill"] == _dir_hash(bundled / "old-skill")
+
     def test_unmodified_skill_gets_updated(self, tmp_path):
         """Skill in manifest + on disk + user hasn't modified = update from bundled."""
         bundled = self._setup_bundled(tmp_path)

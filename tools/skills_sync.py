@@ -685,8 +685,32 @@ def sync_skills(quiet: bool = False) -> dict:
                 skipped += 1  # bundled unchanged, user unchanged
 
         else:
-            # ── In manifest but not on disk — user deleted it ──
-            skipped += 1
+            # ── In manifest but not on disk ──
+            origin_hash = manifest.get(skill_name, "")
+            if origin_hash == bundled_hash:
+                # Manifest hash matches bundled = user had the current
+                # version and intentionally deleted it.  Respect that.
+                skipped += 1
+            else:
+                # Manifest hash differs from bundled (or is empty from
+                # v1 migration) = skill was never synced to the current
+                # bundled version.  This happens when a profile inherits
+                # a manifest entry without the corresponding files
+                # (partial copy, interrupted clone, or profile created
+                # before this bundled skill existed).  Re-seed.
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(skill_src, dest)
+                    copied.append(skill_name)
+                    manifest[skill_name] = bundled_hash
+                    if not quiet:
+                        print(
+                            f"  + {skill_name} (re-seeded — "
+                            f"manifest/bundled hash mismatch)"
+                        )
+                except (OSError, IOError) as e:
+                    if not quiet:
+                        print(f"  ! Failed to copy {skill_name}: {e}")
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
