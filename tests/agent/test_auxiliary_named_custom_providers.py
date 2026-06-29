@@ -491,3 +491,43 @@ class TestCustomProviderAliasCollision:
         assert isinstance(client, OpenAI)
         assert "override.example.com" in str(client.base_url)
         assert client.api_key == "override-key"
+
+
+class TestZaiVisionCodingPlanUrlPriority:
+    """Regression guard for #55112.
+
+    The zai vision fallback must try the coding-plan (subscription) endpoint
+    before the metered endpoints so that coding-plan subscribers are not
+    silently billed PAYG for vision requests.
+    """
+
+    def test_coding_plan_url_tried_first(self, tmp_path):
+        _write_config(tmp_path, {
+            "model": {"default": "zai/glm-5.1", "provider": "zai"},
+            "auxiliary": {"vision": {"provider": "zai"}},
+        })
+        calls = []
+        expected_first = "https://api.z.ai/api/coding/paas/v4"
+
+        def fake_get_cached_client(*args, **kwargs):
+            base_url = kwargs.get("base_url", "")
+            calls.append(base_url)
+            if base_url == expected_first:
+                return MagicMock(), "glm-5v-turbo"
+            return None, None
+
+        with (
+            patch("agent.auxiliary_client._read_nous_auth", return_value=None),
+            patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={
+                "api_key": "test-key",
+                "base_url": "https://api.z.ai/api/paas/v4",
+            }),
+            patch("agent.auxiliary_client._get_cached_client", side_effect=fake_get_cached_client),
+        ):
+            from agent.auxiliary_client import resolve_vision_provider_client
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "zai"
+        assert client is not None
+        # The coding-plan URL must be the first one attempted
+        assert calls[0] == expected_first

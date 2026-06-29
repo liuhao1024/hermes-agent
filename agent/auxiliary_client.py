@@ -4769,8 +4769,9 @@ def resolve_vision_provider_client(
     # while the OpenAI wire handles it correctly.
     if requested == "zai" and not resolved_base_url:
         zai_openai_urls = [
-            "https://open.bigmodel.cn/api/paas/v4",
-            "https://api.z.ai/api/paas/v4",
+            "https://api.z.ai/api/coding/paas/v4",  # coding-plan (subscription quota)
+            "https://open.bigmodel.cn/api/paas/v4",  # metered fallback
+            "https://api.z.ai/api/paas/v4",  # metered fallback
         ]
         for _zai_url in zai_openai_urls:
             client, final_model = _get_cached_client(
