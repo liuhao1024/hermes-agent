@@ -28,6 +28,7 @@ import os
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
+from plugins.web._utils import read_json_capped
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     response = httpx.post(url, json=payload, timeout=60)
     response.raise_for_status()
-    return response.json()
+    return read_json_capped(response)
 
 
 def _normalize_tavily_search_results(response: Dict[str, Any]) -> Dict[str, Any]:

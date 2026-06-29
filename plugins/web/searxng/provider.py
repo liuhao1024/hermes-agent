@@ -27,6 +27,7 @@ import os
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
+from plugins.web._utils import read_json_capped
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,13 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             }
 
         try:
-            data = resp.json()
+            data = read_json_capped(resp)
+        except ValueError as exc:
+            logger.warning("SearXNG response too large or invalid: %s", exc)
+            return {
+                "success": False,
+                "error": f"SearXNG response rejected: {exc}",
+            }
         except Exception as exc:  # noqa: BLE001
             logger.warning("SearXNG response parse error: %s", exc)
             return {

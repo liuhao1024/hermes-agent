@@ -24,6 +24,7 @@ import os
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
+from plugins.web._utils import read_json_capped
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,13 @@ class BraveFreeWebSearchProvider(WebSearchProvider):
             return {"success": False, "error": f"Could not reach Brave Search: {exc}"}
 
         try:
-            data = resp.json()
+            data = read_json_capped(resp)
+        except ValueError as exc:
+            logger.warning("Brave Search response too large or invalid: %s", exc)
+            return {
+                "success": False,
+                "error": f"Brave Search response rejected: {exc}",
+            }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Brave Search response parse error: %s", exc)
             return {"success": False, "error": "Could not parse Brave Search response as JSON"}
