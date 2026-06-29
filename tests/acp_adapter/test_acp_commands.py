@@ -18,6 +18,7 @@ class FakeAgent:
         self.valid_tool_names = set()
         self.steers = []
         self.runs = []
+        self._cancel_state = None  # set to a session state to simulate cancel mid-turn
 
     def steer(self, text):
         self.steers.append(text)
@@ -25,6 +26,9 @@ class FakeAgent:
 
     def run_conversation(self, *, user_message, conversation_history, task_id, **kwargs):
         self.runs.append(user_message)
+        # Simulate cancel mid-turn: set cancel_event so the turn appears interrupted.
+        if self._cancel_state and self._cancel_state.cancel_event:
+            self._cancel_state.cancel_event.set()
         messages = list(conversation_history or [])
         messages.append({"role": "user", "content": user_message})
         final = f"ran: {user_message}"
@@ -196,3 +200,29 @@ async def test_acp_prompt_drains_queued_turns_after_current_run():
     assert state.queued_prompts == []
     agent_messages = [u for _sid, u in conn.updates if getattr(u, "session_update", None) == "agent_message_chunk"]
     assert len(agent_messages) >= 2
+
+
+@pytest.mark.asyncio
+async def test_acp_cancel_discards_queued_prompts():
+    """Cancelling a turn must discard queued prompts instead of draining them.
+
+    Regression test for #55183: without the guard the drain loop calls
+    prompt() recursively which clears cancel_event, so queued work starts
+    silently even though the user just cancelled.
+    """
+    acp_agent, state, fake, _conn = make_agent_and_state()
+    state.queued_prompts.append("should not run after cancel")
+
+    # Wire FakeAgent to set cancel_event mid-turn (simulates cancel()
+    # being called while the agent is processing).
+    fake._cancel_state = state
+
+    response = await acp_agent.prompt(
+        session_id=state.session_id,
+        prompt=[TextContentBlock(type="text", text="do something")],
+    )
+
+    assert response.stop_reason == "cancelled"
+    # Only the main prompt ran; queued prompt was discarded on cancel.
+    assert fake.runs == ["do something"]
+    assert state.queued_prompts == []

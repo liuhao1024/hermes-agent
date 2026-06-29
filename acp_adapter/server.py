@@ -1641,6 +1641,23 @@ class HermesACPAgent(acp.Agent):
             state.is_running = False
             state.current_prompt_text = ""
 
+        # When the user cancels, stop draining queued prompts.  The cancel
+        # signal is a session-level intent — launching queued follow-ups after
+        # an interrupted turn contradicts that intent.  Without this guard the
+        # recursive prompt() call clears cancel_event (line 1388-1389) and the
+        # queued work starts silently even though the user just cancelled.
+        if cancelled:
+            with state.runtime_lock:
+                if state.queued_prompts:
+                    logger.info(
+                        "Discarding %d queued prompt(s) for cancelled session %s",
+                        len(state.queued_prompts),
+                        session_id,
+                    )
+                    state.queued_prompts.clear()
+            # Do not return early — fall through to emit the interrupted
+            # response and clean up bookkeeping (usage, turn record, etc.).
+
         while True:
             with state.runtime_lock:
                 if not state.queued_prompts:
