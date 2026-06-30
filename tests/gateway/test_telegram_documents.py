@@ -969,3 +969,149 @@ class TestSendVideo:
 
         call_kwargs = connected_adapter._bot.send_video.call_args[1]
         assert call_kwargs["message_thread_id"] == 789
+
+
+# ---------------------------------------------------------------------------
+# Local Bot API fallback tests (#55698)
+# ---------------------------------------------------------------------------
+
+class TestLocalBotApiFallback:
+    """Regression tests for local telegram-bot-api --local file resolution."""
+
+    @staticmethod
+    def _patch_home(monkeypatch, tmp_path):
+        """Redirect Path.home() to tmp_path for the duration of the test."""
+        import pathlib
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+
+    @pytest.mark.asyncio
+    async def test_video_falls_back_to_local_storage(self, adapter, tmp_path, monkeypatch):
+        """When download_as_bytearray() fails in local_mode, read from disk."""
+        adapter.config.extra = {"local_mode": True}
+
+        # Create a fake local Bot API file under <home>/.hermes/telegram-bot-api/...
+        hermes_dir = tmp_path / ".hermes" / "telegram-bot-api" / "fake-token" / "documents"
+        hermes_dir.mkdir(parents=True)
+        local_video = hermes_dir / "file_66.MOV"
+        local_video.write_bytes(b"\x00\x00\x00\x1c" + b"ftyp" + b"\x00" * 100)
+
+        self._patch_home(monkeypatch, tmp_path)
+
+        # Mock file_obj: download fails, but file_path is a container absolute path
+        file_obj = AsyncMock()
+        file_obj.download_as_bytearray = AsyncMock(
+            side_effect=Exception("Not Found: method not found")
+        )
+        file_obj.file_path = "/var/lib/telegram-bot-api/fake-token/documents/file_66.MOV"
+
+        video = _make_video(file_obj)
+        video.file_size = 1024
+
+        msg = _make_message()
+        msg.video = video
+        msg.document = None
+
+        update = _make_update(msg)
+        await adapter._handle_media_message(update, MagicMock())
+
+        # The video should have been cached via local fallback
+        assert adapter.handle_message.call_count >= 1
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls, "Expected cached media path from local fallback"
+
+    @pytest.mark.asyncio
+    async def test_video_document_local_url_fallback(self, adapter, tmp_path, monkeypatch):
+        """file_path as a local Bot API URL resolves via suffix extraction."""
+        adapter.config.extra = {"local_mode": True}
+
+        hermes_dir = tmp_path / ".hermes" / "telegram-bot-api" / "fake-token" / "documents"
+        hermes_dir.mkdir(parents=True)
+        local_video = hermes_dir / "file_42.MOV"
+        local_video.write_bytes(b"\x00\x00\x00\x1c" + b"ftyp" + b"\x00" * 50)
+
+        self._patch_home(monkeypatch, tmp_path)
+
+        file_obj = AsyncMock()
+        file_obj.download_as_bytearray = AsyncMock(
+            side_effect=Exception("Not Found: method not found")
+        )
+        file_obj.file_path = (
+            "http://127.0.0.1:8081/botFAKE//var/lib/telegram-bot-api/"
+            "fake-token/documents/file_42.MOV"
+        )
+
+        video = _make_video(file_obj)
+        video.file_size = 1024
+
+        msg = _make_message()
+        msg.video = video
+        msg.document = None
+
+        update = _make_update(msg)
+        await adapter._handle_media_message(update, MagicMock())
+
+        assert adapter.handle_message.call_count >= 1
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls, "Expected cached media path from URL fallback"
+
+    @pytest.mark.asyncio
+    async def test_download_failure_still_surfaces_error(self, adapter, tmp_path, monkeypatch):
+        """When both download and local fallback fail, error is surfaced."""
+        adapter.config.extra = {"local_mode": True}
+
+        # No local files exist — patch home to empty tmp dir
+        self._patch_home(monkeypatch, tmp_path)
+
+        file_obj = AsyncMock()
+        file_obj.download_as_bytearray = AsyncMock(
+            side_effect=Exception("Not Found: method not found")
+        )
+        file_obj.file_path = "documents/file_99.MOV"
+
+        video = _make_video(file_obj)
+        video.file_size = 1024
+
+        msg = _make_message()
+        msg.video = video
+        msg.document = None
+
+        update = _make_update(msg)
+        await adapter._handle_media_message(update, MagicMock())
+
+        # Should surface the failure, not silently drop
+        assert adapter.handle_message.call_count >= 1
+        event = adapter.handle_message.call_args[0][0]
+        # The event text should contain a cache failure note
+        assert msg.reply_text.called or (event.text and ("could not" in event.text.lower() or "attempted" in event.text.lower()))
+
+    def test_extract_suffix_url(self):
+        """URL with container path extracts documents/file_N.MOV."""
+        suffix = TelegramAdapter._extract_local_api_suffix(
+            "http://127.0.0.1:8081/botTOKEN//var/lib/telegram-bot-api/"
+            "TOKEN/documents/file_66.MOV"
+        )
+        assert suffix == "documents/file_66.MOV"
+
+    def test_extract_suffix_container_absolute(self):
+        """Container absolute path extracts documents/file_N.MOV."""
+        suffix = TelegramAdapter._extract_local_api_suffix(
+            "/var/lib/telegram-bot-api/TOKEN/documents/file_66.MOV"
+        )
+        assert suffix == "documents/file_66.MOV"
+
+    def test_extract_suffix_relative(self):
+        """Relative path is returned as-is."""
+        suffix = TelegramAdapter._extract_local_api_suffix("documents/file_66.MOV")
+        assert suffix == "documents/file_66.MOV"
+
+    def test_extract_suffix_none_for_empty(self):
+        """Empty/None file_path returns None."""
+        assert TelegramAdapter._extract_local_api_suffix("") is None
+        assert TelegramAdapter._extract_local_api_suffix(None) is None
+
+    def test_extract_suffix_photos(self):
+        """Photos directory is also recognised."""
+        suffix = TelegramAdapter._extract_local_api_suffix(
+            "/var/lib/telegram-bot-api/TOKEN/photos/file_123.jpg"
+        )
+        assert suffix == "photos/file_123.jpg"

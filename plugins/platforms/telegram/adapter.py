@@ -61,7 +61,7 @@ except ImportError:
     ContextTypes = _MockContextTypes
 
 import sys
-from pathlib import Path as _Path
+from pathlib import Path, Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
@@ -6484,6 +6484,102 @@ class TelegramAdapter(BasePlatformAdapter):
             return note
         return f"{existing}\n\n{note}"
 
+    # ------------------------------------------------------------------
+    # Local Bot API file-path resolution fallback
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_local_api_suffix(file_path: str) -> Optional[str]:
+        """Extract the relative media suffix from a local Bot API *file_path*.
+
+        Handles three shapes returned by the telegram-bot-api ``--local`` server:
+
+        * URL  ``http://127.0.0.1:8081/bot<TOKEN>//var/lib/telegram-bot-api/<TOKEN>/documents/file_66.MOV``
+        * Absolute container path ``/var/lib/telegram-bot-api/<TOKEN>/documents/file_66.MOV``
+        * Relative path ``documents/file_66.MOV``
+
+        Returns the suffix starting at the first media-directory component
+        (``documents/``, ``photos/``, ``voice/``, ``video/``, ``animations/``)
+        or *None* when no recognisable suffix is found.
+        """
+        if not file_path:
+            return None
+
+        # Strip URL scheme if present.
+        if "://" in file_path:
+            from urllib.parse import urlparse
+
+            file_path = urlparse(file_path).path
+
+        file_path = file_path.lstrip("/")
+
+        # Look for a known media-directory prefix.
+        _MEDIA_PREFIXES = (
+            "documents/",
+            "photos/",
+            "voice/",
+            "video/",
+            "animations/",
+        )
+        for prefix in _MEDIA_PREFIXES:
+            idx = file_path.find(prefix)
+            if idx != -1:
+                return file_path[idx:]
+
+        # Fallback: if the path contains a bare filename after a final '/',
+        # return just the filename so glob can still find it.
+        if "/" in file_path:
+            return file_path.rsplit("/", 1)[-1]
+
+        return None
+
+    async def _download_with_local_fallback(
+        self, file_obj: Any
+    ) -> bytearray:
+        """Download file bytes, falling back to local Bot API storage on failure.
+
+        When ``download_as_bytearray()`` raises *and* ``local_mode`` is enabled,
+        resolve the file from the host-visible telegram-bot-api storage directory
+        (``~/.hermes/telegram-bot-api/…``) using the ``file_path`` attribute that
+        PTB exposes on the :class:`File` object.
+        """
+        try:
+            return await file_obj.download_as_bytearray()
+        except Exception:
+            if not self.config.extra.get("local_mode"):
+                raise
+
+            fp = getattr(file_obj, "file_path", None)
+            suffix = self._extract_local_api_suffix(fp)
+            if not suffix:
+                raise
+
+            logger.info(
+                "[Telegram] download_as_bytearray() failed; attempting local "
+                "Bot API fallback for suffix=%r",
+                suffix,
+            )
+            base = Path.home() / ".hermes" / "telegram-bot-api"
+            if not base.is_dir():
+                raise
+
+            # Try an exact suffix match under any bot-token subdirectory.
+            filename = Path(suffix).name
+            for match in sorted(base.rglob(filename)):
+                if not match.is_file():
+                    continue
+                if str(match).endswith(suffix):
+                    data = match.read_bytes()
+                    logger.info(
+                        "[Telegram] Local Bot API fallback succeeded: %s "
+                        "(%d bytes)",
+                        match,
+                        len(data),
+                    )
+                    return bytearray(data)
+
+            raise
+
     async def _surface_media_cache_failure(
         self,
         msg: Message,
@@ -7065,7 +7161,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self.handle_message(event)
                     return
                 file_obj = await msg.video.get_file()
-                video_bytes = await file_obj.download_as_bytearray()
+                video_bytes = await self._download_with_local_fallback(file_obj)
                 ext = ".mp4"
                 if getattr(file_obj, "file_path", None):
                     for candidate in SUPPORTED_VIDEO_TYPES:
@@ -7159,7 +7255,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 if ext in SUPPORTED_VIDEO_TYPES:
                     file_obj = await doc.get_file()
-                    video_bytes = await file_obj.download_as_bytearray()
+                    video_bytes = await self._download_with_local_fallback(file_obj)
                     cached_path = cache_video_from_bytes(bytes(video_bytes), ext=ext)
                     event.media_urls = [cached_path]
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
@@ -7179,7 +7275,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Known types keep their precise MIME; unknown types are tagged
                 # application/octet-stream so the agent reaches for terminal tools.
                 file_obj = await doc.get_file()
-                doc_bytes = await file_obj.download_as_bytearray()
+                doc_bytes = await self._download_with_local_fallback(file_obj)
                 raw_bytes = bytes(doc_bytes)
                 cached_path = cache_document_from_bytes(raw_bytes, original_filename or f"document{ext or '.bin'}")
                 mime_type = SUPPORTED_DOCUMENT_TYPES.get(ext) or doc.mime_type or "application/octet-stream"
