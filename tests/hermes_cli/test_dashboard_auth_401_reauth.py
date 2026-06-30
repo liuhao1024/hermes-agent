@@ -406,6 +406,93 @@ class TestAutoSsoRedirect:
         assert r.headers["location"].startswith("/login")
         assert "/auth/login" not in r.headers["location"]
 
+    def test_password_only_provider_skips_auto_sso(self, gated_app):
+        """A password-only provider (e.g. BasicAuthProvider) must NOT trigger
+        auto-SSO redirect because its start_login() raises NotImplementedError.
+        The unauth response redirects to /login (password form), not to
+        /auth/login (OAuth redirect)."""
+        from hermes_cli.dashboard_auth import clear_providers, register_provider
+        from hermes_cli.dashboard_auth.base import (
+            DashboardAuthProvider,
+            LoginStart,
+            Session,
+        )
+
+        class _PasswordOnly(DashboardAuthProvider):
+            name = "basic"
+            display_name = "Username & Password"
+            supports_password = True
+
+            def start_login(self, *, redirect_uri: str) -> LoginStart:
+                raise NotImplementedError("password-only")
+
+            def complete_login(self, **kw):
+                raise NotImplementedError("password-only")
+
+            def verify_session(self, **kw):
+                return None
+
+            def refresh_session(self, **kw):
+                raise NotImplementedError("password-only")
+
+            def revoke_session(self, **kw):
+                pass
+
+        # Replace the stub with a password-only provider as the sole provider.
+        clear_providers()
+        register_provider(_PasswordOnly())
+        try:
+            r = gated_app.get("/", follow_redirects=False)
+            # Should redirect to /login (password form), NOT to /auth/login.
+            assert r.status_code == 302
+            assert r.headers["location"].startswith("/login")
+            assert "/auth/login" not in r.headers["location"]
+        finally:
+            # Restore the stub for subsequent tests.
+            clear_providers()
+            register_provider(StubAuthProvider())
+
+    def test_auth_login_redirects_for_password_only_provider(self, gated_app):
+        """Direct access to /auth/login?provider=basic with a password-only
+        provider must redirect to /login instead of crashing with 500."""
+        from hermes_cli.dashboard_auth import clear_providers, register_provider
+        from hermes_cli.dashboard_auth.base import (
+            DashboardAuthProvider,
+            LoginStart,
+            Session,
+        )
+
+        class _PasswordOnly(DashboardAuthProvider):
+            name = "basic"
+            display_name = "Username & Password"
+            supports_password = True
+
+            def start_login(self, *, redirect_uri: str) -> LoginStart:
+                raise NotImplementedError("password-only")
+
+            def complete_login(self, **kw):
+                raise NotImplementedError("password-only")
+
+            def verify_session(self, **kw):
+                return None
+
+            def refresh_session(self, **kw):
+                raise NotImplementedError("password-only")
+
+            def revoke_session(self, **kw):
+                pass
+
+        clear_providers()
+        register_provider(_PasswordOnly())
+        try:
+            r = gated_app.get("/auth/login?provider=basic", follow_redirects=False)
+            assert r.status_code == 302
+            assert "/login" in r.headers["location"]
+            assert "/auth/login" not in r.headers["location"]
+        finally:
+            clear_providers()
+            register_provider(StubAuthProvider())
+
 
 # ---------------------------------------------------------------------------
 # Gate middleware: same-origin next= validation

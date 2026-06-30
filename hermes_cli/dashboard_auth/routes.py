@@ -195,6 +195,11 @@ async def auth_login(request: Request, provider: str, next: str = ""):
 
     try:
         ls = p.start_login(redirect_uri=_redirect_uri(request))
+    except NotImplementedError:
+        # Password-only providers (e.g. BasicAuthProvider) don't implement
+        # OAuth start_login.  Redirect to /login which renders the password
+        # form instead of crashing with a 500.
+        return RedirectResponse(url=f"{_prefix(request)}/login", status_code=302)
     except ProviderError as e:
         audit_log(
             AuditEvent.LOGIN_FAILURE,
