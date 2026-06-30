@@ -210,23 +210,85 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
                 parts.append({"text": text})
         elif ptype == "image_url":
             url = ((item.get("image_url") or {}).get("url") or "")
-            if not isinstance(url, str) or not url.startswith("data:"):
+            if not isinstance(url, str) or not url:
                 continue
-            try:
-                header, encoded = url.split(",", 1)
-                mime = header.split(":", 1)[1].split(";", 1)[0]
-                raw = base64.b64decode(encoded)
-            except Exception:
-                continue
-            parts.append(
-                {
-                    "inlineData": {
-                        "mimeType": mime,
-                        "data": base64.b64encode(raw).decode("ascii"),
+            if url.startswith("data:"):
+                try:
+                    header, encoded = url.split(",", 1)
+                    mime = header.split(":", 1)[1].split(";", 1)[0]
+                    raw = base64.b64decode(encoded)
+                except Exception:
+                    continue
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": mime,
+                            "data": base64.b64encode(raw).decode("ascii"),
+                        }
                     }
-                }
-            )
+                )
+            elif url.startswith(("http://", "https://")):
+                part = _fetch_remote_image(url)
+                if part is not None:
+                    parts.append(part)
     return parts
+
+
+def _fetch_remote_image(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch a remote image URL and return an inlineData part for Gemini.
+
+    Falls back to a text reference if the fetch fails so the image is
+    not silently lost.
+    """
+    try:
+        resp = httpx.get(url, timeout=10.0, follow_redirects=True)
+        resp.raise_for_status()
+    except Exception:
+        logger.debug("Failed to fetch remote image %s", url, exc_info=True)
+        return {"text": f"[Image: {url}]"}
+
+    raw = resp.content
+    if not raw:
+        return {"text": f"[Image: {url}]"}
+
+    # Gemini inlineData limit is ~20 MB; skip oversized images
+    if len(raw) > 20 * 1024 * 1024:
+        return {"text": f"[Image too large ({len(raw)} bytes): {url}]"}
+
+    content_type = resp.headers.get("content-type", "")
+    mime = content_type.split(";")[0].strip() if content_type else ""
+    if not mime or mime == "application/octet-stream":
+        mime = _guess_mime_from_url(url)
+
+    return {
+        "inlineData": {
+            "mimeType": mime,
+            "data": base64.b64encode(raw).decode("ascii"),
+        }
+    }
+
+
+_EXT_TO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+}
+
+
+def _guess_mime_from_url(url: str) -> str:
+    """Guess MIME type from URL path extension, defaulting to image/jpeg."""
+    try:
+        path = url.split("?")[0].split("#")[0].rsplit("/", 1)[-1]
+        ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        return _EXT_TO_MIME.get(ext, "image/jpeg")
+    except Exception:
+        return "image/jpeg"
 
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:

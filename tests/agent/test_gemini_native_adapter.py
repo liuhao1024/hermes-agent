@@ -408,3 +408,111 @@ def test_explicit_max_tokens_is_respected():
 
     req = build_gemini_request(messages=[{"role": "user", "content": "hi"}], max_tokens=4096)
     assert req["generationConfig"]["maxOutputTokens"] == 4096
+
+
+def test_extract_multimodal_parts_converts_data_url():
+    """data: image URLs are decoded to inlineData parts."""
+    import base64
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    payload = base64.b64encode(b"\x89PNG").decode()
+    data_url = f"data:image/png;base64,{payload}"
+    content = [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ]
+    parts = _extract_multimodal_parts(content)
+    assert len(parts) == 2
+    assert parts[0] == {"text": "look"}
+    assert parts[1]["inlineData"]["mimeType"] == "image/png"
+    assert base64.b64decode(parts[1]["inlineData"]["data"]) == b"\x89PNG"
+
+
+def test_extract_multimodal_parts_fetches_remote_image_url(monkeypatch):
+    """Remote http(s) image URLs are fetched and inlined."""
+    import base64
+    from unittest.mock import MagicMock
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"\x89PNGfake"
+    fake_resp.headers = {"content-type": "image/png"}
+    fake_resp.raise_for_status = MagicMock()
+
+    monkeypatch.setattr(
+        "agent.gemini_native_adapter.httpx.get",
+        MagicMock(return_value=fake_resp),
+    )
+
+    content = [
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+    ]
+    parts = _extract_multimodal_parts(content)
+    assert len(parts) == 1
+    assert parts[0]["inlineData"]["mimeType"] == "image/png"
+    assert base64.b64decode(parts[0]["inlineData"]["data"]) == b"\x89PNGfake"
+
+
+def test_extract_multimodal_parts_falls_back_to_text_ref_on_fetch_failure(monkeypatch):
+    """Failed remote image fetch emits a text reference instead of dropping."""
+    from unittest.mock import MagicMock
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    monkeypatch.setattr(
+        "agent.gemini_native_adapter.httpx.get",
+        MagicMock(side_effect=Exception("timeout")),
+    )
+
+    content = [
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+    ]
+    parts = _extract_multimodal_parts(content)
+    assert len(parts) == 1
+    assert "[Image:" in parts[0]["text"]
+    assert "https://example.com/photo.png" in parts[0]["text"]
+
+
+def test_extract_multimodal_parts_skips_oversized_remote_image(monkeypatch):
+    """Remote images exceeding 20 MB are referenced as text, not inlined."""
+    from unittest.mock import MagicMock
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"x" * (21 * 1024 * 1024)
+    fake_resp.headers = {"content-type": "image/png"}
+    fake_resp.raise_for_status = MagicMock()
+
+    monkeypatch.setattr(
+        "agent.gemini_native_adapter.httpx.get",
+        MagicMock(return_value=fake_resp),
+    )
+
+    content = [
+        {"type": "image_url", "image_url": {"url": "https://example.com/huge.png"}},
+    ]
+    parts = _extract_multimodal_parts(content)
+    assert len(parts) == 1
+    assert "too large" in parts[0]["text"].lower()
+
+
+def test_extract_multimodal_parts_guesses_mime_from_url_extension(monkeypatch):
+    """MIME type is guessed from URL extension when Content-Type is generic."""
+    import base64
+    from unittest.mock import MagicMock
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"\xff\xd8\xff"
+    fake_resp.headers = {"content-type": "application/octet-stream"}
+    fake_resp.raise_for_status = MagicMock()
+
+    monkeypatch.setattr(
+        "agent.gemini_native_adapter.httpx.get",
+        MagicMock(return_value=fake_resp),
+    )
+
+    content = [
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+    ]
+    parts = _extract_multimodal_parts(content)
+    assert parts[0]["inlineData"]["mimeType"] == "image/jpeg"
