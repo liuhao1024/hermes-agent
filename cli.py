@@ -7877,6 +7877,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             f"Adjust your self-identification accordingly.]"
         )
 
+        # When switching to a MoA preset, load the preset's config so the
+        # conversation loop can run the MoA aggregation with the correct
+        # reference models and aggregator.  Without this, the provider is
+        # set to "moa" but moa_config stays None and the MoA loop is
+        # skipped entirely (#56078).
+        if result.target_provider == "moa":
+            try:
+                from hermes_cli.moa_config import normalize_moa_config, resolve_moa_preset
+                _moa_raw = self.config.get("moa") if isinstance(self.config, dict) else {}
+                _moa_cfg = normalize_moa_config(_moa_raw)
+                self._pending_moa_config = resolve_moa_preset(_moa_cfg, result.new_model)
+            except Exception as _moa_load_exc:
+                logger.debug("Failed to load MoA preset config for '%s': %s", result.new_model, _moa_load_exc)
+
         # Display confirmation with full metadata
         provider_label = result.provider_label or result.target_provider
         _cprint(f"  ✓ Model switched: {result.new_model}")

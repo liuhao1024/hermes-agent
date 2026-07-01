@@ -17177,6 +17177,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["persist_user_message"] = _persist_user_message_override
                 elif observed_group_context:
                     _conversation_kwargs["persist_user_message"] = message
+                # When the session is on a MoA preset (set via /model or
+                # model picker) but moa_config was not provided (it's only
+                # set by the one-shot /moa command), load the preset config
+                # from config.yaml so the conversation loop runs MoA
+                # aggregation with the correct reference models (#56078).
+                if moa_config is None and getattr(agent, "provider", None) == "moa":
+                    try:
+                        from hermes_cli.moa_config import normalize_moa_config, resolve_moa_preset
+                        _cfg = _load_gateway_config()
+                        _moa_raw = _cfg.get("moa") if isinstance(_cfg, dict) else {}
+                        _moa_cfg = normalize_moa_config(_moa_raw)
+                        moa_config = resolve_moa_preset(_moa_cfg, getattr(agent, "model", None))
+                    except Exception as _moa_exc:
+                        logger.debug("Failed to load MoA preset config for session: %s", _moa_exc)
                 if moa_config is not None:
                     _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
