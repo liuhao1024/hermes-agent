@@ -67,3 +67,68 @@ def test_execute_code_project_mode_falls_back_when_terminal_cwd_missing(monkeypa
 
     assert Path(resolved).is_dir()
     assert Path(resolved) != tmp_path / "missing"
+
+
+def test_execute_code_task_id_override_takes_priority(monkeypatch, tmp_path):
+    """Per-session cwd override (session.cwd.set) beats TERMINAL_CWD."""
+    terminal_workspace = tmp_path / "terminal_workspace"
+    session_workspace = tmp_path / "session_workspace"
+    staging = tmp_path / "staging"
+    terminal_workspace.mkdir()
+    session_workspace.mkdir()
+    staging.mkdir()
+
+    monkeypatch.setenv("TERMINAL_CWD", str(terminal_workspace))
+
+    # Mock _registered_task_cwd_override to return the session workspace.
+    from unittest.mock import patch
+
+    with patch(
+        "tools.file_tools._registered_task_cwd_override",
+        return_value=str(session_workspace),
+    ):
+        resolved = code_execution_tool._resolve_child_cwd(
+            "project", str(staging), task_id="session-aaa"
+        )
+
+    assert Path(resolved) == session_workspace
+
+
+def test_execute_code_empty_task_id_falls_through(monkeypatch, tmp_path):
+    """Empty task_id skips the override and falls through to TERMINAL_CWD."""
+    terminal_workspace = tmp_path / "terminal_workspace"
+    staging = tmp_path / "staging"
+    terminal_workspace.mkdir()
+    staging.mkdir()
+
+    monkeypatch.setenv("TERMINAL_CWD", str(terminal_workspace))
+
+    resolved = code_execution_tool._resolve_child_cwd(
+        "project", str(staging), task_id=""
+    )
+
+    assert Path(resolved) == terminal_workspace
+
+
+def test_execute_code_task_id_override_missing_dir_falls_through(
+    monkeypatch, tmp_path
+):
+    """When the session cwd override points at a nonexistent dir, fall through."""
+    terminal_workspace = tmp_path / "terminal_workspace"
+    staging = tmp_path / "staging"
+    terminal_workspace.mkdir()
+    staging.mkdir()
+
+    monkeypatch.setenv("TERMINAL_CWD", str(terminal_workspace))
+
+    from unittest.mock import patch
+
+    with patch(
+        "tools.file_tools._registered_task_cwd_override",
+        return_value=str(tmp_path / "nonexistent"),
+    ):
+        resolved = code_execution_tool._resolve_child_cwd(
+            "project", str(staging), task_id="session-bbb"
+        )
+
+    assert Path(resolved) == terminal_workspace
