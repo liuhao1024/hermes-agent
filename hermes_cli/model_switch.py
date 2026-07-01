@@ -1104,7 +1104,30 @@ def switch_model(
         ):
             detected = detect_provider_for_model(new_model, current_provider)
             if detected:
-                target_provider, new_model = detected
+                _det_provider, _det_model = detected
+                # Guard: don't auto-switch to a direct (non-aggregator)
+                # provider that has no credentials.  The static catalog
+                # matches model names against ALL providers, so a bare
+                # "mimo-v2.5" pins to "xiaomi" even when the user only
+                # has OAuth for "nous".  When the direct provider lacks
+                # credentials, route through an authenticated aggregator
+                # with the vendor/model slug instead (#56465).
+                from hermes_cli.models import _AGGREGATOR_PROVIDERS
+                if _det_provider not in _AGGREGATOR_PROVIDERS:
+                    _authed = get_authenticated_provider_slugs(
+                        current_provider=current_provider,
+                        user_providers=user_providers,
+                        custom_providers=custom_providers,
+                    )
+                    if _det_provider not in _authed:
+                        from hermes_cli.model_normalize import _prepend_vendor
+                        _prefixed = _prepend_vendor(_det_model)
+                        for _agg in ("nous", "openrouter"):
+                            if _agg in _authed:
+                                _det_provider = _agg
+                                _det_model = _prefixed
+                                break
+                target_provider, new_model = _det_provider, _det_model
 
     # =================================================================
     # COMMON PATH: Resolve credentials, normalize, get metadata
