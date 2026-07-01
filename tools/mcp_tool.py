@@ -2438,6 +2438,35 @@ class MCPServerTask:
                     )
                     return
 
+                # Auth errors during reconnect are non-retryable: the
+                # token is expired and has no refresh_token, or the
+                # OAuth flow requires browser interaction that can't
+                # happen headlessly.  Fast-fail by parking immediately
+                # instead of burning through all retries — each retry
+                # would re-enter the full OAuth flow (300s callback
+                # timeout) before failing again.  See #56673.
+                if _is_auth_error(exc):
+                    logger.warning(
+                        "MCP server '%s' needs re-authentication "
+                        "(non-retryable auth error during reconnect), "
+                        "parking until manual refresh: %s",
+                        self.name, exc,
+                    )
+                    _bump_server_error(self.name)
+                    self._deregister_tools()
+                    self._reconnect_event.clear()
+                    parked = await self._wait_for_reconnect_or_shutdown()
+                    if parked == "shutdown":
+                        return
+                    logger.info(
+                        "MCP server '%s': reconnect requested while "
+                        "parked (after auth error); rebuilding transport.",
+                        self.name,
+                    )
+                    retries = 0
+                    backoff = 1.0
+                    continue
+
                 retries += 1
                 if retries > _MAX_RECONNECT_RETRIES:
                     logger.warning(
