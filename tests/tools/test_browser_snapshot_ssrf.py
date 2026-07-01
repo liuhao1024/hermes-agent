@@ -436,3 +436,95 @@ class TestBrowserVisionPrivateNetworkGuard:
         result_raw = browser_browser_vision(question="what", task_id="test")
         result = json.loads(result_raw)
         assert "private or internal address" not in result.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Cloud-metadata floor: _is_always_blocked_url must block even when
+# _is_safe_url returns True (the floor is unconditional)
+# ---------------------------------------------------------------------------
+
+# Cloud-metadata addresses (AWS/GCP/Azure/DO IMDS)
+_CLOUD_METADATA_URLS = [
+    "http://169.254.169.254/latest/meta-data/",
+    "http://169.254.169.253/metadata/instance",
+    "http://169.254.170.2/v2/credentials",
+]
+
+
+class TestBrowserSnapshotCloudMetadataFloor:
+    """browser_snapshot must block cloud-metadata URLs unconditionally."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+        monkeypatch.setattr(
+            browser_tool,
+            "_get_session_info",
+            lambda task_id: {
+                "session_name": f"s_{task_id}",
+                "bb_session_id": None,
+                "cdp_url": None,
+                "features": {"local": True},
+                "_first_nav": False,
+            },
+        )
+
+    @pytest.mark.parametrize("metadata_url", _CLOUD_METADATA_URLS)
+    def test_blocks_cloud_metadata_even_when_safe_url_passes(
+        self, monkeypatch, metadata_url
+    ):
+        """Cloud-metadata URLs must be blocked even if _is_safe_url allows them."""
+        monkeypatch.setattr(browser_tool, "_is_local_backend", lambda: False)
+        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
+        # _is_safe_url says OK — but _is_always_blocked_url must still catch it
+        monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+
+        def mock_run_browser_command(task_id, command, args=None, **kwargs):
+            if command == "snapshot":
+                return _make_snapshot_result()
+            elif command == "eval":
+                return _make_eval_result(metadata_url)
+            return {"success": False, "error": "unknown"}
+
+        monkeypatch.setattr(
+            browser_tool, "_run_browser_command", mock_run_browser_command
+        )
+
+        result = json.loads(browser_browser_snapshot(task_id="test"))
+        assert result["success"] is False
+        assert "private or internal address" in result["error"]
+        assert metadata_url in result["error"]
+
+
+class TestBrowserVisionCloudMetadataFloor:
+    """browser_vision must block cloud-metadata URLs unconditionally."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    @pytest.mark.parametrize("metadata_url", _CLOUD_METADATA_URLS)
+    def test_blocks_cloud_metadata_even_when_safe_url_passes(
+        self, monkeypatch, metadata_url
+    ):
+        """Cloud-metadata URLs must be blocked even if _is_safe_url allows them."""
+        monkeypatch.setattr(browser_tool, "_is_local_backend", lambda: False)
+        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
+        # _is_safe_url says OK — but _is_always_blocked_url must still catch it
+        monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+
+        def mock_run_browser_command(task_id, command, args=None, **kwargs):
+            if command == "eval":
+                return _make_eval_result(metadata_url)
+            return {"success": False, "error": "should not reach screenshot"}
+
+        monkeypatch.setattr(
+            browser_tool, "_run_browser_command", mock_run_browser_command
+        )
+
+        result = json.loads(
+            browser_browser_vision(question="what do you see", task_id="test")
+        )
+        assert result["success"] is False
+        assert "private or internal address" in result["error"]
+        assert metadata_url in result["error"]
