@@ -1170,6 +1170,23 @@ def test_complete_records_result(kanban_home):
     assert task.completed_at is not None
 
 
+def test_complete_from_todo_status(kanban_home):
+    """Human assignees can mark todo tasks done directly from the dashboard
+    without moving them through the agent pipeline first (#56552)."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review PR", assignee="sebastian")
+        # Manually move to todo to simulate a human-assigned task waiting
+        # for action (e.g. after a parent was completed or direct set).
+        conn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (t,))
+        conn.commit()
+        assert kb.get_task(conn, t).status == "todo"
+        assert kb.complete_task(conn, t, result="reviewed and approved")
+        task = kb.get_task(conn, t)
+    assert task.status == "done"
+    assert task.result == "reviewed and approved"
+    assert task.completed_at is not None
+
+
 def test_block_then_unblock(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")

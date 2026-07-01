@@ -3985,11 +3985,13 @@ def complete_task(
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running|ready -> done`` and record ``result``.
+    """Transition ``running|ready|todo -> done`` and record ``result``.
 
-    Accepts a task that is merely ``ready`` too, so a manual CLI
-    completion (``hermes kanban complete <id>``) works without requiring
-    a claim/start/complete sequence.
+    Accepts a task that is merely ``ready`` or ``todo`` too, so a manual
+    CLI completion (``hermes kanban complete <id>``) works without
+    requiring a claim/start/complete sequence.  ``todo`` is included so
+    human assignees (non-profile) can mark tasks done directly from the
+    dashboard without moving them through the agent pipeline first.
 
     ``summary`` and ``metadata`` are stored on the closing run (if any)
     and surfaced to downstream children via :func:`build_worker_context`.
@@ -4056,7 +4058,7 @@ def complete_task(
                        block_kind   = NULL,
                        block_recurrences = 0
                  WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
+                   AND status IN ('running', 'ready', 'blocked', 'todo')
                 """,
                 (result, now, task_id),
             )
@@ -4073,7 +4075,7 @@ def complete_task(
                        block_kind   = NULL,
                        block_recurrences = 0
                  WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
+                   AND status IN ('running', 'ready', 'blocked', 'todo')
                    AND current_run_id = ?
                 """,
                 (result, now, task_id, int(expected_run_id)),
