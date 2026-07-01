@@ -40,10 +40,46 @@ class MessageDeduplicator:
             return
     """
 
-    def __init__(self, max_size: int = 2000, ttl_seconds: float = 300):
+    def __init__(
+        self,
+        max_size: int = 2000,
+        ttl_seconds: float = 300,
+        *,
+        state_path: Path | None = None,
+        save_every: int = 50,
+    ):
         self._seen: Dict[str, float] = {}
         self._max_size = max_size
         self._ttl = ttl_seconds
+        self._state_path = state_path
+        self._save_every = save_every
+        self._ops_since_save = 0
+        if state_path is not None:
+            self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """Load persisted dedup state from ``self._state_path``."""
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+            cutoff = time.time() - self._ttl
+            self._seen = {k: v for k, v in data.items() if v > cutoff}
+        except Exception:
+            logger.debug("Failed to load dedup state from %s", self._state_path)
+
+    def _save_to_disk(self) -> None:
+        """Persist current dedup state to ``self._state_path``."""
+        if self._state_path is None:
+            return
+        try:
+            atomic_json_write(self._state_path, self._seen)
+        except Exception:
+            logger.debug("Failed to save dedup state to %s", self._state_path)
+
+    def flush(self) -> None:
+        """Force-save dedup state (e.g., on graceful shutdown)."""
+        self._save_to_disk()
 
     def is_duplicate(self, msg_id: str) -> bool:
         """Return True if *msg_id* was already seen within the TTL window."""
@@ -68,6 +104,10 @@ class MessageDeduplicator:
                     key=lambda item: item[1],
                 )[-self._max_size:]
                 self._seen = dict(newest)
+        self._ops_since_save += 1
+        if self._ops_since_save >= self._save_every:
+            self._ops_since_save = 0
+            self._save_to_disk()
         return False
 
     def clear(self):

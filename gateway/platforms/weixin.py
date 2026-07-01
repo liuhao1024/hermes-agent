@@ -1000,6 +1000,10 @@ def _save_sync_buf(hermes_home: str, account_id: str, sync_buf: str) -> None:
     atomic_json_write(path, {"get_updates_buf": sync_buf})
 
 
+def _dedup_state_path(hermes_home: str, account_id: str) -> Path:
+    return _account_dir(hermes_home) / f"{account_id}.dedup.json"
+
+
 async def qr_login(
     hermes_home: str,
     *,
@@ -1157,9 +1161,12 @@ class WeixinAdapter(BasePlatformAdapter):
         self._poll_session: Optional[aiohttp.ClientSession] = None
         self._send_session: Optional[aiohttp.ClientSession] = None
         self._poll_task: Optional[asyncio.Task] = None
-        self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
 
         self._account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
+        self._dedup = MessageDeduplicator(
+            ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS,
+            state_path=_dedup_state_path(hermes_home, self._account_id) if self._account_id else None,
+        )
         self._token = str(config.token or extra.get("token") or os.getenv("WEIXIN_TOKEN", "")).strip()
         self._base_url = str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/")
         self._cdn_base_url = str(
@@ -1330,6 +1337,7 @@ class WeixinAdapter(BasePlatformAdapter):
         if self._send_session and not self._send_session.closed:
             await self._send_session.close()
         self._send_session = None
+        self._dedup.flush()
         self._release_platform_lock()
         self._mark_disconnected()
         logger.info("[%s] Disconnected", self.name)
