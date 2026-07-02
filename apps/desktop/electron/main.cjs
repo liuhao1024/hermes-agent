@@ -155,6 +155,29 @@ if (USER_DATA_OVERRIDE) {
   app.setPath('userData', resolvedUserData)
 }
 
+// ── Global uncaught-exception guard ──────────────────────────────────────
+// Chromium's SimpleURLLoaderWrapper throws ERR_NETWORK_IO_SUSPENDED when a
+// pending network request is interrupted by OS-level sleep (electron#20534).
+// Without a handler the main process crashes and shows an error dialog.
+// The renderer's power-resume handler (sendPowerResume → use-gateway-boot
+// reconnectNow) restores the connection on wake — we just need to prevent
+// the main process from dying before that happens.
+process.on('uncaughtException', (error) => {
+  const msg = String(error?.message || error || '')
+  if (error?.code === 'ERR_NETWORK_IO_SUSPENDED' || msg.includes('ERR_NETWORK_IO_SUSPENDED')) {
+    console.warn('[main] Suppressed ERR_NETWORK_IO_SUSPENDED during network transition')
+    return
+  }
+  // All other uncaught exceptions: replicate Electron's default crash dialog.
+  try {
+    dialog.showErrorBox(
+      'Hermes Desktop — Unexpected Error',
+      error?.stack || msg || 'An unknown error occurred.'
+    )
+  } catch { /* dialog may be unavailable before app 'ready' */ }
+  app.exit(1)
+})
+
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
 const IS_PACKAGED = app.isPackaged
 const IS_MAC = process.platform === 'darwin'
