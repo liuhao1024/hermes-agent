@@ -23,7 +23,7 @@ class TestHermesApiServerToolset:
     def test_toolset_includes_core_tools(self):
         tools = resolve_toolset("hermes-api-server")
         expected = [
-            "terminal", "process",
+            "terminal", "process", "read_terminal", "close_terminal",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze", "image_generate",
             "execute_code", "delegate_task",
@@ -55,6 +55,41 @@ class TestHermesApiServerToolset:
     def test_toolset_excludes_text_to_speech(self):
         tools = resolve_toolset("hermes-api-server")
         assert "text_to_speech" not in tools
+
+
+    def test_terminal_toolset_subset_passes(self):
+        """Regression: terminal toolset (including read_terminal/close_terminal)
+        must be a subset of hermes-api-server tools. Without this, the subset
+        check in _get_platform_tools() silently drops the entire terminal toolset
+        from api_server sessions — including terminal and process themselves."""
+        api_tools = set(resolve_toolset("hermes-api-server"))
+        terminal_tools = set(resolve_toolset("terminal"))
+        assert terminal_tools.issubset(api_tools), (
+            f"terminal toolset not a subset of hermes-api-server: "
+            f"missing {terminal_tools - api_tools}"
+        )
+
+
+class TestHermesAcpToolset:
+    """Tests for the hermes-acp toolset definition."""
+
+    def test_toolset_exists(self):
+        ts = get_toolset("hermes-acp")
+        assert ts is not None
+
+    def test_terminal_tools_present(self):
+        tools = resolve_toolset("hermes-acp")
+        for tool in ["terminal", "process", "read_terminal", "close_terminal"]:
+            assert tool in tools, f"Missing terminal tool in hermes-acp: {tool}"
+
+    def test_terminal_toolset_subset_passes(self):
+        """Same regression as api-server: terminal toolset subset check."""
+        acp_tools = set(resolve_toolset("hermes-acp"))
+        terminal_tools = set(resolve_toolset("terminal"))
+        assert terminal_tools.issubset(acp_tools), (
+            f"terminal toolset not a subset of hermes-acp: "
+            f"missing {terminal_tools - acp_tools}"
+        )
 
 
 class TestApiServerPlatformConfig:
