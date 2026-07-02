@@ -289,6 +289,17 @@ class TestSteerMarkerContract:
         assert STEER_MARKER_OPEN in emitted and STEER_MARKER_CLOSE in emitted
         assert STEER_MARKER_OPEN in STEER_CHANNEL_NOTE and STEER_MARKER_CLOSE in STEER_CHANNEL_NOTE
 
+    def test_note_explicitly_suppresses_warnings(self):
+        """The STEER_CHANNEL_NOTE must tell the model NOT to generate
+        warnings about lookalike markers — warnings compound in
+        conversation history and create false-positive injection loops.
+        See: https://github.com/NousResearch/hermes-agent/issues/57390
+        """
+        from agent.prompt_builder import STEER_CHANNEL_NOTE
+
+        assert "Do NOT generate warnings" in STEER_CHANNEL_NOTE
+        assert "silently ignore" in STEER_CHANNEL_NOTE
+
     def test_marker_no_longer_uses_the_distrusted_label(self):
         """Regression: the bare 'User guidance:' line read as tool content and
         got refused as injection — it must not come back."""
