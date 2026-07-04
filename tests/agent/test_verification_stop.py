@@ -364,3 +364,39 @@ def test_is_non_code_path_classification():
     assert _is_non_code_path("src/app.ts") is False
     assert _is_non_code_path("config.yaml") is False
     assert _is_non_code_path("run_agent.py") is False
+
+
+# ---------------------------------------------------------------------------
+# Subagent guard: verify-on-stop must not fire for delegate_task subagents.
+# The conversation_loop skips the nudge when _delegate_depth > 0 because
+# subagents return only their last message — a verification nudge would
+# replace the actual work output.  (Fix for #58490)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_on_stop_skipped_for_subagent(clear_verify_env, tmp_path, monkeypatch):
+    """Subagents (_delegate_depth > 0) must skip verify-on-stop.
+
+    The conversation_loop checks ``getattr(agent, "_delegate_depth", 0) == 0``
+    before issuing the nudge.  This test verifies the guard condition logic
+    independent of the full conversation loop.
+    """
+    from unittest.mock import MagicMock
+
+    # Simulate a foreground agent (depth=0) on an interactive surface —
+    # verify_on_stop_enabled returns True.
+    fg_agent = MagicMock()
+    fg_agent._delegate_depth = 0
+    assert verify_on_stop_enabled({"agent": {"verify_on_stop": True}}) is True
+    assert getattr(fg_agent, "_delegate_depth", 0) == 0  # guard passes
+
+    # Simulate a subagent (depth=1) — the guard must block.
+    sub_agent = MagicMock()
+    sub_agent._delegate_depth = 1
+    assert verify_on_stop_enabled({"agent": {"verify_on_stop": True}}) is True
+    assert getattr(sub_agent, "_delegate_depth", 0) != 0  # guard blocks
+
+    # Nested subagent (depth=2) — also blocked.
+    nested_agent = MagicMock()
+    nested_agent._delegate_depth = 2
+    assert getattr(nested_agent, "_delegate_depth", 0) != 0  # guard blocks

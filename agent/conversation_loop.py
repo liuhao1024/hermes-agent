@@ -5064,7 +5064,10 @@ def run_conversation(
                         verify_on_stop_enabled,
                     )
 
-                    if verify_on_stop_enabled():
+                    # Skip verify-on-stop for subagents (delegate_task).
+                    # Subagents return only their last message to the parent;
+                    # a verification nudge would replace the actual work output.
+                    if verify_on_stop_enabled() and getattr(agent, "_delegate_depth", 0) == 0:
                         _verify_nudge = build_verify_on_stop_nudge(
                             session_id=getattr(agent, "session_id", None),
                             changed_paths=getattr(agent, "_turn_file_mutation_paths", set()),
@@ -5117,7 +5120,7 @@ def run_conversation(
                     from agent.verify_hooks import max_verify_nudges
                     from hermes_cli.plugins import get_pre_verify_continue_message, has_hook
 
-                    if _edited and has_hook("pre_verify") and _attempt < max_verify_nudges():
+                    if _edited and has_hook("pre_verify") and _attempt < max_verify_nudges() and getattr(agent, "_delegate_depth", 0) == 0:
                         # Posture is fixed for the session — resolve once + cache.
                         coding = getattr(agent, "_resolved_is_coding", None)
                         if coding is None:
