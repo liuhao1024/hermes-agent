@@ -5529,6 +5529,13 @@ def _resolve_task_provider_model(
     if base_url:
         return "custom", resolved_model, base_url, api_key, resolved_api_mode
     if provider:
+        # When provider is explicit but base_url is not, consult config for
+        # per-task base_url/api_key so auxiliary.<task>.base_url is honored.
+        # Without this, a caller passing provider="custom" with no base_url
+        # bypasses the config block and falls through to main-runtime
+        # resolution.  See #58515.
+        if not base_url and cfg_base_url:
+            return provider, resolved_model, cfg_base_url, api_key or cfg_api_key, resolved_api_mode
         return provider, resolved_model, base_url, api_key, resolved_api_mode
 
     if task:

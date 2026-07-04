@@ -169,6 +169,43 @@ class TestResolveTaskProviderModel:
         assert api_mode is None
 
 
+    def test_explicit_provider_without_base_url_honors_cfg_base_url(self, monkeypatch):
+        """When provider is explicit but base_url is None, config base_url is used.
+
+        Regression test for #58515: explicit provider without base_url
+        bypassed the config block, dropping auxiliary.<task>.base_url.
+        """
+        monkeypatch.setattr(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            lambda task: {
+                "base_url": "https://custom-nim.example/v1",
+                "api_key": "nvapi-test-key",
+            } if task == "vision" else {},
+        )
+        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+            task="vision",
+            provider="custom",
+            model="meta/llama-3.2-11b-vision-instruct",
+        )
+
+        assert resolved_provider == "custom"
+        assert base_url == "https://custom-nim.example/v1"
+        assert api_key == "nvapi-test-key"
+
+    def test_explicit_provider_without_base_url_no_cfg_keeps_none(self):
+        """When provider is explicit, base_url is None, and no config base_url,
+        the function returns as before (no regression for callers without config).
+        """
+        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+            task="vision",
+            provider="custom",
+            model="test-model",
+        )
+
+        assert resolved_provider == "custom"
+        assert base_url is None
+
+
 class TestBuildCallKwargsMaxTokens:
     """_build_call_kwargs should not cap output by default (#34530).
 
