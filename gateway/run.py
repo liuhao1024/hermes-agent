@@ -2222,25 +2222,28 @@ def _teams_pipeline_plugin_enabled() -> bool:
 
 
 def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error.
+    """Load and parse config.yaml, returning {} on any error.
 
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
+    Uses ``get_hermes_home()`` so the profile runtime scope
+    (``_profile_runtime_scope``) can redirect reads to a per-profile
+    ``config.yaml`` under multiplex mode.  Falls back to the module-level
+    ``_hermes_home`` when no override is active.
+
+    Shares the mtime-keyed raw-yaml cache from
+    ``hermes_cli.config.read_raw_config`` when the paths match.
 
     Managed scope is overlaid on the result (via the shared helper) so the
     gateway honors administrator-pinned values — neither read_raw_config nor a
     direct yaml.safe_load carries the managed merge on its own. Fail-open.
     """
-    config_path = _hermes_home / 'config.yaml'
+    config_path = get_hermes_home() / 'config.yaml'
     raw: dict = {}
     used_canonical = False
     try:
         from hermes_cli.config import get_config_path, read_raw_config
-        # Fast path: if _hermes_home agrees with the canonical config
+        # Fast path: if get_hermes_home() agrees with the canonical config
         # location, reuse the shared cache. Otherwise fall through to a
-        # direct read (keeps test fixtures with a monkeypatched
-        # _hermes_home working).
+        # direct read (keeps profile-scoped reads working under multiplex).
         if config_path == get_config_path():
             raw = read_raw_config()
             used_canonical = True
