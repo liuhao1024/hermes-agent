@@ -12,7 +12,9 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextvars
+import functools
 import json
+import threading
 import logging
 import os
 import re
@@ -2322,6 +2324,49 @@ def _guard_job_credential_exfil(job: dict) -> None:
         raise RuntimeError(f"Cron job '{job_id}' blocked for safety: {err}")
 
 
+# Thread-local storage for the deferred agent cleanup closure.
+# ``run_job`` stores the cleanup here instead of calling agent.close()
+# in its finally block; ``run_one_job`` invokes it AFTER delivery
+# completes so _deliver_result can still use the event loop / httpx
+# clients.  Thread-local because tick() dispatches jobs concurrently.
+_cron_cleanup_state = threading.local()
+
+
+def _do_cleanup_cron_agent(
+    agent: Any,
+    _session_db: Any,
+    _cron_session_id: Any,
+    job_id: str,
+) -> None:
+    """Release the cron agent's async resources AFTER delivery completes.
+
+    Called by ``run_one_job`` once ``_deliver_result`` has finished using
+    the event loop / httpx clients.  Closing too early (inside
+    ``run_job``'s ``finally`` block) caused
+    ``RuntimeError('cannot schedule new futures after interpreter
+    shutdown')`` on every Telegram-targeted cron job.  See #58720.
+    """
+    if _session_db:
+        try:
+            _session_db.end_session(_cron_session_id, "cron_complete")
+        except (Exception, KeyboardInterrupt) as e:
+            logger.debug("Job '%s': failed to end session: %s", job_id, e)
+        try:
+            _session_db.close()
+        except (Exception, KeyboardInterrupt) as e:
+            logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
+    try:
+        if agent is not None:
+            agent.close()
+    except (Exception, KeyboardInterrupt) as e:
+        logger.debug("Job '%s': failed to close agent resources: %s", job_id, e)
+    try:
+        from agent.auxiliary_client import cleanup_stale_async_clients
+        cleanup_stale_async_clients()
+    except Exception as e:
+        logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2903,6 +2948,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             session_id=_cron_session_id,
             session_db=_session_db,
         )
+        # Deferred cleanup: agent.close() tears down httpx/event-loop
+        # resources that _deliver_result needs.  Stored in thread-local
+        # for run_one_job to invoke AFTER delivery completes.  #58720.
+        _cron_cleanup_state.cleanup = functools.partial(
+            _do_cleanup_cron_agent, agent, _session_db, _cron_session_id, job_id,
+        )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
@@ -3128,32 +3179,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _session_db.set_session_title(_cron_session_id, _cron_title)
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)
-            try:
-                _session_db.end_session(_cron_session_id, "cron_complete")
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to end session: %s", job_id, e)
-            try:
-                _session_db.close()
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
-        # Release subprocesses, terminal sandboxes, browser daemons, and the
-        # main OpenAI/httpx client held by this ephemeral cron agent. Without
-        # this, a gateway that ticks cron every N minutes leaks fds per job
-        # until it hits EMFILE (#10200 / "too many open files").
-        try:
-            if agent is not None:
-                agent.close()
-        except (Exception, KeyboardInterrupt) as e:
-            logger.debug("Job '%s': failed to close agent resources: %s", job_id, e)
-        # Each cron run spins up a short-lived worker thread whose event loop
-        # dies as soon as the ``ThreadPoolExecutor`` shuts down. Any async
-        # httpx clients cached under that loop are now unusable — reap them
-        # so their transports don't accumulate in the process-global cache.
-        try:
-            from agent.auxiliary_client import cleanup_stale_async_clients
-            cleanup_stale_async_clients()
-        except Exception as e:
-            logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+        # NOTE: agent.close(), session end/close, and stale client cleanup are
+        # DEFERRED to after delivery via _cron_cleanup_state.cleanup (set above
+        # after AIAgent construction).  Closing the agent's httpx / event-loop
+        # resources before _deliver_result runs causes
+        # RuntimeError('cannot schedule new futures after interpreter shutdown')
+        # on every Telegram-targeted cron job.  run_one_job invokes the stored
+        # cleanup after delivery completes.  See #58720.
 
 
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
@@ -3236,6 +3268,20 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             except Exception as de:
                 delivery_error = str(de)
                 logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+        # Release the agent's async resources (httpx clients, event loop,
+        # session DB) AFTER delivery completes.  run_job stored the cleanup
+        # closure in _cron_cleanup_state.cleanup after AIAgent construction;
+        # invoking it here instead of in run_job's finally block prevents
+        # RuntimeError('cannot schedule new futures after interpreter
+        # shutdown') when _deliver_result needs the loop.  #58720.
+        _agent_cleanup = getattr(_cron_cleanup_state, "cleanup", None)
+        if _agent_cleanup is not None:
+            try:
+                _agent_cleanup()
+            except Exception as exc:
+                logger.debug("Job '%s': deferred agent cleanup failed: %s", job["id"], exc)
+            _cron_cleanup_state.cleanup = None
 
         # Treat empty final_response as a soft failure so last_status
         # is not "ok" — the agent ran but produced nothing useful.

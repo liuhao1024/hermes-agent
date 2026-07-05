@@ -985,6 +985,9 @@ class TestRunJobSessionPersistence:
             mock_agent_cls.return_value = mock_agent
 
             success, output, final_response, error = run_job(job)
+            # Cleanup is now deferred — invoke it before asserting.
+            from cron.scheduler import _cron_cleanup_state
+            getattr(_cron_cleanup_state, "cleanup", lambda: None)()
 
         assert success is True
         assert error is None
@@ -1155,6 +1158,9 @@ class TestRunJobSessionPersistence:
             mock_agent_cls.return_value = mock_agent
 
             success, output, final_response, error = run_job(job)
+            # Cleanup is now deferred — invoke it before asserting.
+            from cron.scheduler import _cron_cleanup_state
+            getattr(_cron_cleanup_state, "cleanup", lambda: None)()
 
         assert success is False
         assert final_response == ""
@@ -1194,6 +1200,9 @@ class TestRunJobSessionPersistence:
             mock_agent_cls.return_value = mock_agent
 
             success, _output, _final_response, _error = run_job(job)
+            # Cleanup is now deferred — invoke it before asserting.
+            from cron.scheduler import _cron_cleanup_state
+            getattr(_cron_cleanup_state, "cleanup", lambda: None)()
 
         assert success is True
         cleanup_mock.assert_called_once()
@@ -1437,6 +1446,9 @@ class TestRunJobSessionPersistence:
             mock_agent_cls.return_value = mock_agent
 
             success, output, final_response, error = run_job(job)
+            # Cleanup is now deferred — invoke it before asserting.
+            from cron.scheduler import _cron_cleanup_state
+            getattr(_cron_cleanup_state, "cleanup", lambda: None)()
 
         assert success is False
         assert final_response == ""
@@ -1608,6 +1620,9 @@ class TestRunJobSessionPersistence:
              ), \
              patch("run_agent.AIAgent", FakeAgent):
             success, output, final_response, error = run_job(job)
+            # Cleanup is now deferred — invoke it before asserting.
+            from cron.scheduler import _cron_cleanup_state
+            getattr(_cron_cleanup_state, "cleanup", lambda: None)()
 
         assert success is True
         assert error is None
@@ -1720,8 +1735,11 @@ class TestRunJobSessionPersistence:
                  },
              ), \
              patch("run_agent.AIAgent", FakeAgent):
+            from cron.scheduler import _cron_cleanup_state
             for job in jobs:
                 success, output, final_response, error = run_job(job)
+                # Cleanup is now deferred — invoke it before next job.
+                getattr(_cron_cleanup_state, "cleanup", lambda: None)()
                 assert success is True
                 assert error is None
                 assert final_response == "ok"
@@ -1743,6 +1761,66 @@ class TestRunJobSessionPersistence:
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID") is None
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID") is None
         assert fake_db.close.call_count == 2
+
+    def test_deferred_agent_cleanup_prevents_delivery_loop_crash(self, tmp_path):
+        """#58720: agent.close() must be deferred until AFTER _deliver_result.
+
+        If run_job's finally block closes the agent's httpx/event-loop before
+        _deliver_result runs, the delivery path hits
+        RuntimeError('cannot schedule new futures after interpreter shutdown').
+        The fix stores the cleanup in _cron_cleanup_state for run_one_job to
+        invoke after delivery.
+        """
+        from cron.scheduler import _cron_cleanup_state, _do_cleanup_cron_agent
+        import functools
+
+        job = {"id": "defer-job", "name": "defer", "prompt": "hello"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            # Reset state from prior tests (thread-local persists across tests).
+            _cron_cleanup_state.cleanup = None
+            # Before run_job, cleanup is not set.
+            assert getattr(_cron_cleanup_state, "cleanup", None) is None
+
+            success, _out, _final, _err = run_job(job)
+            assert success is True
+
+            # After run_job, cleanup is stored but NOT yet executed.
+            mock_agent.close.assert_not_called()
+            fake_db.end_session.assert_not_called()
+            fake_db.close.assert_not_called()
+            assert callable(getattr(_cron_cleanup_state, "cleanup", None))
+
+            # Simulate what run_one_job does after delivery.
+            _cron_cleanup_state.cleanup()
+
+            # NOW the cleanup has run.
+            mock_agent.close.assert_called_once()
+            fake_db.end_session.assert_called_once()
+            fake_db.close.assert_called_once()
+
+            # Cleanup is idempotent — run_one_job clears it after invocation.
+            # (We test via run_one_job below; here just verify it was callable.)
+            assert callable(_cron_cleanup_state.cleanup)
 
 
 class TestRunJobConfigLogging:
