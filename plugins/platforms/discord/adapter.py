@@ -3125,6 +3125,9 @@ class DiscordAdapter(BasePlatformAdapter):
         ``channel_ids`` matches ``DISCORD_ALLOWED_CHANNELS`` — but only when the
         caller supplies the validated channel context (on_message, slash). Calls
         without channel context (e.g. voice utterances) do not get this bypass.
+        When no access-control mechanism is configured at all (no user/role
+        allowlists, no ``DISCORD_ALLOW_ALL_USERS``, no ``DISCORD_ALLOWED_CHANNELS``)
+        everyone is allowed — matching the backwards-compatible default.
 
         Role checks are **scoped to the guild the message originated from**.
         For DMs (no guild context), role-based auth is disabled by default and
@@ -3162,6 +3165,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 and channel_ids is not None
                 and self._discord_channel_ids_allowed(channel_ids)
             ):
+                return True
+            # When no access control is configured at all (no user/role
+            # allowlists, no DISCORD_ALLOW_ALL_USERS, no
+            # DISCORD_ALLOWED_CHANNELS), default to allow all — matching
+            # the pre-v0.18.0 backwards-compatible behavior.  Only fail
+            # closed when at least one access-control knob IS set but the
+            # caller does not satisfy it.
+            if not os.getenv("DISCORD_ALLOWED_CHANNELS", "").strip():
                 return True
             return False
         # Check user ID allowlist (works for both DMs and guild messages).
@@ -3227,11 +3238,12 @@ class DiscordAdapter(BasePlatformAdapter):
     # operator. ``_check_slash_authorization`` mirrors the on_message gates
     # one-for-one so the slash surface honors the same trust boundary.
     #
-    # Deployments with no allowlist env vars fail closed unless an explicit
-    # allow-all opt-in is set. When only ``DISCORD_ALLOWED_CHANNELS`` is
-    # configured, guild traffic is authorized per validated channel context
-    # (not as a user-wide bypass). Slash and on_message both pass the
-    # resolved channel ids into ``_is_allowed_user`` after the channel gate.
+    # Deployments with no allowlist env vars and no DISCORD_ALLOWED_CHANNELS
+    # allow everyone (backwards-compatible default). When only
+    # ``DISCORD_ALLOWED_CHANNELS`` is configured, guild traffic is
+    # authorized per validated channel context (not as a user-wide bypass).
+    # Slash and on_message both pass the resolved channel ids into
+    # ``_is_allowed_user`` after the channel gate.
 
     def _evaluate_slash_authorization(
         self, interaction: "discord.Interaction",
