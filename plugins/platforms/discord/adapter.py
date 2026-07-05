@@ -761,6 +761,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._ready_event = asyncio.Event()
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
+        self._fail_closed_warned: bool = False  # One-time warning for silent message drops
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
@@ -1093,6 +1094,15 @@ class DiscordAdapter(BasePlatformAdapter):
                         is_dm=_is_dm,
                         channel_ids=_msg_channel_ids,
                     ):
+                        if not self._fail_closed_warned:
+                            self._fail_closed_warned = True
+                            logger.warning(
+                                "[%s] Discord messages are being denied because no "
+                                "user/role allowlist is configured (fail-closed default). "
+                                "Set DISCORD_ALLOWED_USERS, DISCORD_ALLOWED_ROLES, "
+                                "or DISCORD_ALLOW_ALL_USERS=true to allow traffic.",
+                                self._get_platform_name(),
+                            )
                         return
                     _role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
                 
@@ -7582,7 +7592,7 @@ def interactive_setup() -> None:
         print_info("Discord: already configured")
         if not prompt_yes_no("Reconfigure Discord?", False):
             if not get_env_value("DISCORD_ALLOWED_USERS"):
-                print_info("⚠️  Discord has no user allowlist - anyone can use your bot!")
+                print_info("⚠️  Discord has no user allowlist — all messages are blocked (fail-closed). Set DISCORD_ALLOWED_USERS or DISCORD_ALLOW_ALL_USERS=true.")
                 if prompt_yes_no("Add allowed users now?", True):
                     print_info("   To find Discord ID: Enable Developer Mode, right-click name → Copy ID")
                     allowed_users = prompt("Allowed user IDs (comma-separated)")
@@ -7615,7 +7625,7 @@ def interactive_setup() -> None:
         save_env_value("DISCORD_ALLOWED_USERS", ",".join(cleaned_ids))
         print_success("Discord allowlist configured")
     else:
-        print_info("⚠️  No allowlist set - anyone in servers with your bot can use it!")
+        print_info("⚠️  No allowlist set — all messages are blocked (fail-closed). Set DISCORD_ALLOW_ALL_USERS=true for open access.")
 
     print()
     print_info("📬 Home Channel: where Hermes delivers cron job results,")
