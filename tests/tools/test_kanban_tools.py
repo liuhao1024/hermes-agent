@@ -2221,3 +2221,76 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
     d = json.loads(out)
     assert d["ok"] is True, d
     assert d["subscribed"] is False, d
+
+
+# ---------------------------------------------------------------------------
+# Goal-mode judge gate tests (Issue #59762)
+# ---------------------------------------------------------------------------
+
+def test_goal_mode_judge_gate_unpacks_4_tuple(monkeypatch, tmp_path):
+    """Verify the judge_goal unpack handles the 4-tuple return correctly.
+    
+    Regression test for #59762: the gate previously unpacked judge_goal's
+    4-tuple return into 3 targets, raising ValueError that was swallowed
+    by the defensive except.
+    """
+    from hermes_cli import goals
+    from agent.auxiliary_client import get_text_auxiliary_client
+    
+    # Setup worker environment
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    
+    # Create a goal-mode task
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="unpack test", body="Acceptance: test",
+                             assignee="self", goal_mode=True)
+        kb.claim_task(conn, tid)
+    finally:
+        conn.close()
+    
+    # Set worker scope
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    
+    # Mock judge_goal to return 4-tuple (matching actual signature)
+    def _fake_judge(goal, last_response, **_kw):
+        return "continue", "no evidence", False, None
+    
+    old_judge = goals.judge_goal
+    goals.judge_goal = _fake_judge
+    
+    # Mock auxiliary client so _goal_judge_available returns True
+    def _fake_aux_client(slot):
+        class FakeClient:
+            pass
+        return FakeClient(), "fake-model"
+    
+    old_aux = get_text_auxiliary_client
+    monkeypatch.setattr("agent.auxiliary_client.get_text_auxiliary_client", _fake_aux_client)
+    
+    import tools.kanban_tools as kt
+    
+    try:
+        # Try to complete - should not raise ValueError
+        out = kt._handle_complete({
+            "task_id": tid,
+            "summary": "no evidence",
+        })
+        
+        # Should reject (judge said "continue")
+        d = json.loads(out)
+        assert "error" in d, f"expected error, got {d}"
+        assert "rejected by judge" in d["error"].lower()
+    finally:
+        goals.judge_goal = old_judge
+        monkeypatch.undo()
