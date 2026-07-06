@@ -6662,12 +6662,29 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
     return None
 
 
+def _strip_url_credentials(url: str) -> str:
+    """Strip embedded credentials from a git remote URL.
+
+    Handles both HTTPS and SSH credential formats:
+    - HTTPS: https://token@github.com/user/repo.git
+    - HTTPS with user: https://user:token@github.com/user/repo.git
+    - SSH (no change): git@github.com:user/repo.git
+
+    Returns the URL without credentials.
+    """
+    import re
+    # Strip credentials from HTTPS URLs (user:pass@ or token@)
+    return re.sub(r"https?://[^@]+@", r"https://", url)
+
+
 def _is_fork(origin_url: Optional[str]) -> bool:
     """Check if the origin remote points to a fork (not the official repo)."""
     if not origin_url:
         return False
+    # Strip embedded credentials before comparison
+    url_without_creds = _strip_url_credentials(origin_url)
     # Normalize URL for comparison (strip trailing .git if present)
-    normalized = origin_url.rstrip("/")
+    normalized = url_without_creds.rstrip("/")
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
     for official in OFFICIAL_REPO_URLS:
