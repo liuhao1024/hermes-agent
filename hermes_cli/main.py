@@ -5791,7 +5791,12 @@ def cmd_gui(args: argparse.Namespace):
 
     launch_command.extend(config_electron_flags)
     print(f"→ Launching packaged Hermes Desktop: {' '.join(launch_command)}")
-    launch_result = subprocess.run(launch_command, cwd=desktop_dir, env=env, check=False)
+    try:
+        launch_result = subprocess.run(launch_command, cwd=desktop_dir, env=env, check=False)
+    except KeyboardInterrupt:
+        # User interrupted with Ctrl-C; terminate the Electron process gracefully.
+        print("\nDesktop launch interrupted (Ctrl-C). Terminating...")
+        sys.exit(130)  # Standard exit code for SIGINT (128 + 2)
     sys.exit(launch_result.returncode)
 
 
