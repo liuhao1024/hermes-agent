@@ -905,6 +905,16 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             >
               Delete
             </Button>
+            <Switch
+              checked={currentMoaPreset.enabled !== false}
+              onCheckedChange={checked => {
+                updateMoaPreset(prev => ({
+                  ...prev,
+                  enabled: checked
+                }))
+              }}
+              disabled={applying}
+            />
             <Input
               className={cn('w-40', CONTROL_TEXT)}
               onChange={event => setNewMoaPresetName(event.target.value)}
