@@ -86,9 +86,22 @@ export function useModelControls({ activeSessionId, queryClient, requestGateway 
       setCurrentProvider(selection.provider)
       updateModelOptionsCache(selection.provider, selection.model, !activeSessionId)
 
-      // No live session yet: the pick is pure UI state. session.create reads
-      // $currentModel/$currentProvider and applies it as that session's override.
+      // No live session yet: persist both model and provider to global config
+      // so the selection survives restarts and session.create (no active session
+      // means no session.create to ship UI state). Matches CLI /model behavior.
       if (!activeSessionId) {
+        try {
+          await requestGateway('config.set', {
+            key: 'model',
+            value: selection.model
+          })
+          await requestGateway('config.set', {
+            key: 'provider',
+            value: selection.provider
+          })
+        } catch {
+          // Persistence is best-effort; UI state is already set.
+        }
         return true
       }
 
