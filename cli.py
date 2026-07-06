@@ -15941,7 +15941,15 @@ def main(
                     _stream.flush()
                 except Exception:
                     pass
-            os._exit(0)
+            # Exit with KANBAN_INFRA_EXIT_CODE (143) so
+            # ``detect_crashed_workers`` can distinguish infra kills
+            # from protocol violations. This prevents the circuit breaker
+            # from tripping on Railway container redeployments.
+            try:
+                from hermes_cli.kanban_db import KANBAN_INFRA_EXIT_CODE as _INFRA_CODE
+            except Exception:
+                _INFRA_CODE = 143  # Fallback: SIGTERM default
+            os._exit(_INFRA_CODE)
         raise KeyboardInterrupt()
     try:
         import signal as _signal

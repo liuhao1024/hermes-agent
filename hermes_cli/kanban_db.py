@@ -233,6 +233,15 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # 0/1/2 codes the worker uses for success / generic failure / usage error.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
+# Infrastructure-initiated shutdown sentinel. 143 is SIGTERM's default signal
+# number on most POSIX systems. Workers exit with this code when killed by
+# infrastructure (e.g., Railway SIGTERM on container redeploy) so
+# ``detect_crashed_workers`` can distinguish infra kills from protocol violations
+# (clean_exit without calling kanban_complete). This prevents the circuit breaker
+# from tripping on infra-initiated worker deaths, and enables fast reclaim of
+# foreign-host claims after container replacement.
+KANBAN_INFRA_EXIT_CODE = 143
+
 
 def _resolve_crash_grace_seconds() -> int:
     """Return the crash-detection grace period in seconds.
@@ -3740,6 +3749,86 @@ def release_stale_claims(
                 run_id=run_id,
             )
             reclaimed += 1
+
+    # Fast reclaim pass for foreign-host claims after container replacement.
+    # When Railway (or any orchestrator) replaces a container, running tasks
+    # are left with claim_lock=<old-host>:<pid>. ``detect_crashed_workers``
+    # skips foreign-host PIDs (host-local check), so the new container waits
+    # for the full claim TTL (default 15m) before work can resume. This pass
+    # reclaims foreign-host claims whose heartbeat is absent/stale by a
+    # configurable grace window, enabling faster recovery.
+    #
+    # Gated by ``HERMES_KANBAN_FOREIGN_CLAIM_GRACE_SECONDS`` (default: 60s).
+    # Only activates on tasks with non-matching host prefix to avoid reclaiming
+    # our own running workers. Does NOT tick the failure budget — this is
+    # infrastructure-initiated, same semantics as the existing reclaimed path.
+    try:
+        foreign_grace_s = int(
+            os.getenv("HERMES_KANBAN_FOREIGN_CLAIM_GRACE_SECONDS", "60")
+        )
+    except (TypeError, ValueError):
+        foreign_grace_s = 60
+    if foreign_grace_s > 0:
+        foreign_stale = conn.execute(
+            "SELECT id, claim_lock, worker_pid, last_heartbeat_at, started_at "
+            "FROM tasks "
+            "WHERE status = 'running' AND claim_lock IS NOT NULL",
+        ).fetchall()
+        now = int(time.time())
+        for row in foreign_stale:
+            lock = row["claim_lock"] or ""
+            if lock.startswith(host_prefix):
+                continue  # Skip our own host
+            hb = row["last_heartbeat_at"]
+            started = row["started_at"]
+            # Reclaim if heartbeat is missing or stale by grace window.
+            # Also check ``started_at``: if the task started within the grace
+            # window, the worker may still be initializing (no heartbeat yet).
+            # Treat "never started" as reclaimable (old task from dead container).
+            heartbeat_stale = (
+                hb is None
+                or (now - int(hb)) > foreign_grace_s
+            )
+            if started is not None and (now - int(started)) < foreign_grace_s:
+                heartbeat_stale = False  # Fresh task, may be initializing
+            if not heartbeat_stale:
+                continue  # Heartbeat fresh, worker likely alive
+            with write_txn(conn):
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status = 'running' AND claim_lock IS ?",
+                    (row["id"], row["claim_lock"]),
+                )
+                if cur.rowcount != 1:
+                    continue
+                run_id = _end_run(
+                    conn, row["id"],
+                    outcome="infra_killed", status="ready",
+                    error=f"foreign-host stale claim={lock}, heartbeat_stale={heartbeat_stale}",
+                    metadata={
+                        "foreign_host": lock.split(':', 1)[0] if ':' in lock else lock,
+                        "foreign_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
+                        "heartbeat_at": hb,
+                        "started_at": started,
+                        "grace_seconds": foreign_grace_s,
+                    },
+                )
+                payload = {
+                    "foreign_host": lock.split(':', 1)[0] if ':' in lock else lock,
+                    "foreign_pid": int(row["worker_pid"]) if row["worker_pid"] else None,
+                    "heartbeat_at": hb,
+                    "started_at": started,
+                    "grace_seconds": foreign_grace_s,
+                    "reason": "foreign_host_claim_reclaim",
+                }
+                _append_event(
+                    conn, row["id"], "infra_killed",
+                    payload,
+                    run_id=run_id,
+                )
+                reclaimed += 1
+
     return reclaimed
 
 
@@ -5796,6 +5885,10 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
       provider rate-limited / exhausted quota, NOT because the task failed.
       ``detect_crashed_workers`` releases the task back to ``ready`` without
       counting a failure, so a long quota window can't trip the breaker.
+    * ``"infra_killed"`` — ``WIFEXITED`` with status
+      ``KANBAN_INFRA_EXIT_CODE``. Infrastructure-initiated shutdown (e.g.,
+      Railway SIGTERM on container redeploy). Released back to ``ready``
+      without counting a failure, like ``rate_limited``.
     * ``"nonzero_exit"`` — ``WIFEXITED`` with non-zero status. Real error.
     * ``"signaled"`` — ``WIFSIGNALED`` (OOM killer, SIGKILL, etc). Real crash.
     * ``"unknown"`` — pid was not in the reap registry (either reaped by
@@ -5803,8 +5896,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
       back to existing crashed-counter behavior.
 
     ``code`` is the exit status (for ``clean_exit`` / ``rate_limited`` /
-    ``nonzero_exit``) or the signal number (for ``signaled``), or ``None``
-    for ``unknown``.
+    ``infra_killed`` / ``nonzero_exit``) or the signal number (for
+    ``signaled``), or ``None`` for ``unknown``.
     """
     entry = _recent_worker_exits.get(int(pid))
     if entry is None:
@@ -5817,6 +5910,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
                 return ("clean_exit", 0)
             if code == KANBAN_RATE_LIMIT_EXIT_CODE:
                 return ("rate_limited", code)
+            if code == KANBAN_INFRA_EXIT_CODE:
+                return ("infra_killed", code)
             return ("nonzero_exit", code)
         if os.WIFSIGNALED(raw):
             return ("signaled", os.WTERMSIG(raw))
@@ -6441,6 +6536,26 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "claimer": row["claim_lock"],
                     "exit_code": code,
                 }
+            elif kind == "infra_killed":
+                # Worker killed by infrastructure (e.g., Railway SIGTERM on
+                # container redeploy). This is NOT a task failure or protocol
+                # violation — release it back to ``ready`` without counting a
+                # failure, exactly like ``rate_limited``. The circuit breaker
+                # must not trip on infra-initiated worker deaths, and the
+                # foreign-host fast reclaim pass in ``release_stale_claims``
+                # needs to recognize this as infra-initiated (not rate-limited).
+                protocol_violation = False
+                rate_limited_exit = False  # Distinct from rate_limited: no stamp
+                error_text = (
+                    f"pid {pid} killed by infrastructure (exit code {code}) — "
+                    f"requeued without counting a failure"
+                )
+                event_kind = "infra_killed"
+                event_payload = {
+                    "pid": pid,
+                    "claimer": row["claim_lock"],
+                    "exit_code": code,
+                }
             else:
                 protocol_violation = False
                 if kind == "nonzero_exit":
@@ -6463,10 +6578,15 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 (row["id"], pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
-                # Rate-limited requeues are a clean release, not a crash —
-                # record the run outcome as ``rate_limited`` so the board
-                # history doesn't show a phantom crash for a quota wall.
-                _run_outcome = "rate_limited" if rate_limited_exit else "crashed"
+                # Rate-limited and infra-killed requeues are clean releases,
+                # not crashes — record the run outcome accordingly so the
+                # board history doesn't show phantom crashes for these cases.
+                if kind == "rate_limited":
+                    _run_outcome = "rate_limited"
+                elif kind == "infra_killed":
+                    _run_outcome = "infra_killed"
+                else:
+                    _run_outcome = "crashed"
                 run_id = _end_run(
                     conn, row["id"],
                     outcome=_run_outcome, status=_run_outcome,
