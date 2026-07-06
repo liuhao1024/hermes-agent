@@ -14,6 +14,7 @@ from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 from hermes_constants import agent_browser_runnable
+from typing import Optional
 
 PROJECT_ROOT = get_project_root()
 HERMES_HOME = get_hermes_home()
@@ -22,6 +23,30 @@ _DHH = display_hermes_home()  # user-facing display path (e.g. ~/.hermes or ~/.h
 # Load environment variables from ~/.hermes/.env so API key checks work
 _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
+
+
+def _try_get_npm_root() -> Optional[str]:
+    """Try to get global npm root path. Returns None on failure.
+
+    Used to detect agent-browser installations when PATH checks fail due to
+    dangling symlinks (e.g., after hermes update wipes node_modules).
+    """
+    try:
+        result = subprocess.run(
+            ["npm", "root", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            root = result.stdout.strip()
+            # Validate it's a valid path
+            if root and Path(root).exists():
+                return root
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
 
 from hermes_cli.colors import Colors, color
 from hermes_cli.models import _HERMES_USER_AGENT
@@ -1565,6 +1590,17 @@ def run_doctor(args):
                 "agent-browser found but not runnable",
                 f"(broken symlink at {_which_ab}? run: npm install)",
             )
+        elif _try_get_npm_root() is not None:
+            # PATH check failed (shutil.which returned None).
+            # Check global npm root as a fallback for dangling symlink cases
+            # (issue #59859).
+            _global_npm_root = _try_get_npm_root()
+            _global_pkg_path = Path(_global_npm_root) / "agent-browser"
+            if _global_pkg_path.exists():
+                check_warn(
+                    "agent-browser (global npm) - bin symlink broken",
+                    f"(package at {_global_pkg_path}, run: npm install -g agent-browser --force)",
+                )
         elif _is_termux():
             check_info("agent-browser is not installed (expected in the tested Termux path)")
             check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
