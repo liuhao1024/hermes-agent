@@ -1594,8 +1594,17 @@ def _ensure_session_db_row(session: dict) -> None:
             return
         close_db = True
     else:
-        db = _get_db()
-        close_db = False
+        # For the default profile, instantiate a fresh SessionDB to respect
+        # the current profile context (HERMES_HOME context var) rather than
+        # using the globally cached _db which may have been initialized
+        # for a different profile in a previous request.
+        from hermes_state import SessionDB
+        try:
+            db = SessionDB()
+            close_db = True
+        except Exception:
+            logger.debug("failed to open default profile db for session row", exc_info=True)
+            return
     if db is None:
         return
     # The session's own model/effort/fast pick — the composer override shipped on
