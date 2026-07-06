@@ -54,6 +54,11 @@ from gateway.platforms.base import (
     cache_video_from_bytes,
 )
 
+# Use profile-scoped secret resolution to avoid cross-profile credential leaks
+# in multiplexed gateway deployments. Falls back to os.environ for single-profile
+# setups (backward compatible).
+from agent.secret_scope import get_secret
+
 try:  # sibling module; support both package and flat plugin-dir import
     from .block_kit import render_blocks
 except ImportError:  # pragma: no cover - plugin loaded outside package context
@@ -960,7 +965,7 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         raw_token = self.config.token
-        app_token = os.getenv("SLACK_APP_TOKEN")
+        app_token = get_secret("SLACK_APP_TOKEN")
 
         if not raw_token:
             logger.error("[Slack] SLACK_BOT_TOKEN not set")
