@@ -1370,3 +1370,87 @@ class TestSkillViewCollisionDetection:
         result = json.loads(raw)
         assert result["success"] is True
         assert "LOCAL BODY" in result["content"]
+
+
+class TestSkillLookupPathError:
+    """Test _skill_lookup_path_error absolute path handling for cron jobs."""
+
+    def test_relative_path_allowed(self):
+        """Relative paths are always allowed."""
+        from tools.skills_tool import _skill_lookup_path_error
+
+        assert _skill_lookup_path_error("my-skill") is None
+        assert _skill_lookup_path_error("category/my-skill") is None
+
+    def test_traversal_component_rejected(self):
+        """Paths with '..' traversal components are rejected."""
+        from tools.skills_tool import _skill_lookup_path_error
+
+        error = _skill_lookup_path_error("../outside-skill")
+        assert error is not None
+        assert "traversal" in error.lower()
+
+    def test_windows_drive_rejected(self):
+        """Windows drive paths are rejected (e.g., C:\skills)."""
+        from tools.skills_tool import _skill_lookup_path_error
+
+        error = _skill_lookup_path_error("C:\\skills\\foo")
+        assert error is not None
+        assert "drive" in error.lower()
+
+    def test_trusted_absolute_path_allowed(self, tmp_path):
+        """Absolute paths within trusted skills directories are allowed."""
+        from tools.skills_tool import _skill_lookup_path_error
+        from unittest.mock import patch
+
+        # Create a fake HERMES_HOME with skills directory
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        skills_dir = hermes_home / "skills"
+        skills_dir.mkdir()
+
+        # Test absolute path to a skill within trusted dir
+        skill_abs_path = str(skills_dir / "market-context" / "market-regime-detection")
+
+        with patch("hermes_constants.get_hermes_home", return_value=hermes_home):
+            error = _skill_lookup_path_error(skill_abs_path)
+            assert error is None, f"Trusted absolute path should be allowed, got error: {error}"
+
+    def test_trusted_profile_absolute_path_allowed(self, tmp_path):
+        """Absolute paths within profile-specific skills directories are allowed."""
+        from tools.skills_tool import _skill_lookup_path_error
+        from unittest.mock import patch
+
+        # Create a fake HERMES_HOME with profile skills directory
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        profiles_dir = hermes_home.parent / "profiles"
+        profiles_dir.mkdir()
+        profile_dir = profiles_dir / "quant-sigma"
+        profile_dir.mkdir()
+        profile_skills = profile_dir / "skills"
+        profile_skills.mkdir()
+
+        # Test absolute path to a skill within profile skills dir
+        skill_abs_path = str(profile_skills / "market-context" / "market-regime-detection")
+
+        with patch("hermes_constants.get_hermes_home", return_value=hermes_home):
+            error = _skill_lookup_path_error(skill_abs_path)
+            assert error is None, f"Trusted profile absolute path should be allowed, got error: {error}"
+
+    def test_untrusted_absolute_path_rejected(self, tmp_path):
+        """Absolute paths outside trusted directories are rejected."""
+        from tools.skills_tool import _skill_lookup_path_error
+        from unittest.mock import patch
+
+        # Create a fake HERMES_HOME
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        # Test absolute path outside trusted dir
+        untrusted_path = str(tmp_path / "evil" / "skill")
+
+        with patch("hermes_constants.get_hermes_home", return_value=hermes_home):
+            error = _skill_lookup_path_error(untrusted_path)
+            assert error is not None
+            assert "trusted" in error.lower()

@@ -121,20 +121,64 @@ def _skill_lookup_path_error(name: str) -> Optional[str]:
     validation done later via ``tools.path_security``. We also reject Windows
     drive paths (e.g. ``C:\\skills``), whose ``:`` would otherwise be misread as
     a plugin namespace separator.
+
+    Absolute paths are allowed if they resolve to trusted skills directories
+    (e.g., ``~/.hermes/skills/`` or ``~/.hermes/profiles/<name>/skills/``), to
+    support cron job configs that store absolute skill paths.
     """
     from tools.path_security import has_traversal_component
 
     if not isinstance(name, str):
         return "Skill name must be a string."
     candidate = name.strip()
-    if (
-        PurePosixPath(candidate).is_absolute()
-        or PureWindowsPath(candidate).is_absolute()
-        or PureWindowsPath(candidate).drive
-    ):
-        return "Skill name must be a relative path within the skills directory."
-    if has_traversal_component(candidate):
-        return "Skill name cannot contain '..' path traversal components."
+    # Reject Windows drive paths (e.g., C:\skills) whose : would be misread
+    # as a plugin namespace separator.
+    if PureWindowsPath(candidate).drive:
+        return "Skill name cannot be a Windows drive path."
+
+    # If absolute path, check if it resolves to a trusted skills directory.
+    if PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute():
+        from hermes_constants import get_hermes_home
+        from pathlib import Path
+
+        abs_path = Path(candidate).resolve()
+        hermes_home = get_hermes_home()
+
+        # Build list of trusted skills roots
+        trusted_roots = [hermes_home / "skills"]
+
+        # Add profile-specific skills directories if they exist
+        profiles_dir = hermes_home / ".." / "profiles"
+        try:
+            if profiles_dir.is_dir():
+                for profile_path in profiles_dir.iterdir():
+                    if profile_path.is_dir():
+                        profile_skills = profile_path / "skills"
+                        if profile_skills.is_dir():
+                            trusted_roots.append(profile_skills)
+        except OSError:
+            pass  # If we can't list profiles, just skip them
+
+        # Check if absolute path is within any trusted root
+        is_trusted = False
+        for root in trusted_roots:
+            try:
+                # Normalize both paths for comparison
+                normalized_root = root.resolve()
+                if abs_path == normalized_root or str(abs_path).startswith(str(normalized_root) + "/"):
+                    is_trusted = True
+                    break
+            except (OSError, ValueError):
+                continue
+
+        if not is_trusted:
+            return "Skill name must be a relative path within the skills directory, or an absolute path within a trusted skills directory."
+
+    # Reject traversal components for relative paths (already checked for absolute paths above via is_relative_to)
+    if not (PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute()):
+        if has_traversal_component(candidate):
+            return "Skill name cannot contain '..' path traversal components."
+
     return None
 
 
