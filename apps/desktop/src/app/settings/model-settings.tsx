@@ -842,7 +842,26 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
       {moa && currentMoaPreset && (
         <section>
           <div className="mb-2.5 flex items-center justify-between">
-            <SectionHeading icon={Cpu} title="Mixture of Agents" />
+            <div className="flex items-center gap-2">
+              <SectionHeading icon={Cpu} title="Mixture of Agents" />
+              <Switch
+                checked={currentMoaPreset.enabled !== false}
+                onCheckedChange={checked => {
+                  const next: MoaConfigResponse = {
+                    ...moa,
+                    presets: {
+                      ...moa.presets,
+                      [selectedMoaPreset || moa.default_preset]: {
+                        ...currentMoaPreset,
+                        enabled: checked
+                      }
+                    }
+                  }
+                  void saveMoa(next)
+                }}
+                disabled={applying}
+              />
+            </div>
             <Button disabled={applying} onClick={() => void saveMoa(moa)} size="sm" variant="textStrong">
               {applying ? m.applying : t.common.save}
             </Button>
