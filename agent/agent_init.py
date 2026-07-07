@@ -812,7 +812,7 @@ def init_agent(
                 if is_token_provider(effective_key):
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(effective_key, str) and len(effective_key) > 12:
-                    print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+                    print("🔑 Using token: [configured]")
     elif agent.provider == "moa":
         from agent.moa_loop import MoAClient
         agent.api_mode = "chat_completions"
@@ -1117,7 +1117,7 @@ def init_agent(
                 if is_token_provider(key_used):
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(key_used, str) and key_used and key_used != "dummy-key" and len(key_used) > 12:
-                    print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
+                    print("🔑 Using API key: [configured]")
                 else:
                     print("⚠️  Warning: API key appears invalid or missing")
         except Exception as e:
