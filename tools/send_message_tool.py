@@ -352,9 +352,12 @@ def _handle_send(args):
     if not pconfig or not pconfig.enabled:
         # Weixin can be configured purely via .env; synthesize a pconfig so
         # send_message and cron delivery work without a gateway.yaml entry.
+        # In multiplex gateway mode, use profile-scoped secrets to prevent
+        # cross-profile credential leakage.
         if platform_name == "weixin":
-            wx_token = os.getenv("WEIXIN_TOKEN", "").strip()
-            wx_account = os.getenv("WEIXIN_ACCOUNT_ID", "").strip()
+            from agent.secret_scope import get_secret
+            wx_token = get_secret("WEIXIN_TOKEN") or ""
+            wx_account = get_secret("WEIXIN_ACCOUNT_ID") or ""
             if wx_token and wx_account:
                 from gateway.config import PlatformConfig
                 pconfig = PlatformConfig(
@@ -362,8 +365,8 @@ def _handle_send(args):
                     token=wx_token,
                     extra={
                         "account_id": wx_account,
-                        "base_url": os.getenv("WEIXIN_BASE_URL", "").strip(),
-                        "cdn_base_url": os.getenv("WEIXIN_CDN_BASE_URL", "").strip(),
+                        "base_url": get_secret("WEIXIN_BASE_URL") or "",
+                        "cdn_base_url": get_secret("WEIXIN_CDN_BASE_URL") or "",
                     },
                 )
             else:

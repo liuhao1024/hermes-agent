@@ -1159,8 +1159,11 @@ class WeixinAdapter(BasePlatformAdapter):
         self._poll_task: Optional[asyncio.Task] = None
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
 
-        self._account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
-        self._token = str(config.token or extra.get("token") or os.getenv("WEIXIN_TOKEN", "")).strip()
+        # In multiplex gateway mode, use profile-scoped secrets to prevent
+        # cross-profile credential leakage.
+        from agent.secret_scope import get_secret
+        self._account_id = str(extra.get("account_id") or get_secret("WEIXIN_ACCOUNT_ID") or "").strip()
+        self._token = str(config.token or extra.get("token") or get_secret("WEIXIN_TOKEN") or "").strip()
         self._base_url = str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/")
         self._cdn_base_url = str(
             extra.get("cdn_base_url") or os.getenv("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)
@@ -2290,11 +2293,14 @@ async def send_weixin_direct(
     One-shot send helper for ``send_message`` and cron delivery.
 
     This bypasses the long-poll adapter lifecycle and uses the raw API directly.
+    In multiplex gateway mode, use profile-scoped secrets to prevent
+    cross-profile credential leakage.
     """
-    account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
-    base_url = str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/")
-    cdn_base_url = str(extra.get("cdn_base_url") or os.getenv("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)).strip().rstrip("/")
-    resolved_token = str(token or extra.get("token") or os.getenv("WEIXIN_TOKEN", "")).strip()
+    from agent.secret_scope import get_secret
+    account_id = str(extra.get("account_id") or get_secret("WEIXIN_ACCOUNT_ID") or "").strip()
+    base_url = str(extra.get("base_url") or get_secret("WEIXIN_BASE_URL") or ILINK_BASE_URL).strip().rstrip("/")
+    cdn_base_url = str(extra.get("cdn_base_url") or get_secret("WEIXIN_CDN_BASE_URL") or WEIXIN_CDN_BASE_URL).strip().rstrip("/")
+    resolved_token = str(token or extra.get("token") or get_secret("WEIXIN_TOKEN") or "").strip()
     if not resolved_token:
         return {"error": "Weixin token missing. Configure WEIXIN_TOKEN or platforms.weixin.token."}
     if not account_id:
