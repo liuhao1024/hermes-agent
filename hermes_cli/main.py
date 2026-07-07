@@ -11910,6 +11910,13 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
 
 def cmd_dashboard(args):
     """Start the web UI server, or (with --stop/--status) manage running ones."""
+    # Pop HERMES_WEB_DIST to avoid inheriting Desktop's setting when
+    # launched from a Desktop Electron child process. The web dashboard
+    # has its own built-in frontend at hermes_cli/web_dist/ and should
+    # not use the Desktop's app.asar/dist path. See #52945.
+    import os
+    os.environ.pop("HERMES_WEB_DIST", None)
+
     # --status: report running dashboards and exit, no deps needed.
     if getattr(args, "status", False):
         count = _report_dashboard_status()
