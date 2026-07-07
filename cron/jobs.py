@@ -61,6 +61,11 @@ except ImportError:
 # profiles (the security boundary #4707 was filed for). Do NOT change this to
 # the default root: that re-breaks per-profile isolation. See also the dynamic
 # `_get_hermes_home()` / `_get_lock_paths()` resolution in cron/scheduler.py.
+#
+# NOTE: These module-level constants are frozen at import time and kept for
+# backward compatibility. Internal code uses the lazy accessor functions below
+# (e.g., `get_jobs_file()`) which resolve paths dynamically, allowing tests to
+# isolate HERMES_HOME with monkeypatch.setenv("HERMES_HOME", tmp_path).
 HERMES_DIR = get_hermes_home().resolve()
 CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
@@ -98,6 +103,58 @@ ONESHOT_RUN_CLAIM_TTL_SECONDS = 1800
 # A healthy run clears its claim via mark_job_run() long before the TTL; the
 # TTL only recovers a claim left by a tick that DIED mid-run. HERMES_CRON_TIMEOUT
 # is an *inactivity* limit, not a wall-clock cap — a job that keeps producing
+# output stays alive as long as it remains active, but if it stalls (e.g., stuck
+# subprocess), the claim eventually expires and a new attempt can take over.
+ONESHOT_RUN_CLAIM_HEADROOM_MULTIPLIER = 1.5
+
+# Path to job.json lock file (cross-process advisory lock). The .jobs.lock name
+# avoids conflict with .jobs.json atomic temporary files which use the .jobs_
+# prefix (see save_jobs()).
+_JOBS_LOCK_FILE = None  # Set lazily below
+
+# =============================================================================
+# Lazy Accessors (Dynamic Path Resolution)
+# =============================================================================
+
+def _get_cron_dir() -> Path:
+    """Resolve cron directory dynamically while preserving test monkeypatch hooks.
+    
+    Tests that isolate HERMES_HOME with monkeypatch.setenv("HERMES_HOME", tmp_path)
+    expect these paths to honor the patched value. Without dynamic resolution,
+    the frozen module-level constants (CRON_DIR, JOBS_FILE, etc.) defeat test
+    isolation (#60014). This function mirrors the pattern used in
+    cron/scheduler.py:_get_hermes_home().
+    """
+    return get_hermes_home() / "cron"
+
+
+def get_jobs_file() -> Path:
+    """Resolve JOBS_FILE path dynamically for test isolation."""
+    return _get_cron_dir() / "jobs.json"
+
+
+def get_output_dir() -> Path:
+    """Resolve OUTPUT_DIR path dynamically for test isolation."""
+    return _get_cron_dir() / "output"
+
+
+def get_ticker_heartbeat_file() -> Path:
+    """Resolve TICKER_HEARTBEAT_FILE path dynamically for test isolation."""
+    return _get_cron_dir() / "ticker_heartbeat"
+
+
+def get_ticker_success_file() -> Path:
+    """Resolve TICKER_SUCCESS_FILE path dynamically for test isolation."""
+    return _get_cron_dir() / "ticker_last_success"
+
+
+def _get_jobs_lock_file() -> Path:
+    """Resolve jobs lock file path dynamically for test isolation."""
+    return _get_cron_dir() / ".jobs.lock"
+
+
+# Initialize the lazy lock file path reference for the module-level accessor
+_JOBS_LOCK_FILE = _get_jobs_lock_file()
 # output legitimately runs past it — so the multiplier gives comfortable
 # headroom over any healthy run before we treat a claim as stale.
 _ONESHOT_RUN_CLAIM_TTL_HEADROOM = 3
@@ -221,7 +278,7 @@ def _job_output_dir(job_id: str) -> Path:
         raise ValueError(f"Invalid cron job id for output path: {job_id!r}")
     if Path(text).is_absolute() or Path(text).drive:
         raise ValueError(f"Invalid cron job id for output path: {job_id!r}")
-    return OUTPUT_DIR / text
+    return get_output_dir() / text
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -328,10 +385,10 @@ def _secure_file(path: Path):
 
 def ensure_dirs():
     """Ensure cron directories exist with secure permissions."""
-    CRON_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _secure_dir(CRON_DIR)
-    _secure_dir(OUTPUT_DIR)
+    _get_cron_dir().mkdir(parents=True, exist_ok=True)
+    get_output_dir().mkdir(parents=True, exist_ok=True)
+    _secure_dir(_get_cron_dir())
+    _secure_dir(get_output_dir())
 
 
 # =============================================================================
@@ -620,7 +677,7 @@ def _atomic_write_epoch(path: Path) -> None:
     torn/truncated file. Best-effort: failures are swallowed by callers.
     """
     ensure_dirs()
-    fd, tmp_path = tempfile.mkstemp(dir=str(CRON_DIR), suffix=".tmp", prefix=".hb_")
+    fd, tmp_path = tempfile.mkstemp(dir=str(_get_cron_dir()), suffix=".tmp", prefix=".hb_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
@@ -687,19 +744,19 @@ def get_ticker_success_age() -> Optional[float]:
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
-    if not JOBS_FILE.exists():
+    if not get_jobs_file().exists():
         return []
 
     _strict_retry = False  # track whether we used the strict=False fallback
 
     try:
-        with open(JOBS_FILE, 'r', encoding='utf-8') as f:
+        with open(get_jobs_file(), 'r', encoding='utf-8') as f:
             data = json.load(f)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
         try:
-            with open(JOBS_FILE, 'r', encoding='utf-8') as f:
+            with open(get_jobs_file(), 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
@@ -741,8 +798,8 @@ def _save_jobs_unlocked(jobs: List[Dict[str, Any]]):
             json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        atomic_replace(tmp_path, JOBS_FILE)
-        _secure_file(JOBS_FILE)
+        atomic_replace(tmp_path, get_jobs_file())
+        _secure_file(get_jobs_file())
     except BaseException:
         try:
             os.unlink(tmp_path)
