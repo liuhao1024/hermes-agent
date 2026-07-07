@@ -3769,6 +3769,15 @@ def validate_requested_model(
       - recognized: whether it matched a known provider catalog
       - message: optional warning / guidance for the user
     """
+    # Check for spaces in the original input before stripping
+    if model_name and any(ch.isspace() for ch in model_name):
+        return {
+            "accepted": False,
+            "persist": False,
+            "recognized": False,
+            "message": "Model names cannot contain spaces.",
+        }
+    
     requested = (model_name or "").strip()
     normalized = normalize_provider(provider)
     if normalized == "openrouter" and base_url and "openrouter.ai" not in base_url:
@@ -3788,14 +3797,6 @@ def validate_requested_model(
             "message": "Model name cannot be empty.",
         }
 
-    # MoA is a virtual provider, not a remote model. Skip API probing.
-    if requested.lower() == "moa":
-        return {
-            "accepted": True,
-            "persist": True,
-            "recognized": True,
-            "message": None,
-        }
 
     if normalized == "moa":
         try:
@@ -3822,6 +3823,16 @@ def validate_requested_model(
             "recognized": False,
             "message": "Model names cannot contain spaces.",
         }
+
+    # MoA is a virtual provider, not a remote model. Skip API probing.
+    if requested.lower() == "moa":
+        return {
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
+        }
+
 
     if normalized == "lmstudio":
         from hermes_cli.auth import AuthError
