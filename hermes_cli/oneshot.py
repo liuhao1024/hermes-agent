@@ -366,11 +366,51 @@ def _run_agent(
                 if detected:
                     effective_provider, effective_model = detected
 
-    runtime = resolve_runtime_provider(
-        requested=effective_provider,
-        target_model=effective_model or None,
-        explicit_base_url=explicit_base_url_from_alias,
-    )
+    # Resolve the primary provider; on AuthError, walk the fallback chain.
+    # This matches gateway and interactive CLI behavior — oneshot must not
+    # exit early when the primary provider fails credential resolution.
+    runtime = None
+    primary_exc = None
+    try:
+        runtime = resolve_runtime_provider(
+            requested=effective_provider,
+            target_model=effective_model or None,
+            explicit_base_url=explicit_base_url_from_alias,
+        )
+    except Exception as exc:
+        primary_exc = exc
+
+    # Primary provider auth failed — try fallback providers before giving up.
+    if runtime is None and primary_exc is not None:
+        from hermes_cli.auth import AuthError
+        if isinstance(primary_exc, AuthError):
+            _fb_chain = get_fallback_chain(cfg)
+            for _fb in _fb_chain:
+                _fb_provider = (_fb.get("provider") or "").strip().lower()
+                _fb_model = (_fb.get("model") or "").strip()
+                if not _fb_provider or not _fb_model:
+                    continue
+                try:
+                    runtime = resolve_runtime_provider(
+                        requested=_fb_provider,
+                        target_model=_fb_model or None,
+                        explicit_base_url=_fb.get("base_url"),
+                    )
+                    # Fallback resolved successfully — use its provider/model.
+                    effective_provider = runtime.get("provider", _fb_provider)
+                    effective_model = _fb_model
+                    primary_exc = None
+                    break
+                except Exception:
+                    continue
+
+    if runtime is None:
+        # Re-raise the primary exception (or a generic error if no exc captured).
+        if primary_exc:
+            raise primary_exc
+        raise RuntimeError("Provider resolution failed.")
+
+    # Refresh runtime from the final (primary or fallback) resolution.
 
     # Pull in explicit toolsets when provided; otherwise use whatever the user
     # has enabled for "cli". sorted() gives stable ordering for config-derived
