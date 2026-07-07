@@ -142,6 +142,7 @@ def _slot_runtime(slot: dict[str, str]) -> dict[str, Any]:
     """
     provider = str(slot.get("provider") or "").strip()
     model = str(slot.get("model") or "").strip()
+    slot_extra_body = slot.get("extra_body")
     out: dict[str, Any] = {"provider": provider, "model": model}
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -168,6 +169,9 @@ def _slot_runtime(slot: dict[str, str]) -> dict[str, Any]:
             out["api_key"] = rt["api_key"]
         if rt.get("api_mode"):
             out["api_mode"] = rt["api_mode"]
+        # Pass through slot's extra_body for custom provider parameters (e.g., enable_thinking)
+        if slot_extra_body:
+            out["extra_body"] = slot_extra_body
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("MoA slot runtime resolution failed for %s: %s", _slot_label(slot), exc)
     return out
