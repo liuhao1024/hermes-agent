@@ -1241,12 +1241,24 @@ def _confirm_adapter_delivery(send_result) -> bool:
     or a partial mock) is a contract violation: it does not actually tell us
     whether the send succeeded.  Require an explicit, truthy ``success``
     attribute to count as confirmed.
+
+    Additionally, a ``SendResult`` with ``success=True`` but ``message_id=None``
+    does not represent an actual platform send — it may be a degraded-path
+    early-return (e.g. Telegram's ``send_path_degraded``) that bypassed the
+    Bot API call. Treat as unconfirmed to trigger the standalone fallback
+    and avoid silent delivery loss (#60121).
     """
     if send_result is None:
         return False
     if not hasattr(send_result, "success"):
         return False
-    return bool(getattr(send_result, "success"))
+    if not bool(getattr(send_result, "success")):
+        return False
+    # Require a concrete message_id for platforms that support it.
+    message_id = getattr(send_result, "message_id", None)
+    if message_id is None:
+        return False
+    return True
 
 
 def _is_channel_dm_topic(
