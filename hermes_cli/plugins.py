@@ -1292,6 +1292,25 @@ class PluginManager:
             self._discovered = True
             return
         if force:
+            # Deregister plugin-owned tools from global registry first
+            # to avoid conflicts when re-discovering. See #60050.
+            from tools.registry import registry as tool_registry
+            from gateway.platform_registry import platform_registry
+
+            # Deregister tools
+            for tool_name in list(self._plugin_tool_names):
+                try:
+                    tool_registry.deregister(tool_name)
+                except Exception:
+                    logger.debug("Failed to deregister tool %s", tool_name, exc_info=True)
+
+            # Deregister platforms
+            for platform_name in list(self._plugin_platform_names):
+                try:
+                    platform_registry.unregister(platform_name)
+                except Exception:
+                    logger.debug("Failed to deregister platform %s", platform_name, exc_info=True)
+
             self._plugins.clear()
             self._hooks.clear()
             self._middleware.clear()
