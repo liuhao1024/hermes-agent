@@ -657,6 +657,25 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
         )
+    # Prevent agents from bypassing the skills.write_approval gate by using
+    # write_file/patch directly on skills paths. When the gate is enabled,
+    # skill writes must go through skill_manage to be staged for approval.
+    try:
+        from hermes_constants import get_hermes_home
+        from tools import write_approval as wa
+
+        if wa.write_approval_enabled(wa.SKILLS):
+            skills_dir = str(get_hermes_home() / "skills")
+            if resolved.startswith(skills_dir) or normalized.startswith(skills_dir):
+                return (
+                    f"Refusing to write to skills path: {filepath}\n"
+                    "The skills.write_approval gate is enabled. "
+                    "Use the skill_manage tool instead to stage skill writes for approval.\n"
+                    "Example: skill_manage(action='write_file', file_path='~/.hermes/skills/...', content='...')"
+                )
+    except Exception:
+        # Fail open if skills dir resolution or config check fails
+        pass
     return None
 
 

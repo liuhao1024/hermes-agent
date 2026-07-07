@@ -534,6 +534,8 @@ class TestSensitivePathCheck:
         fake_config = tmp_path / "config.yaml"
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
+        # Avoid system path conflicts with test path on macOS
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
 
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
@@ -544,6 +546,8 @@ class TestSensitivePathCheck:
         fake_config = tmp_path / "config.yaml"
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
+        # Avoid system path conflicts with test path on macOS
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
 
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
@@ -555,6 +559,8 @@ class TestSensitivePathCheck:
         fake_config.write_text("approvals:\n  mode: manual\n")
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
         monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
+        # Avoid system path conflicts with test path on macOS
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
 
         from tools.file_tools import patch_tool
         result = json.loads(patch_tool(
@@ -574,6 +580,105 @@ class TestSensitivePathCheck:
         result = json.loads(write_file_tool("/etc/passwd", "evil"))
         assert "error" in result
         assert "sensitive system path" in result["error"]
+
+    def test_skills_path_blocked_when_write_approval_enabled(self, tmp_path, monkeypatch):
+        """When skills.write_approval is enabled, write_file/patch are blocked on skills paths."""
+        # Set up a fake skills directory
+        fake_hermes_home = tmp_path
+        fake_skills_dir = fake_hermes_home / "skills"
+        fake_skills_dir.mkdir()
+        fake_skill_file = fake_skills_dir / "test-skill.md"
+
+        # Mock hermes_constants.get_hermes_home to return fake_hermes_home
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: fake_hermes_home)
+
+        # Mock write_approval_enabled to return True for skills
+        def mock_write_approval_enabled(subsystem):
+            return subsystem == "skills"
+
+        monkeypatch.setattr("tools.write_approval.write_approval_enabled", mock_write_approval_enabled)
+
+        # Mock _SENSITIVE_PATH_PREFIXES to avoid conflicts with test path
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
+
+        from tools.file_tools import write_file_tool
+        result = json.loads(write_file_tool(str(fake_skill_file), "evil"))
+
+        assert "error" in result
+        assert "skills path" in result["error"]
+        assert "skill_manage" in result["error"]
+
+    def test_skills_path_allowed_when_write_approval_disabled(self, tmp_path, monkeypatch):
+        """When skills.write_approval is disabled, write_file/patch are allowed on skills paths."""
+        # Set up a fake skills directory
+        fake_hermes_home = tmp_path
+        fake_skills_dir = fake_hermes_home / "skills"
+        fake_skills_dir.mkdir()
+        fake_skill_file = fake_skills_dir / "test-skill.md"
+
+        # Mock hermes_constants.get_hermes_home to return fake_hermes_home
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: fake_hermes_home)
+
+        # Mock write_approval_enabled to return False
+        monkeypatch.setattr("tools.write_approval.write_approval_enabled", lambda subsystem: False)
+
+        # Mock _SENSITIVE_PATH_PREFIXES to avoid conflicts with test path
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
+
+        from tools.file_tools import write_file_tool
+        result = json.loads(write_file_tool(str(fake_skill_file), "content"))
+
+        assert result.get("success") is True
+
+    def test_skills_path_via_tilde_blocked_when_write_approval_enabled(self, tmp_path, monkeypatch):
+        """Tilde-prefixed skills paths are also blocked when skills.write_approval is enabled."""
+        # Set up a fake skills directory
+        fake_hermes_home = tmp_path
+        fake_skills_dir = fake_hermes_home / "skills"
+        fake_skills_dir.mkdir()
+
+        # Mock hermes_constants.get_hermes_home to return fake_hermes_home
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: fake_hermes_home)
+
+        # Mock write_approval_enabled to return True for skills
+        def mock_write_approval_enabled(subsystem):
+            return subsystem == "skills"
+
+        monkeypatch.setattr("tools.write_approval.write_approval_enabled", mock_write_approval_enabled)
+
+        # Mock _SENSITIVE_PATH_PREFIXES to avoid conflicts
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
+
+        from tools.file_tools import write_file_tool
+        result = json.loads(write_file_tool("~/.hermes/skills/test-skill.md", "evil"))
+
+        assert "error" in result
+        assert "skills path" in result["error"]
+
+    def test_non_skills_path_not_blocked_by_write_approval_gate(self, tmp_path, monkeypatch):
+        """Non-skills paths are not blocked by the skills.write_approval gate."""
+        # Set up a fake hermes home with a non-skills directory
+        fake_hermes_home = tmp_path
+        fake_notes_dir = fake_hermes_home / "notes"
+        fake_notes_dir.mkdir()
+        fake_note_file = fake_notes_dir / "test-note.md"
+
+        # Mock hermes_constants.get_hermes_home to return fake_hermes_home
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: fake_hermes_home)
+
+        # Mock write_approval_enabled to return True for skills
+        def mock_write_approval_enabled(subsystem):
+            return subsystem == "skills"
+
+        monkeypatch.setattr("tools.write_approval.write_approval_enabled", mock_write_approval_enabled)
+
+        # Mock _SENSITIVE_PATH_PREFIXES to avoid conflicts
+        monkeypatch.setattr("tools.file_tools._SENSITIVE_PATH_PREFIXES", ("/etc/", "/boot/", "/usr/lib/systemd/"))
+
+        from tools.file_tools import write_file_tool
+        result = json.loads(write_file_tool(str(fake_note_file), "content"))
+
+        assert result.get("success") is True
 
     @patch("tools.file_tools._get_file_ops")
     def test_normal_file_not_blocked(self, mock_get, monkeypatch):
