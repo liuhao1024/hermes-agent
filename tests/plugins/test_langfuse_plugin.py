@@ -531,7 +531,7 @@ class TestPlaceholderKeyDetection:
     def test_placeholder_public_key_warns_and_skips(self, monkeypatch, caplog):
         self._clear_env(monkeypatch)
         monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "placeholder")
-        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-...-xyz")
         plugin = self._fresh_plugin(monkeypatch)
         with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
             assert plugin._get_langfuse() is None
@@ -542,6 +542,9 @@ class TestPlaceholderKeyDetection:
         # The valid secret value must NOT appear (the var NAME does, in
         # the "or unset ..." hint, but the value preview shouldn't).
         assert "'sk-lf-" not in text
+        # Verify the improved error message emphasizes the impact
+        assert "configuration error" in text
+        assert "silently discarded" in text
         # Never constructed the SDK client — short-circuited before that.
         assert _FakeLangfuse.instances == []
 

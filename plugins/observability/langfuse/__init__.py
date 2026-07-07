@@ -189,10 +189,11 @@ def _get_langfuse() -> Optional[Langfuse]:
     ]
     if placeholder_issues:
         logger.warning(
-            "Langfuse plugin: credentials look like placeholders, traces will "
-            "NOT be emitted (%s). Set real Langfuse keys (pk-lf-... / sk-lf-...) "
-            "or unset HERMES_LANGFUSE_PUBLIC_KEY / HERMES_LANGFUSE_SECRET_KEY to "
-            "silence this warning.",
+            "Langfuse plugin configuration error: credentials appear to be "
+            "placeholder values. All trace data will be silently discarded (%s). "
+            "Set real Langfuse keys (pk-lf-... / sk-lf-...) or unset "
+            "HERMES_LANGFUSE_PUBLIC_KEY / HERMES_LANGFUSE_SECRET_KEY to disable "
+            "observability.",
             "; ".join(placeholder_issues),
         )
         _LANGFUSE_CLIENT = _INIT_FAILED
