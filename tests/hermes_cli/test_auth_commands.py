@@ -1860,6 +1860,9 @@ def test_auth_remove_copilot_suppresses_all_variants(tmp_path, monkeypatch):
     ), patch(
         "hermes_cli.copilot_auth.get_copilot_api_token",
         return_value=("ghu_fake_api", None),
+    ), patch(
+        "hermes_cli.auth.is_provider_explicitly_configured",
+        return_value=True,  # assume copilot is configured
     ):
         auth_remove_command(SimpleNamespace(provider="copilot", target="1"))
 
