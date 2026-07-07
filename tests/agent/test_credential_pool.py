@@ -2279,6 +2279,12 @@ def test_load_pool_seeds_copilot_via_gh_auth_token(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
 
+    # Mock is_provider_explicitly_configured to simulate user configured copilot
+    monkeypatch.setattr(
+        "hermes_cli.auth.is_provider_explicitly_configured",
+        lambda pid: pid == "copilot",
+    )
+
     monkeypatch.setattr(
         "hermes_cli.copilot_auth.resolve_copilot_token",
         lambda: ("gho_fake_token_abc123", "gh auth token"),
@@ -2299,6 +2305,12 @@ def test_load_pool_does_not_seed_copilot_when_no_token(tmp_path, monkeypatch):
     """Copilot pool should be empty when resolve_copilot_token() returns nothing."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
+
+    # Mock is_provider_explicitly_configured to simulate user configured copilot
+    monkeypatch.setattr(
+        "hermes_cli.auth.is_provider_explicitly_configured",
+        lambda pid: pid == "copilot",
+    )
 
     monkeypatch.setattr(
         "hermes_cli.copilot_auth.resolve_copilot_token",
