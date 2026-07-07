@@ -2587,6 +2587,8 @@ def run_job(
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
     # scheduler process — every job this process runs is a cron job.
+    # Cleaned up in the finally block after job completion to prevent leakage
+    # into subsequent interactive gateway sessions (see #60350).
     os.environ["HERMES_CRON_SESSION"] = "1"
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
@@ -3189,6 +3191,9 @@ def run_job(
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
+        # Clean up HERMES_CRON_SESSION env var to prevent leakage into
+        # subsequent interactive gateway sessions (see #60350).
+        os.environ.pop("HERMES_CRON_SESSION", None)
         if _session_db:
             # Title the cron session from the job (name → short prompt → id) so
             # sidebars/history show a meaningful label instead of the injected
