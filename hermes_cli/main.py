@@ -9900,6 +9900,19 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # UI, desktop rebuild) are non-core and can't brick the venv.
         _clear_update_incomplete_marker()
 
+        # Clear stale .pyc bytecode cache a second time, immediately before
+        # lazy backend refresh. The first clear (line 9824) runs right after
+        # git pull, but Python subprocesses during dependency install can
+        # regenerate stale bytecode from the old venv. This second clear
+        # ensures lazy refresh imports from fresh source, not outdated .pyc
+        # files that reference symbols that moved or were renamed.
+        # Fixes #60242.
+        removed = _clear_bytecode_cache(PROJECT_ROOT)
+        if removed:
+            print(
+                f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
+            )
+
         _refresh_active_lazy_features()
 
         _update_node_dependencies()
