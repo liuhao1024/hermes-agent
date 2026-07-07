@@ -6660,11 +6660,12 @@ def _is_fork(origin_url: Optional[str]) -> bool:
     if not origin_url:
         return False
     # Normalize URL for comparison (strip trailing .git if present)
-    normalized = origin_url.rstrip("/")
+    # GitHub owner/repo slugs are case-insensitive, so compare case-insensitively
+    normalized = origin_url.rstrip("/").lower()
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
     for official in OFFICIAL_REPO_URLS:
-        official_normalized = official.rstrip("/")
+        official_normalized = official.rstrip("/").lower()
         if official_normalized.endswith(".git"):
             official_normalized = official_normalized[:-4]
         if normalized == official_normalized:
@@ -6750,7 +6751,7 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
         return False
 
 
-def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
+def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, assume_yes: bool = False) -> None:
     """Check if fork is behind upstream and sync if safe.
 
     This implements the fork upstream sync logic:
@@ -6758,6 +6759,11 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
     - Compare origin/main with upstream/main
     - If origin/main is strictly behind upstream/main, pull from upstream
     - Try to sync fork back to origin if possible
+
+    Args:
+        git_cmd: Git command prefix
+        cwd: Working directory
+        assume_yes: If True, skip interactive prompts (used with --yes flag)
     """
     has_upstream = _has_upstream_remote(git_cmd, cwd)
 
@@ -6766,18 +6772,26 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         if _should_skip_upstream_prompt():
             return
 
-        # Ask user if they want to add upstream
-        print()
-        print("ℹ Your fork is not tracking the official Hermes repository.")
-        print("  This means you may miss updates from NousResearch/hermes-agent.")
-        print()
-        try:
-            response = (
-                input("Add official repo as 'upstream' remote? [Y/n]: ").strip().lower()
-            )
-        except (EOFError, KeyboardInterrupt):
+        # Ask user if they want to add upstream (skip in non-interactive mode)
+        if not assume_yes:
             print()
-            response = "n"
+            print("ℹ Your fork is not tracking the official Hermes repository.")
+            print("  This means you may miss updates from NousResearch/hermes-agent.")
+            print()
+            try:
+                response = (
+                    input("Add official repo as 'upstream' remote? [Y/n]: ").strip().lower()
+                )
+            except (EOFError, KeyboardInterrupt):
+                print()
+                response = "n"
+        else:
+            # Non-interactive mode: auto-add upstream without prompting
+            print()
+            print("ℹ Your fork is not tracking the official Hermes repository.")
+            print("  Adding upstream remote for automatic sync...")
+            print()
+            response = "y"
 
         if response in {"", "y", "yes"}:
             print("→ Adding upstream remote...")
@@ -9618,7 +9632,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
             # Even if origin is up to date, the fork may be behind upstream
             if is_fork and branch == "main":
-                _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+                _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT, assume_yes)
 
             # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
@@ -9829,7 +9843,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Fork upstream sync logic (only for main branch on forks)
         if is_fork and branch == "main":
-            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT, assume_yes)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras
