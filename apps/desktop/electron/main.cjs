@@ -5668,12 +5668,17 @@ async function startHermes() {
       }
     })
 
-    await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
-    // Discover the ephemeral port the child bound to
-    const port = await Promise.race([
+    // Start watching for port announcement immediately to avoid missing it if
+    // the child emits HERMES_BACKEND_READY before we await below.
+    // See #60323.
+    const portPromise = Promise.race([
       waitForDashboardPortAnnouncement(hermesProcess, { readyFile }),
       backendStartFailed
     ])
+
+    await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
+    // Discover the ephemeral port the child bound to
+    const port = await portPromise
     if (readyFile) {
       fs.unlink(readyFile, () => {})
     }
