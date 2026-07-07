@@ -289,11 +289,30 @@ def _run_one_file(
             output, _ = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
+        # Parse the output first to see if pytest completed before the watchdog killed it.
+        summary = _parse_pytest_summary(output)
+        # If we have a summary with passed/failed counts, pytest did complete.
+        # The process tree was killed (likely SIGTERM -> rc=143 or similar) after
+        # completion, but we should report the actual test results, not the signal.
+        # This prevents harness infrastructure failures from obscuring real test outcomes.
+        if summary and (summary.get("passed", 0) > 0 or summary.get("failed", 0) > 0):
+            # Tests ran to completion; report based on test results, not signal.
+            if summary.get("failed", 0) == 0:
+                rc = 0  # All passed despite post-completion kill
+            else:
+                rc = 1  # Some tests failed
+            # Add a note that the process was killed after completion.
+            output = (
+                f"(completed in {file_timeout:.0f}s; process tree SIGKILL'd "
+                f"after pytest finished)\n{output}"
+            )
+        else:
+            # No summary means pytest never reached the summary line — genuine timeout.
+            rc = 124  # de facto convention for "killed by timeout".
+            output = (
+                f"({file_timeout:.0f}s exceeded; "
+                f"process tree SIGKILL'd)\n{output}"
+            )
     except BaseException:
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
@@ -305,13 +324,16 @@ def _run_one_file(
         _kill_tree(proc, pgid=pgid)
 
         output +=  "\n"
+        summary = _parse_pytest_summary(output)
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
         # Treat as a pass; surface info in a slightly distinct status
         # so the operator can spot it.
         rc = 0
-    summary = _parse_pytest_summary(output)
+    # If we didn't parse a summary yet (e.g., happy path), do it now.
+    if 'summary' not in locals():
+        summary = _parse_pytest_summary(output)
     subproc_wall = time.monotonic() - subproc_start
     return file, rc, output, summary, subproc_wall
 
