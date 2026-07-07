@@ -19419,7 +19419,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if result and not pending and not pending_event:
                 _leftover_steer = result.get("pending_steer")
                 if _leftover_steer:
-                    pending = _leftover_steer
+                    from agent.prompt_builder import format_steer_marker
+                    pending = format_steer_marker(_leftover_steer)
                     logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
 
             # Safety net: if the pending text is a slash command (e.g. "/stop",

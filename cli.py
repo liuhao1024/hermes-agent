@@ -12657,9 +12657,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # batch could absorb it), deliver it as the next user turn.
             _leftover_steer = result.get("pending_steer") if result else None
             if _leftover_steer and hasattr(self, '_pending_input'):
+                from agent.prompt_builder import format_steer_marker
+                marked = format_steer_marker(_leftover_steer)
                 preview = _leftover_steer[:60] + ("..." if len(_leftover_steer) > 60 else "")
                 print(f"\n⏩ Delivering leftover /steer as next turn: '{preview}'")
-                self._pending_input.put(_leftover_steer)
+                self._pending_input.put(marked)
 
             return response
             
