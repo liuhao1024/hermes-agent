@@ -161,6 +161,9 @@ export interface Translations {
     copyDetailFailed: string
     backendOutOfDateTitle: string
     backendOutOfDateMessage: string
+    guiOutOfDateTitle: string
+    guiOutOfDateMessage: string
+    restartHermes: string
     updateHermes: string
     updateReadyTitle: string
     updateReadyMessage: (count: number) => string

@@ -120,6 +120,11 @@ export const ja = defineLocale({
     backendOutOfDateTitle: 'バックエンドが古いです',
     backendOutOfDateMessage:
       'Hermes バックエンドがこのデスクトップビルドより古く、正常に動作しない場合があります。更新して揃えてください。',
+    guiOutOfDateTitle: 'アプリが古いです',
+    guiOutOfDateMessage:
+      'このHermesデスクトップビルドは、ドライブしているバックエンドより古いです。アプリを再起動して最新バージョンを読み込んでください。',
+    restartHermes: '今すぐ再起動
+      'Hermes バックエンドがこのデスクトップビルドより古く、正常に動作しない場合があります。更新して揃えてください。',
     updateHermes: 'Hermes を更新',
     updateReadyTitle: '更新の準備ができました',
     updateReadyMessage: count => `${count} 件の新しい変更が利用可能です。`,

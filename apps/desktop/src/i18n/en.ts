@@ -118,7 +118,11 @@ export const en: Translations = {
     copyDetailFailed: 'Could not copy notification detail',
     backendOutOfDateTitle: 'Backend out of date',
     backendOutOfDateMessage:
-      'Your Hermes backend is older than this desktop build and may not work correctly. Update to align them.',
+      'Your Hermes backend is older than this desktop build and may not work correctly. Update to stay in sync.',
+    guiOutOfDateTitle: 'App out of date',
+    guiOutOfDateMessage:
+      'This Hermes desktop build is older than the backend it is driving. Relaunch the app to load the latest version.',
+    restartHermes: 'Restart now',
     updateHermes: 'Update Hermes',
     updateReadyTitle: 'Update ready',
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,

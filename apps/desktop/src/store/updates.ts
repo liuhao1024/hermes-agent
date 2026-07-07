@@ -121,34 +121,61 @@ function isSkewToastSnoozed(): boolean {
  * doesn't nag on every thread switch.
  */
 export function reportBackendContract(contract: number | undefined): void {
-  if ((contract ?? 0) >= REQUIRED_BACKEND_CONTRACT) {
-    dismissNotification(SKEW_TOAST_ID)
-    // Backend caught up — forget any prior snooze so a future regression warns
-    // immediately rather than staying silent for the rest of the window.
-    persistString(SKEW_TOAST_SNOOZE_KEY, null)
+  // Backend < GUI: warn and offer backend update
+  if ((contract ?? 0) < REQUIRED_BACKEND_CONTRACT) {
+    if (isSkewToastSnoozed()) {
+      return
+    }
+
+    notify({
+      action: {
+        label: translateNow('notifications.updateHermes'),
+        onClick: () => {
+          snoozeSkewToast()
+          void applyBackendUpdate()
+        }
+      },
+      durationMs: 0,
+      id: SKEW_TOAST_ID,
+      kind: 'warning',
+      message: translateNow('notifications.backendOutOfDateMessage'),
+      onDismiss: () => snoozeSkewToast(),
+      title: translateNow('notifications.backendOutOfDateTitle')
+    })
 
     return
   }
 
-  if (isSkewToastSnoozed()) {
+  // Backend > GUI: warn and offer GUI update (relaunch/reinstall)
+  if (contract && contract > REQUIRED_BACKEND_CONTRACT) {
+    if (isSkewToastSnoozed()) {
+      return
+    }
+
+    notify({
+      action: {
+        label: translateNow('notifications.restartHermes'),
+        onClick: () => {
+          snoozeSkewToast()
+          // Open the updates overlay so the user can see the GUI update option
+          openUpdatesWindow()
+        }
+      },
+      durationMs: 0,
+      id: SKEW_TOAST_ID,
+      kind: 'warning',
+      message: translateNow('notifications.guiOutOfDateMessage'),
+      onDismiss: () => snoozeSkewToast(),
+      title: translateNow('notifications.guiOutOfDateTitle')
+    })
+
     return
   }
 
-  notify({
-    action: {
-      label: translateNow('notifications.updateHermes'),
-      onClick: () => {
-        snoozeSkewToast()
-        void applyBackendUpdate()
-      }
-    },
-    durationMs: 0,
-    id: SKEW_TOAST_ID,
-    kind: 'warning',
-    message: translateNow('notifications.backendOutOfDateMessage'),
-    onDismiss: () => snoozeSkewToast(),
-    title: translateNow('notifications.backendOutOfDateTitle')
-  })
+  // Backend caught up — forget any prior snooze so a future regression warns
+  // immediately rather than staying silent for the rest of the window.
+  dismissNotification(SKEW_TOAST_ID)
+  persistString(SKEW_TOAST_SNOOZE_KEY, null)
 }
 
 /**
