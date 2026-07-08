@@ -1482,10 +1482,17 @@ class AIAgent:
         (LiteLLM/sglang/vLLM/LM Studio proxies, Tailscale boxes), which
         report finish_reason correctly and were the source of #13971's
         false-positive truncation continuations.
+
+        Ollama Cloud (https://ollama.com/v1) reports finish_reason correctly
+        and is excluded to prevent false-positive truncation continuations
+        that corrupt MEDIA/voice tags when concatenated without separators.
         """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
         if "glm" not in model_lower and provider_lower != "zai":
+            return False
+        # Ollama Cloud reports finish_reason correctly; exclude it
+        if "ollama.com" in self._base_url_lower:
             return False
         if "ollama" in self._base_url_lower or ":11434" in self._base_url_lower:
             return True
