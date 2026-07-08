@@ -340,8 +340,14 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
         if slug == "moa":
             # MoA is a virtual routing mode, not an independently configured
             # provider. Hide it from explicit-only pickers unless it is the
-            # current provider (handled above).
-            continue
+            # current provider (handled above) or the user has configured
+            # at least one enabled MoA preset (an explicit user choice).
+            from hermes_cli.moa_config import normalize_moa_config
+            from hermes_cli.config import load_config
+            moa_cfg = normalize_moa_config(load_config().get("moa") or {})
+            has_enabled = any(p.get("enabled", True) for p in moa_cfg.get("presets", {}).values())
+            if not has_enabled:
+                continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)
     return kept
