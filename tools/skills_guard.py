@@ -93,6 +93,13 @@ class ScanResult:
 # Threat patterns — (regex, pattern_id, severity, category, description)
 # ---------------------------------------------------------------------------
 
+# Pattern IDs that should only match in Ruby files (.rb, .gemspec, Rakefile, etc.)
+# Other languages may have similar syntax (e.g., Python dict env[key]) that
+# should not trigger Ruby-specific rules.
+RUBY_ONLY_PATTERNS = {
+    "ruby_env_secret",
+}
+
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
     (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
@@ -191,7 +198,7 @@ THREAT_PATTERNS = [
     (r'you\s+are\s+(?:\w+\s+)*now\s+',
      "role_hijack", "high", "injection",
      "attempts to override the agent's role"),
-    (r'do\s+not\s+(?:\w+\s+)*tell\s+(?:\w+\s+)*the\s+user',
+    (r'do\s+not\s+(?:\w+\s+){0,2}tell\s+(?:\w+\s+){0,2}the\s+user',
      "deception_hide", "critical", "injection",
      "instructs agent to hide information from user"),
     (r'system\s+(?:\w+\s+)*prompt\s+(?:\w+\s+)*override',
@@ -517,7 +524,7 @@ THREAT_PATTERNS = [
 
 # Structural limits for skill directories
 MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
-MAX_TOTAL_SIZE_KB = 1024  # 1MB total is suspicious for a skill
+MAX_TOTAL_SIZE_KB = 2048  # 2MB total — raised from 1MB to reduce false positives on feature-rich skills
 MAX_SINGLE_FILE_KB = 256  # individual file > 256KB is suspicious
 
 # File extensions to scan (text files only — skip binary)
@@ -586,7 +593,11 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     seen = set()  # (pattern_id, line_number) for deduplication
 
     # Regex pattern matching
+    is_ruby = file_path.suffix.lower() in {'.rb', '.gemspec'} or file_path.name in {'Rakefile', 'Gemfile'}
     for pattern, pid, severity, category, description in THREAT_PATTERNS:
+        # Skip Ruby-only patterns in non-Ruby files to avoid cross-language false positives
+        if pid in RUBY_ONLY_PATTERNS and not is_ruby:
+            continue
         for i, line in enumerate(lines, start=1):
             if (pid, i) in seen:
                 continue
