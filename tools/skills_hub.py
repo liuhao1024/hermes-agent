@@ -1321,9 +1321,8 @@ class UrlSource(SkillSource):
     """Fetch a single-file SKILL.md skill directly from an HTTP(S) URL.
 
     The identifier IS the URL (e.g. ``https://example.com/path/SKILL.md``).
-    Only single-file skills are supported — multi-file skills with
-    ``references/`` or ``scripts/`` subfolders need a manifest we can't
-    discover from a bare URL.
+    Single-file skills are supported; GitHub raw URLs automatically expand
+    to include linked support files (references/, templates/, examples/, scripts/).
 
     The skill name is read from the ``name:`` field in the SKILL.md YAML
     frontmatter (with a URL-slug fallback). Trust level is always
@@ -1396,11 +1395,42 @@ class UrlSource(SkillSource):
         if not self._matches(identifier):
             return None
         url = identifier.strip()
-        text = self._fetch_text(url)
-        if text is None:
+
+        # Check if this is a GitHub raw URL and try to fetch full directory
+        github_parts = self._parse_github_raw_url(url)
+        if github_parts:
+            owner, repo, branch, path = github_parts
+
+            # If URL points to a directory's SKILL.md, fetch the entire directory
+            if path.lower().endswith("/skill.md"):
+                dir_path = path.rsplit("/", 1)[0]
+                files = self._fetch_github_directory(owner, repo, dir_path)
+
+                # If directory fetch failed, fall back to single file
+                if not files:
+                    text = self._fetch_text(url)
+                    if text is None:
+                        return None
+                    files = {"SKILL.md": text}
+            else:
+                # Single file path that doesn't end in /SKILL.md, fetch just that file
+                text = self._fetch_text(url)
+                if text is None:
+                    return None
+                files = {"SKILL.md": text}
+        else:
+            # Non-GitHub URL, fetch single file
+            text = self._fetch_text(url)
+            if text is None:
+                return None
+            files = {"SKILL.md": text}
+
+        # Parse frontmatter from SKILL.md
+        skill_md = files.get("SKILL.md", "")
+        if not skill_md:
             return None
 
-        fm = GitHubSource._parse_frontmatter_quick(text)
+        fm = GitHubSource._parse_frontmatter_quick(skill_md)
         name = self._resolve_skill_name(fm, url)
 
         # When auto-resolution fails, return a bundle with an empty name and
@@ -1418,7 +1448,7 @@ class UrlSource(SkillSource):
 
         return SkillBundle(
             name=skill_name,
-            files={"SKILL.md": text},
+            files=files,
             source="url",
             identifier=url,
             trust_level="community",
@@ -1477,6 +1507,79 @@ class UrlSource(SkillSource):
 
         # Nothing usable — let the caller handle it.
         return None
+
+    @staticmethod
+    def _parse_github_raw_url(url: str) -> Optional[Tuple[str, str, str, str]]:
+        """Parse a GitHub raw URL into (owner, repo, branch, path).
+
+        Returns None if the URL is not a GitHub raw URL.
+
+        Examples:
+            https://raw.githubusercontent.com/owner/repo/main/path/SKILL.md
+            -> (owner, repo, main, path/SKILL.md)
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return None
+
+        if parsed.netloc != "raw.githubusercontent.com":
+            return None
+
+        parts = parsed.path.strip("/").split("/", 3)
+        if len(parts) < 4:
+            return None
+
+        owner, repo, branch, path = parts
+        return owner, repo, branch, path
+
+    def _fetch_github_directory(self, owner: str, repo: str, path: str) -> Dict[str, str]:
+        """Fetch all files from a GitHub directory using the API.
+
+        Returns a dict of {relative_path: content} for all text files in the directory.
+        """
+        files = {}
+        repo_full = f"{owner}/{repo}"
+        headers = {"Accept": "application/vnd.github.v3+json"}
+
+        # Try to get a token for higher rate limits
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"token {token}"
+
+        # Fetch directory contents
+        api_url = f"https://api.github.com/repos/{repo_full}/contents/{path}"
+        try:
+            resp = httpx.get(api_url, headers=headers, timeout=20, follow_redirects=True)
+        except httpx.HTTPError:
+            return files
+
+        if resp.status_code != 200:
+            return files
+
+        entries = resp.json()
+        if not isinstance(entries, list):
+            return files
+
+        for entry in entries:
+            entry_type = entry.get("type", "")
+            if entry_type == "file":
+                file_url = entry.get("download_url") or entry.get("url")
+                if not file_url:
+                    continue
+                try:
+                    file_resp = httpx.get(file_url, timeout=20, follow_redirects=True)
+                    if file_resp.status_code == 200:
+                        files[entry.get("name", "")] = file_resp.text
+                except httpx.HTTPError:
+                    pass
+            elif entry_type == "dir":
+                # Recursively fetch subdirectory
+                sub_files = self._fetch_github_directory(owner, repo, entry.get("path", ""))
+                for sub_name, sub_content in sub_files.items():
+                    files[f"{entry.get('name', '')}/{sub_name}"] = sub_content
+
+        return files
 
 
 # ---------------------------------------------------------------------------
