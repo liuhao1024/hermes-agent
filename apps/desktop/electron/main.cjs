@@ -774,6 +774,11 @@ function registerMediaProtocol() {
 let mainWindow = null
 let hermesProcess = null
 let connectionPromise = null
+// Guard against concurrent startHermes() calls from both the main process
+// (did-finish-load) and the renderer (getConnection IPC). Without this flag,
+// both paths race: the first assigns connectionPromise, but the second reads
+// null (the assignment hasn't landed yet) and starts a second backend. See #61023.
+let backendStarting = false
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
 // (the desktop's launch profile) stays managed by hermesProcess +
 // connectionPromise + startHermes(); this pool only holds EXTRA profile
@@ -5531,6 +5536,18 @@ async function startHermes() {
   }
   if (connectionPromise) return connectionPromise
 
+  // Guard against concurrent calls from the main process (did-finish-load)
+  // and the renderer (getConnection IPC). Without this, both paths race:
+  // the first assigns connectionPromise, but the second reads null (the
+  // assignment hasn't landed yet) and starts a duplicate backend.
+  // See #61023.
+  if (backendStarting) {
+    // Wait for the in-flight start to complete.
+    return connectionPromise
+  }
+
+  backendStarting = true
+
   connectionPromise = (async () => {
     await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
     // Resolve for the desktop's primary profile so a per-profile remote
@@ -5718,6 +5735,9 @@ async function startHermes() {
     )
     connectionPromise = null
     throw error
+  }).finally(() => {
+    // Reset the starting flag once the promise settles, even on error.
+    backendStarting = false
   })
 
   return connectionPromise
