@@ -1983,6 +1983,13 @@ def detect_provider_for_model(
         return None
 
     # --- Step 2: check OpenRouter catalog ---
+    # Skip OpenRouter auto-detection for custom providers to preserve the user's
+    # endpoint choice (#48305). When using custom:*, we must not silently reroute
+    # to OpenRouter even if the model name matches their catalog.
+    current_normalized = normalize_provider(current_provider)
+    if current_normalized == "custom":
+        return None
+
     # First try exact match (handles provider/model format)
     or_slug = _find_openrouter_slug(name)
     if or_slug:
