@@ -1840,3 +1840,74 @@ class TestHandleProcessRedaction:
         monkeypatch.setattr(pr, "process_registry", reg)
         out = json.loads(pr._handle_process({"action": "log", "session_id": sess.id}))
         assert "zzzopaque1234567890abcdef" in out["output"]
+
+
+class TestCountRunningReconcilesStaleSessions:
+    """`count_running()` should reconcile stale sessions before counting (#60853)."""
+
+    def test_count_running_moves_exited_processes(self, monkeypatch):
+        """Session marked exited but stuck in _running should be moved to _finished."""
+        reg = ProcessRegistry()
+        sess = _make_session(sid="proc_stale", command="sleep 1")
+        sess.exited = False  # reader thread hasn't marked it exited yet
+
+        # Create a mock process that has actually exited (returncode is not None)
+        mock_process = MagicMock()
+        mock_process.poll.return_value = 0  # exit code 0 = process has exited
+
+        sess.process = mock_process
+        reg._running[sess.id] = sess
+
+        # Before fix: count_running() would return 1
+        # After fix: count_running() calls _reconcile_local_exit, which moves session to _finished
+        count = reg.count_running()
+        assert count == 0, "Exited process should not be counted"
+        assert sess.id not in reg._running, "Session should be moved out of _running"
+        assert sess.id in reg._finished, "Session should be in _finished"
+        assert sess.exited, "Session should be marked as exited"
+
+    def test_count_running_handles_multiple_stale_sessions(self):
+        """Multiple stale sessions should all be reconciled."""
+        reg = ProcessRegistry()
+        sessions = []
+        for i in range(3):
+            sess = _make_session(sid=f"proc_stale_{i}", command="sleep 1")
+            sess.exited = False
+            mock_process = MagicMock()
+            mock_process.poll.return_value = 0
+            sess.process = mock_process
+            sessions.append(sess)
+            reg._running[sess.id] = sess
+
+        count = reg.count_running()
+        assert count == 0
+        assert all(s.id in reg._finished for s in sessions)
+
+    def test_count_running_leaves_actually_running_processes(self):
+        """Processes that are still running should stay in _running."""
+        reg = ProcessRegistry()
+        sess = _make_session(sid="proc_running", command="sleep 10")
+        sess.exited = False
+
+        # Process is still alive (poll returns None)
+        mock_process = MagicMock()
+        mock_process.poll.return_value = None  # None = still running
+        sess.process = mock_process
+        reg._running[sess.id] = sess
+
+        count = reg.count_running()
+        assert count == 1, "Running process should be counted"
+        assert sess.id in reg._running, "Session should stay in _running"
+        assert sess.id not in reg._finished, "Session should not be in _finished"
+
+    def test_count_running_handles_no_process_object(self):
+        """Sessions without a process object should be gracefully handled."""
+        reg = ProcessRegistry()
+        sess = _make_session(sid="proc_no_process", command="sleep 1")
+        sess.exited = False
+        # No process object at all (e.g., failed to start)
+        reg._running[sess.id] = sess
+
+        # Should not crash, just count as running
+        count = reg.count_running()
+        assert count == 1  # Can't determine if exited, so conservatively count as running
