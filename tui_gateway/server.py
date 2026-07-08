@@ -581,11 +581,28 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
     # Use session_id (from agent.session_id) not session_key — after compression,
     # session_key may be stale (the ended parent) while session_id is the live
-    # continuation. Fix for #20001.
+    # continuation. Fix for #20001. Do not end gateway-originated sessions —
+    # the gateway is the authoritative lifecycle owner for those, and ending
+    # them in state.db from the TUI orphan-reaper causes a Groundhog Day routing
+    # loop where the gateway continues routing messages to a session marked
+    # ended. The gateway transports own session lifecycle, not the WS viewer.
+    # Fixes #60609.
     if session_id:
         try:
             db = _get_db()
             if db is not None:
+                # Skip ending sessions owned by gateway transports. The TUI is
+                # only a viewer for resumed gateway sessions; it should not mark
+                # them ended in state.db. See #60609 for the routing loop
+                # consequences of violating this invariant.
+                row = db.get_session(session_id)
+                source = (row or {}).get("source", "")
+                _GATEWAY_SOURCES = frozenset({
+                    "bluebubbles", "telegram", "discord", "signal", "whatsapp",
+                    "wecom", "qqbot", "feishu", "bluebubbles_notification",
+                })
+                if source in _GATEWAY_SOURCES:
+                    return
                 db.end_session(session_id, end_reason)
         except Exception:
             pass
