@@ -2670,6 +2670,52 @@ def _display_system_platform(
     }
 
 
+def _try_read_cgroup_cpu_limit() -> Optional[int]:
+    """Read CPU limit from cgroup v2 if available and finite.
+
+    Returns the number of CPU cores available to the container, or None if
+    cgroup files are absent, unlimited, or parsing fails.
+    """
+    try:
+        with open("/sys/fs/cgroup/cpu.max", "r") as f:
+            content = f.read()
+        parts = content.strip().split()
+        if len(parts) != 2:
+            return None
+        max_val, period = parts
+        if max_val == "max":
+            return None  # unlimited
+        max_int = int(max_val)
+        period_int = int(period)
+        if period_int == 0:
+            return None
+        # CPU quota is max / period (both in microseconds)
+        return max_int // period_int
+    except (FileNotFoundError, PermissionError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _try_read_cgroup_memory() -> Tuple[Optional[int], Optional[int]]:
+    """Read memory limits from cgroup v2 if available.
+
+    Returns (max_bytes, current_bytes) tuple. Both values are None if files
+    are absent or contain "max" (unlimited).
+    """
+    def _read_int(path: str) -> Optional[int]:
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+                if content == "max":
+                    return None
+                return int(content)
+        except (FileNotFoundError, PermissionError, ValueError):
+            return None
+
+    max_bytes = _read_int("/sys/fs/cgroup/memory.max")
+    current_bytes = _read_int("/sys/fs/cgroup/memory.current")
+    return max_bytes, current_bytes
+
+
 @app.get("/api/system/stats")
 async def get_system_stats():
     """Host + process system stats for the System page.
@@ -2677,8 +2723,16 @@ async def get_system_stats():
     OS / Python / host identity from stdlib; CPU / memory / disk / uptime from
     psutil when available, with graceful degradation when it isn't.  Read-only
     and non-sensitive (no env values, no paths beyond the hermes home root).
+
+    When running inside containers with cgroup v2 limits, reports container-aware
+    CPU and memory metrics instead of host-level values.
     """
     import platform as _platform
+
+    # Try cgroup v2 first for container-aware metrics
+    cgroup_cpu = _try_read_cgroup_cpu_limit()
+    cgroup_mem_max, cgroup_mem_current = _try_read_cgroup_memory()
+    using_cgroup = cgroup_cpu is not None and cgroup_mem_max is not None
 
     info: Dict[str, Any] = {
         **_display_system_platform(
@@ -2692,8 +2746,21 @@ async def get_system_stats():
         "python_version": _platform.python_version(),
         "python_impl": _platform.python_implementation(),
         "hermes_version": __version__,
-        "cpu_count": os.cpu_count(),
+        "cpu_count": cgroup_cpu if using_cgroup else os.cpu_count(),
     }
+
+    if using_cgroup:
+        # Container-aware metrics from cgroup v2
+        info["stats_scope"] = "container"
+        info["memory"] = {
+            "total": cgroup_mem_max,
+            "used": cgroup_mem_current,
+            "available": cgroup_mem_max - cgroup_mem_current if cgroup_mem_max is not None else None,
+            "percent": (cgroup_mem_current / cgroup_mem_max * 100) if cgroup_mem_max and cgroup_mem_max > 0 else None,
+        }
+        info["psutil"] = False  # Not using psutil for these fields
+        # Skip uptime in container mode (no reliable way to get container uptime)
+        return info
 
     # psutil enriches the picture when present; everything below is optional.
     try:
