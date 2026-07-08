@@ -246,6 +246,17 @@ def load_hermes_dotenv(
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
 
+    # Load profile-specific .env if HERMES_PROFILE is set (#61046).
+    # The profile .env overrides the global .env, so variables can be
+    # customized per profile (e.g., different bot credentials).
+    profile_name = os.getenv("HERMES_PROFILE")
+    if profile_name:
+        profile_env = home_path / "profiles" / profile_name / ".env"
+        if profile_env.exists():
+            _sanitize_env_file_if_needed(profile_env)
+            _load_dotenv_with_fallback(profile_env, override=True)
+            loaded.append(profile_env)
+
     # Load .op.env AFTER .env so that .env values win, but the bootstrap
     # token (OP_SERVICE_ACCOUNT_TOKEN) becomes available for
     # apply_onepassword_secrets() even in cron / subprocess environments
