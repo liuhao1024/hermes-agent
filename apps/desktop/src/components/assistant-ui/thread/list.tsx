@@ -285,7 +285,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
           </div>
         ) : (
           <div
-            className={cn('mx-auto flex w-full max-w-(--composer-width) min-w-0 flex-col px-6', threadContentTopPad)}
+            className={cn('flex w-full max-w-(--composer-width) min-w-0 flex-col px-6', threadContentTopPad)}
             data-slot="aui_thread-content"
             ref={contentRef as React.RefCallback<HTMLDivElement>}
           >
