@@ -4520,9 +4520,33 @@ def _make_agent(
             system_prompt = "\n\n".join(
                 part for part in (system_prompt, skills_prompt) if part
             ).strip()
+    # Platform-specific model configuration (config.yaml: platforms.<name>.model)
+    # wins over global defaults but loses to per-session /model overrides.
+    if platform_override and isinstance(model_override, (type(None), str)):
+        try:
+            cfg = _load_cfg()
+            platforms = cfg.get("platforms", {})
+            platform_cfg = platforms.get(platform_override)
+            if platform_cfg and isinstance(platform_cfg, dict):
+                platform_model = platform_cfg.get("model")
+                if platform_model and isinstance(platform_model, dict):
+                    # Apply platform-specific model configuration
+                    if model_override is None:
+                        model_override = platform_model.copy()
+                    elif isinstance(model_override, str):
+                        # platform model takes precedence over string override
+                        model_override = platform_model.copy()
+                        # Honor the provider_override if explicitly set
+                        if provider_override:
+                            model_override["provider"] = provider_override
+        except Exception:
+            # Fail-soft: if platform config is malformed, fall back to defaults
+            pass
+    
     # Prefer a per-session model override (set by a prior in-session /model
-    # switch) over global config/env resolution. Resume-time stored sessions may
-    # also pass scalar model/provider/runtime knobs from the persisted DB row.
+    # switch) over platform-specific config, which wins over global config/env.
+    # Resume-time stored sessions may also pass scalar model/provider/runtime
+    # knobs from the persisted DB row.
     if isinstance(model_override, dict) and model_override.get("model"):
         model = str(model_override.get("model") or "")
         requested_provider = model_override.get("provider") or provider_override or None
