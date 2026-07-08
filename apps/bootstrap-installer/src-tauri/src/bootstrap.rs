@@ -667,6 +667,18 @@ async fn run_bootstrap(
         },
     );
 
+    // Stamp the bootstrap-complete marker for launcher fast-path detection.
+    // Mirrors install.ps1 (Windows) behavior; macOS installer was missing this.
+    let marker_path = crate::paths::likely_bootstrap_marker(&install_root);
+    if let Err(err) = std::fs::write(&marker_path, "") {
+        tracing::warn!(?err, ?marker_path, "failed to write bootstrap-complete marker (non-fatal)");
+        emit_log(&format!(
+            "[bootstrap] warning: could not write bootstrap-complete marker: {err}"
+        ));
+    } else {
+        tracing::info!(?marker_path, "bootstrap-complete marker written");
+    }
+
     Ok(install_root.to_string_lossy().into_owned())
 }
 
