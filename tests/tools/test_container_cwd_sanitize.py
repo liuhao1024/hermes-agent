@@ -29,6 +29,15 @@ class TestIsUnusableContainerCwd:
     def test_windows_forwardslash_host_path_rejected(self):
         assert tt._is_unusable_container_cwd("C:/Users/someuser") is True
 
+    def test_windows_non_c_drive_backslash_rejected(self):
+        # Non-C: drives also leak to docker run -w (bug #60962).
+        assert tt._is_unusable_container_cwd(r"D:\workspaces\project") is True
+        assert tt._is_unusable_container_cwd(r"E:\Oraca\workspaces\orchestrator") is True
+
+    def test_windows_non_c_drive_forwardslash_rejected(self):
+        assert tt._is_unusable_container_cwd("D:/workspaces/project") is True
+        assert tt._is_unusable_container_cwd("Z:/data/experiment") is True
+
     def test_posix_home_host_path_rejected(self):
         assert tt._is_unusable_container_cwd("/home/ben/projects") is True
 

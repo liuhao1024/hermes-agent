@@ -1213,6 +1213,11 @@ def _safe_getcwd() -> str:
 # cwd looks when it leaks toward a Linux container's ``-w`` flag.
 _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
 
+# Pattern to catch Windows drive paths (e.g., D:\, E:/, Z:\) that slip through
+# the prefix list above. On native Windows, os.path.isabs() returns True for
+# these paths, so they bypass the relative-path fallback check.
+_WINDOWS_DRIVE_CWD_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
 _CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona"})
 
 
@@ -1244,6 +1249,11 @@ def _is_unusable_container_cwd(cwd: str) -> bool:
     if not cwd:
         return False
     if any(cwd.startswith(p) for p in _HOST_CWD_PREFIXES):
+        return True
+    # Catch Windows drive paths (D:\, E:/, etc.) that aren't in the prefix list.
+    # On native Windows, os.path.isabs() returns True for these, so they bypass
+    # the relative-path fallback check below.
+    if _WINDOWS_DRIVE_CWD_RE.match(cwd):
         return True
     # Relative paths (".", "src/") can't be a container workdir either. Windows
     # drive paths are absolute on Windows but os.path.isabs() is False on a
