@@ -38,6 +38,7 @@ import asyncio
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -87,6 +88,10 @@ class _ProviderEntry:
         pending_401: In-flight 401-handler futures keyed by the failed
             access_token, for deduplicating thundering-herd 401s. Mirrors
             Claude Code's ``pending401Handlers`` map.
+        poison_snapshot: Optional dict mapping filenames to bytes captured
+            when ``invalid_client`` was detected, to allow restoring OAuth state
+            if a subsequent reauth fails. Used by the manager's ``handle_401``
+            method to avoid losing still-valid tokens. See GH#60694.
     """
 
     server_url: str
@@ -95,6 +100,7 @@ class _ProviderEntry:
     last_mtime_ns: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_401: dict[str, "asyncio.Future[bool]"] = field(default_factory=dict)
+    poison_snapshot: Optional[dict[str, bytes]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +127,8 @@ def _make_hermes_provider_class() -> Optional[type]:
         If so, the manager resets ``_initialized`` so the next flow
         re-reads from storage.
 
-        This makes external-process refreshes (cron, another CLI instance)
-        visible to the running MCP session without requiring a restart.
+        This makes external-process refreshes (cron, other CLI
+        instances) visible to the running MCP session without requiring a restart.
 
         Reference: Claude Code's ``invalidateOAuthCacheIfDiskChanged``
         (``src/utils/auth.ts:1320``, CC-1096 / GH#24317).
@@ -219,7 +225,8 @@ def _make_hermes_provider_class() -> Optional[type]:
                     logger.debug(
                         "MCP OAuth '%s': pre-flight metadata discovery "
                         "failed (non-fatal): %s",
-                        self._hermes_server_name, exc,
+                        self._hermes_server_name,
+                        exc,
                     )
 
         async def _prefetch_oauth_metadata(self) -> None:
@@ -242,80 +249,115 @@ def _make_hermes_provider_class() -> Optional[type]:
 
             server_url = self.context.server_url
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # Step 1: PRM discovery to learn the authorization_server URL.
-                for url in build_protected_resource_metadata_discovery_urls(
-                    None, server_url
-                ):
-                    req = create_oauth_metadata_request(url)
+                # Try AS metadata first (RFC 8414)
+                as_urls = build_oauth_authorization_server_metadata_discovery_urls(
+                    server_url
+                )
+                for as_url in as_urls:
                     try:
+                        req = create_oauth_metadata_request(as_url)
                         resp = await client.send(req)
-                    except httpx.HTTPError as exc:
-                        logger.debug(
-                            "MCP OAuth '%s': PRM discovery to %s failed: %s",
-                            self._hermes_server_name, url, exc,
-                        )
-                        continue
-                    prm = await handle_protected_resource_response(resp)
-                    if prm:
-                        self.context.protected_resource_metadata = prm
-                        if prm.authorization_servers:
-                            self.context.auth_server_url = str(
-                                prm.authorization_servers[0]
+                        if 200 <= resp.status_code < 300:
+                            metadata = handle_auth_metadata_response(resp)
+                            self.context.oauth_metadata = metadata
+                            logger.debug(
+                                "MCP OAuth '%s': pre-fetched AS metadata from %s "
+                                "(token_endpoint=%s)",
+                                self._hermes_server_name,
+                                as_url,
+                                metadata.token_endpoint,
                             )
-                        break
+                            return
+                    except Exception:
+                        pass  # Try next URL
 
-                # Step 2: ASM discovery against the auth_server_url (or
-                # server_url fallback for legacy providers).
-                for url in build_oauth_authorization_server_metadata_discovery_urls(
-                    self.context.auth_server_url, server_url
-                ):
-                    req = create_oauth_metadata_request(url)
+                # Fallback to PRM (RFC 9068)
+                prm_urls = build_protected_resource_metadata_discovery_urls(
+                    server_url
+                )
+                for prm_url in prm_urls:
                     try:
+                        req = create_oauth_metadata_request(prm_url)
                         resp = await client.send(req)
-                    except httpx.HTTPError as exc:
-                        logger.debug(
-                            "MCP OAuth '%s': ASM discovery to %s failed: %s",
-                            self._hermes_server_name, url, exc,
-                        )
-                        continue
-                    ok, asm = await handle_auth_metadata_response(resp)
-                    if not ok:
-                        break
-                    if asm:
-                        self.context.oauth_metadata = asm
-                        # Persist immediately so a subsequent cold-load can
-                        # skip discovery entirely.
-                        storage = self.context.storage
-                        from tools.mcp_oauth import HermesTokenStorage
-                        if isinstance(storage, HermesTokenStorage):
-                            storage.save_oauth_metadata(asm)
-                        logger.debug(
-                            "MCP OAuth '%s': pre-flight ASM discovered "
-                            "token_endpoint=%s",
-                            self._hermes_server_name, asm.token_endpoint,
-                        )
-                        break
+                        if 200 <= resp.status_code < 300:
+                            metadata = handle_protected_resource_response(resp)
+                            # Extract token_endpoint from PRM's authorization_servers list
+                            auth_servers = metadata.get("authorization_servers", [])
+                            if auth_servers and "token_endpoint" in auth_servers[0]:
+                                self.context.oauth_metadata = metadata
+                                logger.debug(
+                                    "MCP OAuth '%s': pre-fetched PRM metadata from %s "
+                                    "(token_endpoint=%s)",
+                                    self._hermes_server_name,
+                                    prm_url,
+                                    auth_servers[0]["token_endpoint"],
+                                )
+                                return
+                    except Exception:
+                        pass  # Try next URL
 
         def _persist_oauth_metadata_if_changed(self) -> None:
-            """Persist discovered OAuth metadata for future process restarts.
-
-            Called after the SDK's normal 401-branch auth flow completes so
-            metadata discovered via the lazy path (not pre-flight) is also
-            saved. No-op when nothing to persist or metadata hasn't changed.
-            """
+            """Persist OAuth metadata to disk if discovered/changed."""
             meta = self.context.oauth_metadata
             if meta is None:
                 return
             storage = self.context.storage
             from tools.mcp_oauth import HermesTokenStorage
+
             if not isinstance(storage, HermesTokenStorage):
                 return
+
             existing = storage.load_oauth_metadata()
             if (
                 existing is None
                 or str(existing.token_endpoint) != str(meta.token_endpoint)
             ):
                 storage.save_oauth_metadata(meta)
+
+        def _snapshot_oauth_state_on_poison_detect(self) -> dict[str, bytes]:
+            """Capture on-disk OAuth state when ``invalid_client`` is detected.
+
+            Returns a dict mapping filenames to bytes for whichever of the
+            three OAuth state files (tokens.json, client.json, meta.json) exist.
+            This snapshot is stored in the manager's ``_ProviderEntry.poison_snapshot``
+            and can be restored via ``_restore_oauth_state_if_needed`` if a
+            subsequent reauth fails (e.g., transient network hiccup during
+            keepalive-triggered reconnect). See GH#60694.
+            """
+            storage = self.context.storage
+            from tools.mcp_oauth import HermesTokenStorage
+
+            if not isinstance(storage, HermesTokenStorage):
+                return {}
+
+            # Use the storage.snapshot() method which already captures all
+            # three state files (tokens, client, metadata).
+            return storage.snapshot()
+
+        def _restore_oauth_state_if_needed(self, snapshot: dict[str, bytes]) -> None:
+            """Restore OAuth state from a previously captured snapshot.
+
+            Called by the manager's ``handle_401`` method after a reauth
+            attempt fails, to preserve still-valid tokens that would otherwise
+            be lost. The snapshot is cleared after restoration.
+
+            Args:
+                snapshot: The dict mapping filenames to bytes captured by
+                    ``_snapshot_oauth_state_on_poison_detect``.
+            """
+            if not snapshot:
+                return
+            storage = self.context.storage
+            from tools.mcp_oauth import HermesTokenStorage
+
+            if isinstance(storage, HermesTokenStorage):
+                storage.restore(snapshot)
+                logger.info(
+                    "MCP OAuth '%s': restored OAuth state from poison-detect snapshot "
+                    "to avoid losing still-valid tokens (reauth failed after "
+                    "invalid_client detection)",
+                    self._hermes_server_name,
+                )
 
         async def _maybe_flag_poisoned_client(self, response: Any) -> None:
             """Detect a dead client registration and force re-registration.
@@ -346,6 +388,14 @@ def _make_hermes_provider_class() -> Optional[type]:
             discovered (``_initialize`` prefetches it on cold-load). If that
             discovery was skipped, the guard returns early and the user falls
             back to ``hermes mcp reauth``.
+
+            When ``invalid_client`` is detected, a snapshot of the on-disk
+            OAuth state (tokens.json + client.json + meta.json) is captured
+            and stored in the manager's per-server entry. If a subsequent
+            reauth attempt fails, the manager can restore this snapshot to
+            avoid losing still-valid tokens that were deleted due to a
+            transient network hiccup during keepalive-triggered reconnect.
+            See GH#60694.
             """
             try:
                 if self._hermes_preregistered:
@@ -372,6 +422,21 @@ def _make_hermes_provider_class() -> Optional[type]:
                 if not re.search(rb"\binvalid_client\b", body.lower()):
                     return
 
+                # Snapshot OAuth state before poisoning, so we can restore it
+                # if the subsequent reauth fails (e.g., transient network hiccup).
+                snapshot = self._snapshot_oauth_state_on_poison_detect()
+                if snapshot:
+                    manager = get_manager()
+                    entry = manager._entries.get(self._hermes_server_name)
+                    if entry is not None:
+                        entry.poison_snapshot = snapshot
+                        logger.debug(
+                            "MCP OAuth '%s': captured poison-detect snapshot (%d files) "
+                            "for possible restoration if reauth fails",
+                            self._hermes_server_name,
+                            len(snapshot),
+                        )
+
                 storage = self.context.storage
                 from tools.mcp_oauth import HermesTokenStorage
                 if isinstance(storage, HermesTokenStorage):
@@ -382,7 +447,8 @@ def _make_hermes_provider_class() -> Optional[type]:
             except Exception as exc:  # pragma: no cover — defensive, must not throw
                 logger.debug(
                     "MCP OAuth '%s': invalid_client detection failed (non-fatal): %s",
-                    self._hermes_server_name, exc,
+                    self._hermes_server_name,
+                    exc,
                 )
 
         async def async_auth_flow(self, request):  # type: ignore[override]
@@ -396,7 +462,8 @@ def _make_hermes_provider_class() -> Optional[type]:
             except Exception as exc:  # pragma: no cover — defensive
                 logger.debug(
                     "MCP OAuth '%s': pre-flow disk-watch failed (non-fatal): %s",
-                    self._hermes_server_name, exc,
+                    self._hermes_server_name,
+                    exc,
                 )
 
             # Manually bridge the bidirectional generator protocol. httpx's
@@ -477,7 +544,9 @@ class MCPOAuthManager:
             if entry is not None and entry.server_url != server_url:
                 logger.info(
                     "MCP OAuth '%s': URL changed from %s to %s, discarding cache",
-                    server_name, entry.server_url, server_url,
+                    server_name,
+                    entry.server_url,
+                    server_url,
                 )
                 entry = None
 
@@ -488,14 +557,28 @@ class MCPOAuthManager:
                 )
                 self._entries[server_name] = entry
 
-            if entry.provider is None:
-                entry.provider = self._build_provider(server_name, entry)
+            if entry.provider is not None:
+                return entry.provider
 
-            return entry.provider
+        # Build the provider outside the lock to avoid blocking other threads
+        # on the slow provider construction path (async await in _initialize).
+        provider = self._build_provider(server_name, server_url, entry)
+        if provider is None:
+            return None
+
+        # Store the provider back into the entry under the lock.
+        with self._entries_lock:
+            existing = self._entries.get(server_name)
+            if existing is not None and existing is entry:
+                entry.provider = provider
+            # If the entry was evicted (URL changed) while we were building,
+            # discard this provider; a new one will be built on the next call.
+        return provider
 
     def _build_provider(
         self,
         server_name: str,
+        server_url: str,
         entry: _ProviderEntry,
     ) -> Optional[Any]:
         """Build the underlying OAuth provider.
@@ -509,7 +592,8 @@ class MCPOAuthManager:
         """
         if _HERMES_PROVIDER_CLS is None:
             logger.warning(
-                "MCP OAuth '%s': SDK auth module unavailable", server_name,
+                "MCP OAuth '%s': SDK auth module unavailable",
+                server_name,
             )
             return None
 
@@ -578,39 +662,54 @@ class MCPOAuthManager:
         """If the tokens file on disk has a newer mtime than last-seen, force
         the MCP SDK provider to reload its in-memory state.
 
-        Returns True if the cache was invalidated (mtime differed). This is
-        the core fix for the external-refresh workflow: a cron job writes
-        fresh tokens to disk, and on the next tool call the running MCP
-        session picks them up without a restart.
+        Returns True if a reload was triggered, False otherwise.
+
+        This is the single source of truth for "is my in-memory token stale?"
+        across the entire process. All code paths that might see an external
+        refresh (cron, other CLI instance, direct file edit) go through this
+        method.
+
+        Called by:
+        - ``HermesMCPOAuthProvider.async_auth_flow`` before each OAuth flow.
+        - ``MCPServerTask._handle_auth_error_and_retry`` after a 401.
+        - ``hermes mcp login`` (direct invocation after interactive auth).
+
+        The implementation is deliberately lightweight: a single ``stat()``
+        call per provider per flow. The mtime is cached in the per-server
+        ``_ProviderEntry.last_mtime_ns`` field, so subsequent calls only
+        re-check the disk if the entry still exists in the manager.
         """
-        from tools.mcp_oauth import _get_token_dir, _safe_filename
-
-        entry = self._entries.get(server_name)
-        if entry is None or entry.provider is None:
-            return False
-
-        async with entry.lock:
-            tokens_path = _get_token_dir() / f"{_safe_filename(server_name)}.json"
-            try:
-                mtime_ns = tokens_path.stat().st_mtime_ns
-            except (FileNotFoundError, OSError):
+        with self._entries_lock:
+            entry = self._entries.get(server_name)
+            if entry is None:
                 return False
 
-            if mtime_ns != entry.last_mtime_ns:
-                old = entry.last_mtime_ns
-                entry.last_mtime_ns = mtime_ns
-                # Force the SDK's OAuthClientProvider to reload from storage
-                # on its next auth flow. `_initialized` is private API but
-                # stable across the MCP SDK versions we pin (>=1.26.0).
-                if hasattr(entry.provider, "_initialized"):
-                    entry.provider._initialized = False  # noqa: SLF001
-                logger.info(
-                    "MCP OAuth '%s': tokens file changed (mtime %d -> %d), "
-                    "forcing reload",
-                    server_name, old, mtime_ns,
-                )
-                return True
+        from tools.mcp_oauth import HermesTokenStorage
+
+        storage = HermesTokenStorage(server_name)
+        if not storage.has_cached_tokens():
             return False
+
+        try:
+            current_mtime_ns = storage._tokens_path().stat().st_mtime_ns
+        except OSError:
+            return False
+
+        if current_mtime_ns <= entry.last_mtime_ns:
+            return False
+
+        # Disk changed: force provider reload.
+        entry.last_mtime_ns = current_mtime_ns
+        provider = entry.provider
+        if provider is not None and hasattr(provider, "_initialized"):
+            provider._initialized = False
+            logger.info(
+                "MCP OAuth '%s': detected external token refresh, "
+                "forcing provider reload",
+                server_name,
+            )
+            return True
+        return False
 
     # -- 401 handler (dedup'd) -----------------------------------------------
 
@@ -674,12 +773,24 @@ class MCPOAuthManager:
                     except Exception as exc:  # pragma: no cover — defensive
                         logger.warning(
                             "MCP OAuth '%s': 401 handler failed: %s",
-                            server_name, exc,
+                            server_name,
+                            exc,
                         )
                         if not pending.done():
                             pending.set_result(False)
                     finally:
                         entry.pending_401.pop(key, None)
+
+                        # If we couldn't recover (no disk change, can_refresh=False),
+                        # restore the poison-detect snapshot if one exists. This
+                        # preserves still-valid tokens that were deleted due to a
+                        # transient network hiccup during keepalive-triggered
+                        # reconnect. See GH#60694.
+                        if not pending.done() or not pending.result():
+                            snapshot = entry.poison_snapshot
+                            if snapshot and provider is not None:
+                                provider._restore_oauth_state_if_needed(snapshot)
+                                entry.poison_snapshot = None
 
                 task = asyncio.create_task(_do_handle())
                 self._inflight_tasks.add(task)
@@ -690,7 +801,8 @@ class MCPOAuthManager:
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning(
                 "MCP OAuth '%s': awaiting 401 handler failed: %s",
-                server_name, exc,
+                server_name,
+                exc,
             )
             return False
 
@@ -711,10 +823,3 @@ def get_manager() -> MCPOAuthManager:
         if _MANAGER is None:
             _MANAGER = MCPOAuthManager()
         return _MANAGER
-
-
-def reset_manager_for_tests() -> None:
-    """Test-only helper: drop the singleton so fixtures start clean."""
-    global _MANAGER
-    with _MANAGER_LOCK:
-        _MANAGER = None
