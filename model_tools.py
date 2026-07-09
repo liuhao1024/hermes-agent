@@ -432,8 +432,17 @@ def _compute_tool_definitions(
                 tools_to_include.difference_update(legacy_tools)
                 if not quiet_mode:
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
-            elif not quiet_mode:
-                print(f"⚠️  Unknown toolset: {toolset_name}")
+            else:
+                # Unknown toolset: log a warning even in quiet_mode to prevent silent
+                # security boundary failures. See issue #61184.
+                logger.warning(
+                    "agent.disabled_toolsets contains unknown toolset '%s'; "
+                    "this entry has no effect. For MCP servers, use the toolset name "
+                    "'mcp-<server-name>' (e.g., 'mcp-server-b'), not the server name.",
+                    toolset_name,
+                )
+                if not quiet_mode:
+                    print(f"⚠️  Unknown toolset: {toolset_name}")
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()

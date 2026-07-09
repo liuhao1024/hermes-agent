@@ -587,3 +587,43 @@ class TestDisabledToolsetsPostureToolset:
             )
         }
         assert "write_file" not in no_file
+
+
+class TestDisabledToolsetsUnknownToolsetWarning:
+    """Regression test for #61184: unknown toolset in disabled_toolsets must warn
+    even in quiet_mode to prevent silent security boundary failures."""
+
+    def test_unknown_toolset_warns_in_quiet_mode(self, caplog):
+        """An unknown toolset in disabled_toolsets logs a warning even when
+        quiet_mode=True, to prevent users from unknowingly disabling a toolset
+        that doesn't exist (e.g., using 'server-b' instead of 'mcp-server-b')."""
+        from model_tools import get_tool_definitions
+
+        with caplog.at_level("WARNING"):
+            tools = get_tool_definitions(
+                disabled_toolsets=["does-not-exist"],
+                quiet_mode=True,
+            )
+
+        # Should log a warning about the unknown toolset
+        assert any(
+            "does-not-exist" in record.message and "unknown toolset" in record.message.lower()
+            for record in caplog.records
+        ), "Unknown toolset should log a warning even in quiet_mode"
+
+    def test_mcp_server_name_without_prefix_warns_with_helpful_message(self, caplog):
+        """Using a bare MCP server name (without 'mcp-' prefix) in disabled_toolsets
+        logs a warning with a helpful hint about the correct format."""
+        from model_tools import get_tool_definitions
+
+        with caplog.at_level("WARNING"):
+            tools = get_tool_definitions(
+                disabled_toolsets=["my-server"],
+                quiet_mode=True,
+            )
+
+        # Should log a warning with a hint about the 'mcp-' prefix
+        assert any(
+            "my-server" in record.message and "mcp-<server-name>" in record.message
+            for record in caplog.records
+        ), "MCP server name without prefix should warn with helpful message"
