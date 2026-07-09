@@ -5513,3 +5513,117 @@ class TestGetMessagesPagination:
         self._seed(db, n=5)
         rows = db.get_messages("s1", offset=3)
         assert [m["content"] for m in rows] == ["msg-3", "msg-4"]
+
+
+class TestCyrillicSearchFallback:
+    """Regression tests for Cyrillic search (see #61640).
+
+    Like CJK, Cyrillic scripts are heavily inflected (Russian, Ukrainian, Bulgarian).
+    The unicode61 FTS5 tokenizer does no stemming, so queries that don't hit the
+    exact word form return zero results. Cyrillic queries are now routed to the
+    trigram FTS5 table, which already indexes all message text and handles
+    substring matching correctly.
+    """
+
+    def test_cyrillic_detection_covers_all_ranges(self):
+        from hermes_state import SessionDB
+        f = SessionDB._contains_cyrillic
+        # Russian (Basic Cyrillic)
+        assert f("Мы едем с друзьями в субботу на озеро") is True
+        # Ukrainian (Cyrillic Supplement + Extended)
+        assert f("Добрий день, як справи?") is True
+        # Bulgarian (Basic Cyrillic)
+        assert f("Здравейте, как сте?") is True
+        # Non-Cyrillic
+        assert f("hello world") is False
+        assert f("Русскийtext") is True
+        assert f("") is False
+
+    def test_russian_multichar_query_returns_results(self, db):
+        """The headline bug: Russian substring query must not return []."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1", role="user",
+            content="Мы едем с друзьями в субботу на озеро",
+        )
+        results = db.search_messages("суббот")
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+
+    def test_russian_inflected_query_returns_results(self, db):
+        """Russian nouns have different forms (subbotu vs subbota)."""
+        db.create_session(session_id="s1", source="telegram")
+        db.append_message("s1", role="user", content="Мы поедем в субботу")
+        # Query for "суббот" (stem) should match "субботу" (accusative)
+        results = db.search_messages("суббот")
+        assert len(results) == 1
+
+    def test_ukrainian_query_returns_results(self, db):
+        """Guards against Cyrillic Supplement range coverage."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Добрий день, як справи?")
+        results = db.search_messages("справ")
+        assert len(results) == 1
+
+    def test_cyrillic_trigram_preserves_source_filter(self, db):
+        """Cyrillic trigram queries must respect source_filter."""
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="telegram")
+        db.append_message("s1", role="user", content="Поездка в субботу (CLI)")
+        db.append_message("s2", role="user", content="Поездка в субботу (Telegram)")
+
+        results = db.search_messages("суббот", source_filter=["telegram"])
+        assert len(results) == 1
+        assert results[0]["source"] == "telegram"
+
+    def test_cyrillic_trigram_preserves_exclude_sources(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="tool")
+        db.append_message("s1", role="user", content="Суббота в CLI")
+        db.append_message("s2", role="assistant", content="Суббота в tool")
+
+        results = db.search_messages("суббот", exclude_sources=["tool"])
+        sources = {r["source"] for r in results}
+        assert "tool" not in sources
+        assert "cli" in sources
+
+    def test_cyrillic_trigram_preserves_role_filter(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Пользователь сказал суббота")
+        db.append_message("s1", role="assistant", content="Помощник сказал суббота")
+
+        results = db.search_messages("суббот", role_filter=["assistant"])
+        assert len(results) == 1
+        assert results[0]["role"] == "assistant"
+
+    def test_cyrillic_snippet_is_centered_on_match(self, db):
+        """Snippet should contain the search term."""
+        db.create_session(session_id="s1", source="cli")
+        long_prefix = "Это очень длинный префикс чтобы сдвинуть совпадение в середину " * 3
+        long_suffix = "Это очень длинный суффикс для заполнения оставшегося пространства " * 3
+        db.append_message(
+            "s1", role="user",
+            content=f"{long_prefix}субботу{long_suffix}",
+        )
+        results = db.search_messages("суббот")
+        assert len(results) == 1
+        # The snippet must include the matched term.
+        assert "суббот" in results[0]["snippet"]
+
+    def test_english_query_still_uses_fts5_fast_path(self, db):
+        """English queries must not trigger trigram (fast path regression)."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Deploy docker containers")
+        results = db.search_messages("docker")
+        assert len(results) == 1
+        # English queries should use the main FTS5 table, not trigram.
+
+    def test_cyrillic_query_with_no_matches_returns_empty(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="unrelated English content")
+        results = db.search_messages("суббот")
+        assert results == []
+
+    def test_mixed_cyrillic_english_query(self, db):
+        """Mixed queries should still use trigram for Cyrillic parts."""
+        db.create_session(session_id="s1", source="cli")

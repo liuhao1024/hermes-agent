@@ -4504,10 +4504,27 @@ class SessionDB:
                 return True
         return False
 
+    @staticmethod
+    def _contains_cyrillic(text: str) -> bool:
+        """Check if text contains Cyrillic characters."""
+        for ch in text:
+            cp = ord(ch)
+            if (0x0400 <= cp <= 0x04FF or    # Basic Cyrillic
+                0x0500 <= cp <= 0x052F or    # Cyrillic Supplement
+                0x2DE0 <= cp <= 0x2DFF or    # Cyrillic Extended-A
+                0xA640 <= cp <= 0xA69F):     # Cyrillic Extended-B
+                return True
+        return False
+
     @classmethod
     def _count_cjk(cls, text: str) -> int:
         """Count CJK characters in text."""
         return sum(1 for ch in text if cls._is_cjk_codepoint(ord(ch)))
+
+    @classmethod
+    def _count_cyrillic(cls, text: str) -> int:
+        """Count Cyrillic characters in text."""
+        return sum(1 for ch in text if cls._contains_cyrillic(ch))
 
     def search_messages(
         self,
@@ -4634,9 +4651,11 @@ class SessionDB:
         # CJK queries (1-2 chars), trigram can't match (it needs ≥9 UTF-8
         # bytes = 3 CJK chars), so we fall back to LIKE.
         is_cjk = self._contains_cjk(query)
-        if is_cjk:
+        is_cyrillic = self._contains_cyrillic(query)
+        if is_cjk or is_cyrillic:
             raw_query = query.strip('"').strip()
             cjk_count = self._count_cjk(raw_query)
+            cyrillic_count = self._count_cyrillic(raw_query)
 
             # Per-token CJK length check (#20494): trigram needs >=3 CJK chars
             # per token. A query like "广西 OR 桂林 OR 漓江" has cjk_count=6
@@ -4644,14 +4663,19 @@ class SessionDB:
             # Route to LIKE when any non-operator CJK token is <3 CJK chars.
             _tokens_for_check = [
                 t for t in raw_query.split()
-                if t.upper() not in {"AND", "OR", "NOT"} and self._contains_cjk(t)
+                if (t.upper() not in {"AND", "OR", "NOT"} and
+                    (self._contains_cjk(t) or self._contains_cyrillic(t)))
             ]
             _any_short_cjk = any(
                 self._count_cjk(t) < 3 for t in _tokens_for_check
             )
+            _any_short_cyrillic = any(
+                self._count_cyrillic(t) < 3 for t in _tokens_for_check
+            )
 
             _trigram_succeeded = False
-            if cjk_count >= 3 and not _any_short_cjk and self._trigram_available:
+            if ((is_cjk and cjk_count >= 3 and not _any_short_cjk) or
+                    (is_cyrillic and cyrillic_count >= 3 and not _any_short_cyrillic)) and self._trigram_available:
                 # Trigram FTS5 path — quote each non-operator token to handle
                 # FTS5 special chars (%, *, etc.) while preserving boolean
                 # operators (AND, OR, NOT) for multi-term queries.
