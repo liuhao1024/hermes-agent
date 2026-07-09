@@ -1718,7 +1718,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
                              self._bank_id, len(content), context)
                 self._run_hindsight_operation(
-                    lambda client: client.aretain_batch(bank_id=self._bank_id, items=[item])
+                    lambda client: client.aretain_batch(bank_id=self._bank_id, items=[item], retain_async=True)
                 )
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
