@@ -8281,6 +8281,32 @@ class TelegramAdapter(BasePlatformAdapter):
         return "\n".join(line.rstrip() for line in lines if line)
 
     @classmethod
+    def _sanitize_reply_to_text(text: Optional[str]) -> Optional[str]:
+        """Remove Hermes internal markup from reply-to text.
+
+        When a user replies to a message that contains tool calls or results,
+        Telegram echoes the raw text including ``<TOOLCALL>...</TOOLCALL>``
+        or ``<TOOLRESULT>...</TOOLRESULT>`` blocks. These are internal
+        formatting artifacts and should not appear in the reply preview UI.
+
+        Args:
+            text: Raw reply-to text from Telegram.
+
+        Returns:
+            Sanitized text with markup replaced by placeholders, or ``None``
+            if the input is ``None`` or empty after sanitization.
+        """
+        if not text:
+            return None
+        import re
+        # Replace <TOOLCALL>...</TOOLCALL> with [tool call]
+        sanitized = re.sub(r"<TOOLCALL>.*?</TOOLCALL>", "[tool call]", text)
+        # Replace <TOOLRESULT>...</TOOLRESULT> with [tool result]
+        sanitized = re.sub(r"<TOOLRESULT>.*?</TOOLRESULT>", "[tool result]", sanitized)
+        # Clean up any remaining markup-like patterns (e.g., <THINKING>)
+        sanitized = re.sub(r"<[^>]+>", "", sanitized)
+        return sanitized.strip() or None
+
     def _extract_rich_reply_text(cls, reply_to_message: Any) -> Optional[str]:
         """Return plaintext echoed by Telegram's rich_message reply payload."""
         try:
@@ -8441,6 +8467,9 @@ class TelegramAdapter(BasePlatformAdapter):
                         )
                     except Exception:
                         reply_to_text = None
+            # Sanitize internal markup (TOOLCALL, TOOLRESULT, etc.) to avoid
+            # exposing implementation details in the Telegram reply preview UI.
+            reply_to_text = self._sanitize_reply_to_text(reply_to_text)
 
         # Per-channel/topic ephemeral prompt
         from gateway.platforms.base import resolve_channel_prompt
