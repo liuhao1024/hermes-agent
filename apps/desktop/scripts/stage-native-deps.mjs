@@ -17,7 +17,9 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  rmSync
+  rmSync,
+  readFileSync,
+  writeFileSync
 } from 'node:fs'
 import { isMain } from './utils.mjs'
 
@@ -77,6 +79,49 @@ function copyBuildRelease(srcDir, destDir) {
   }
 }
 
+/**
+ * Patches node-pty's lib/unixTerminal.js to avoid double-rewriting
+ * app.asar.unpacked paths.
+ *
+ * The original code unconditionally does:
+ *   helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
+ *
+ * When the path already contains 'app.asar.unpacked' (e.g., when node-pty
+ * is staged under app.asar.unpacked), this transforms it into
+ * app.asar.unpacked.unpacked, which does not exist, causing:
+ *   Error: posix_spawnp failed.
+ *
+ * This patch adds a guard to skip replacement if the unpacked suffix is
+ * already present.
+ *
+ * Returns true if the file was patched, false if no change was needed.
+ */
+function patchUnixTerminalJs(unixTerminalPath) {
+  const content = readFileSync(unixTerminalPath, 'utf-8')
+
+  const patched = content.replace(
+    // Match the two unconditional replaces:
+    // helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
+    // helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked');
+    /(helperPath = helperPath\.replace\('app\.asar', 'app\.asar\.unpacked'\);)\n(helperPath = helperPath\.replace\('node_modules\.asar', 'node_modules\.asar\.unpacked'\);)/,
+    // Replace with guarded version:
+    `if (helperPath.indexOf('app.asar.unpacked') === -1) {
+  helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
+}
+if (helperPath.indexOf('node_modules.asar.unpacked') === -1) {
+  helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked');
+}`
+  )
+
+  if (patched === content) {
+    // No change needed (already patched or different node-pty version)
+    return false
+  }
+
+  writeFileSync(unixTerminalPath, patched, 'utf-8')
+  return true
+}
+
 export function stageNodePty({ platform = process.platform, arch = process.arch } = {}) {
   const srcRoot = resolveNodePtyRoot()
   const destRoot = resolve(projectRoot, 'dist/node_modules/node-pty')
@@ -90,6 +135,17 @@ export function stageNodePty({ platform = process.platform, arch = process.arch 
 
   // lib/**/*.js — the JS surface node-pty's `main` points into.
   copyGlobByExt(join(srcRoot, 'lib'), join(destRoot, 'lib'), ['.js'])
+
+  // Patch lib/unixTerminal.js to avoid double-rewriting app.asar.unpacked
+  // paths when node-pty is already staged under app.asar.unpacked.
+  // See patchUnixTerminalJs() for detailed explanation.
+  const unixTerminalPath = join(destRoot, 'lib/unixTerminal.js')
+  if (existsSync(unixTerminalPath)) {
+    const patched = patchUnixTerminalJs(unixTerminalPath)
+    if (patched) {
+      console.log(`[stage-native-deps] patched lib/unixTerminal.js to avoid app.asar.unpacked.unpacked path`)
+    }
+  }
 
   // build/Release/* — present when node-pty was compiled locally
   // (e.g. no prebuild available for this Electron ABI/platform combo).
