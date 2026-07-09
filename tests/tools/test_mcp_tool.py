@@ -1717,6 +1717,76 @@ class TestBuildSafeEnv:
         assert "GITHUB_TOKEN" not in result
         assert "OPENAI_API_KEY" not in result
 
+    def test_pass_prefixes_allows_custom_prefixes(self):
+        """pass_prefixes parameter allows whitelisting additional safe prefixes."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "CBM_CACHE_DIR": "/mnt/data/cache",
+            "CBM_CONFIG": "/etc/cbm/config.yaml",
+            "CUSTOM_VAR": "value",
+            "SECRET_KEY": "should_not_appear",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None, pass_prefixes=["CBM_"])
+
+        assert result["PATH"] == "/usr/bin"
+        assert result["CBM_CACHE_DIR"] == "/mnt/data/cache"
+        assert result["CBM_CONFIG"] == "/etc/cbm/config.yaml"
+        assert "CUSTOM_VAR" not in result
+        assert "SECRET_KEY" not in result
+
+    def test_pass_prefixes_multiple_prefixes(self):
+        """Multiple prefixes can be whitelisted simultaneously."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "CBM_CACHE_DIR": "/mnt/data/cache",
+            "MYAPP_CONFIG": "/etc/myapp/config",
+            "OTHER_VAR": "value",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None, pass_prefixes=["CBM_", "MYAPP_"])
+
+        assert result["PATH"] == "/usr/bin"
+        assert result["CBM_CACHE_DIR"] == "/mnt/data/cache"
+        assert result["MYAPP_CONFIG"] == "/etc/myapp/config"
+        assert "OTHER_VAR" not in result
+
+    def test_pass_prefixes_empty_list(self):
+        """Empty pass_prefixes behaves like the default (no extra prefixes)."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "CBM_CACHE_DIR": "/mnt/data/cache",
+            "SECRET_KEY": "should_not_appear",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None, pass_prefixes=[])
+
+        assert result["PATH"] == "/usr/bin"
+        assert "CBM_CACHE_DIR" not in result
+        assert "SECRET_KEY" not in result
+
+    def test_pass_prefixes_none(self):
+        """None pass_prefixes behaves like the default (no extra prefixes)."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "CBM_CACHE_DIR": "/mnt/data/cache",
+            "SECRET_KEY": "should_not_appear",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None, pass_prefixes=None)
+
+        assert result["PATH"] == "/usr/bin"
+        assert "CBM_CACHE_DIR" not in result
+        assert "SECRET_KEY" not in result
+
 
 # ---------------------------------------------------------------------------
 # _sanitize_error

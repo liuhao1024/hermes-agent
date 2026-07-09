@@ -422,22 +422,28 @@ def _env_ref_name(ref: str) -> str:
 # Security helpers
 # ---------------------------------------------------------------------------
 
-def _build_safe_env(user_env: Optional[dict]) -> dict:
+def _build_safe_env(user_env: Optional[dict], pass_prefixes: Optional[list[str]] = None) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
 
     Only passes through safe baseline variables (PATH, HOME, etc.) and XDG_*
     variables from the current process environment, plus any variables
     explicitly specified by the user in the server config.
 
+    The pass_prefixes parameter allows users to whitelist additional safe
+    variable prefixes (e.g., ["CBM_"] for codebase-memory-mcp) that should
+    be passed through from the parent process environment.
+
     This prevents accidentally leaking secrets like API keys, tokens, or
     credentials to MCP server subprocesses.
     """
     env = {}
+    pass_prefixes = pass_prefixes or []
     for key, value in os.environ.items():
         if (
             key in _SAFE_ENV_KEYS
             or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE
             or key.startswith("XDG_")
+            or any(key.startswith(prefix) for prefix in pass_prefixes)
         ):
             env[key] = value
     if user_env:
@@ -2018,13 +2024,14 @@ class MCPServerTask:
         command = config.get("command")
         args = config.get("args", [])
         user_env = config.get("env")
+        pass_env_prefixes = config.get("pass_env_prefixes")
 
         if not command:
             raise ValueError(
                 f"MCP server '{self.name}' has no 'command' in config"
             )
 
-        safe_env = _build_safe_env(user_env)
+        safe_env = _build_safe_env(user_env, pass_prefixes=pass_env_prefixes)
         command, safe_env = _resolve_stdio_command(command, safe_env)
 
         # Check package against OSV malware database before spawning.
