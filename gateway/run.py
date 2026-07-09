@@ -20257,6 +20257,35 @@ async def _await_thread_exit(
     return not thread.is_alive()
 
 
+def _resolve_stderr_level(base_level: int) -> int:
+    """Resolve the actual stderr logging level based on TTY detection.
+
+    When stderr is not a TTY (e.g. redirected by launchd, systemd, Docker),
+    cap at CRITICAL to avoid unbounded log growth in non-rotating log files.
+
+    Override with HERMES_STDERR_LOG_LEVEL env var (e.g. "WARNING", "DEBUG").
+
+    Args:
+        base_level: The base level from verbosity (-v/-vv flags).
+
+    Returns:
+        The resolved logging level.
+    """
+    # Env var override takes precedence
+    if override := os.getenv("HERMES_STDERR_LOG_LEVEL"):
+        try:
+            return getattr(logging, override.upper())
+        except AttributeError:
+            logger.warning("Invalid HERMES_STDERR_LOG_LEVEL=%s, ignoring", override)
+
+    # If stderr is a TTY (interactive foreground), keep base behavior
+    if sys.stderr.isatty():
+        return base_level
+
+    # Redirected stderr (launchd, systemd, Docker): cap at CRITICAL
+    return logging.CRITICAL
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -20454,6 +20483,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         from agent.redact import RedactingFormatter
 
         _stderr_level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
+        # Cap at CRITICAL when stderr is redirected (launchd, systemd, Docker)
+        # to avoid unbounded log growth in non-rotating log files.
+        _stderr_level = _resolve_stderr_level(_stderr_level)
         _stderr_handler = logging.StreamHandler(_safe_stderr())
         _stderr_handler.setLevel(_stderr_level)
         _stderr_handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
