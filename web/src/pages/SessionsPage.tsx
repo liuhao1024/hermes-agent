@@ -724,6 +724,10 @@ export default function SessionsPage() {
     SessionSearchResult[] | null
   >(null);
   const [searching, setSearching] = useState(false);
+  const [searchedSessions, setSearchedSessions] = useState<
+    SessionInfo[] | null
+  >(null);
+  const [loadingSearchSessions, setLoadingSearchSessions] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const logScrollRef = useRef<HTMLPreElement | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -920,6 +924,7 @@ export default function SessionsPage() {
 
     if (!search.trim()) {
       setSearchResults(null);
+      setSearchedSessions(null);
       setSearching(false);
       return;
     }
@@ -928,9 +933,34 @@ export default function SessionsPage() {
     debounceRef.current = setTimeout(() => {
       api
         .searchSessions(search.trim())
-        .then((resp) => setSearchResults(resp.results))
-        .catch(() => setSearchResults(null))
-        .finally(() => setSearching(false));
+        .then((resp) => {
+          setSearchResults(resp.results);
+          // Fetch full session details for all search results
+          if (resp.results.length > 0) {
+            setLoadingSearchSessions(true);
+            Promise.all(
+              resp.results.map((r) => api.getSessionDetail(r.session_id))
+            )
+              .then((sessionInfos) => {
+                setSearchedSessions(sessionInfos);
+              })
+              .catch(() => {
+                setSearchedSessions(null);
+              })
+              .finally(() => {
+                setLoadingSearchSessions(false);
+              });
+          } else {
+            setSearchedSessions([]);
+          }
+        })
+        .catch(() => {
+          setSearchResults(null);
+          setSearchedSessions(null);
+        })
+        .finally(() => {
+          setSearching(false);
+        });
     }, 300);
 
     return () => {
@@ -1191,11 +1221,10 @@ export default function SessionsPage() {
     }
   }
 
-  // When searching, filter sessions to those with FTS matches;
-  // when not searching, show all sessions
-  const filtered = searchResults
-    ? sessions.filter((s) => snippetMap.has(s.id))
-    : sessions;
+  // When searching, show all sessions that match the search query
+  // (fetching full details via searchedSessions);
+  // when not searching, show paginated sessions
+  const filtered = searchedSessions !== null ? searchedSessions : sessions;
 
   const platformEntries = status
     ? Object.entries(status.gateway_platforms ?? {})
