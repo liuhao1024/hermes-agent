@@ -15408,6 +15408,12 @@ async def pty_ws(ws: WebSocket) -> None:
 
     await session.attach(ws)
 
+    # Send a tiny ping to ensure the browser sees the connection as active
+    # (prevents "Silent WebSocket" race where browser disconnects with code=1005
+    # before PTY output arrives after a 1-3s startup delay on session switch).
+    # Save cursor + restore cursor sequence is invisible in the terminal.
+    await ws.send_bytes(b"\x1b[s\x1b[u")
+
     # --- writer loop: WebSocket → PTY master ----------------------------
     # No reader task here: the session's drain task (spawned once per PTY,
     # inside the registry) forwards PTY output to whichever socket is
