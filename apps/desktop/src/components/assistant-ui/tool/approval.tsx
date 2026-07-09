@@ -60,7 +60,17 @@ export const PendingToolApproval: FC<{ part: ToolPart }> = ({ part }) => {
 const InlineApprovalBar: FC<{ request: ApprovalRequest }> = ({ request }) => {
   useEffect(() => registerApprovalInlineAnchor(), [])
 
-  return <ApprovalBar request={request} surface="inline" />
+  return (
+    <div className="space-y-1.5">
+      {request.description && (
+        <div className="flex items-start gap-1.5 text-xs text-(--ui-text-tertiary) ps-5">
+          <AlertCircle className="size-3.5 shrink-0 text-primary mt-0.5" />
+          <span className="whitespace-pre-wrap break-words">{request.description}</span>
+        </div>
+      )}
+      <ApprovalBar request={request} surface="inline" />
+    </div>
+  )
 }
 
 export const PendingApprovalFallback: FC = () => {

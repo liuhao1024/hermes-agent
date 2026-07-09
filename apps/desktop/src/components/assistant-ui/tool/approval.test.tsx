@@ -71,6 +71,42 @@ describe('PendingToolApproval', () => {
     expect(screen.getByRole('button', { name: /Reject/ })).toBeTruthy()
   })
 
+  it('renders the approval description on the pending terminal row', () => {
+    setRequest('chmod -R 777 /tmp/x')
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    expect(screen.getByText('dangerous command')).toBeTruthy()
+  })
+
+  it('renders multi-line description without truncation', () => {
+    const multiLineDesc = 'Line 1\nLine 2\nLine 3'
+    setRequest('rm -rf /tmp/x')
+    setApprovalRequest({
+      allowPermanent: false,
+      command: 'rm -rf /tmp/x',
+      description: multiLineDesc,
+      sessionId: 'sess-1'
+    })
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    const descElement = screen.getByText('Line 1\nLine 2\nLine 3')
+    expect(descElement).toBeTruthy()
+    expect(descElement.textContent).toBe(multiLineDesc)
+  })
+
+  it('does not render description when request has no description', () => {
+    setRequest('rm -rf /tmp/x')
+    setApprovalRequest({
+      allowPermanent: false,
+      command: 'rm -rf /tmp/x',
+      description: '',
+      sessionId: 'sess-1'
+    })
+    const { container } = render(<PendingToolApproval part={part('terminal')} />)
+
+    expect(container.querySelector('.text-(--ui-text-tertiary)')).toBeNull()
+  })
+
   it('sends approval.respond {choice: "once"} and clears the request on Run', async () => {
     const request = mockGateway()
     setRequest()
