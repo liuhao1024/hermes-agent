@@ -260,7 +260,9 @@ class ResponsesApiTransport(ProviderTransport):
         # xAI Responses takes prompt_cache_key in extra_body (set further
         # down); GitHub Models opts out of cache-key routing entirely.
         if not is_github_responses and not is_xai_responses and cache_key:
-            kwargs["prompt_cache_key"] = cache_key
+            # The OpenAI Responses / ChatGPT-Codex backend caps prompt_cache_key at
+            # 64 characters. Clamp to avoid HTTP 400 for long session_ids.
+            kwargs["prompt_cache_key"] = cache_key[:64]
 
         if reasoning_enabled and is_xai_responses:
             from agent.model_metadata import grok_supports_reasoning_effort

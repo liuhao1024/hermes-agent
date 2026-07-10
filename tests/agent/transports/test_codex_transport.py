@@ -836,3 +836,49 @@ class TestPreflightSlashEnumStrip:
         assert params["properties"]["model_id"].get("enum") == [
             "Qwen/Qwen3.5-0.8B", "plain-id"
         ]
+
+    def test_prompt_cache_key_clamped_to_64_chars(self, transport):
+        """The OpenAI Responses / ChatGPT-Codex backend caps prompt_cache_key at
+        64 characters. Clamp to avoid HTTP 400 for long session_ids that fall
+        back when there is no static content to hash."""
+        # Content hash keys are always under 64 chars (28 chars total)
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+        )
+        pck = kw.get("prompt_cache_key", "")
+        assert len(pck) <= 64
+        assert pck.startswith("pck_")
+
+        # Long session_id fallback gets clamped
+        long_session_id = "agent:550e8400-e29b-41d4-a716-446655440000:issue:6b72c7a4-755f-4c1e-a3f9-8c1a0d2e3f4f"
+        # Force session_id fallback by passing empty instructions and no tools
+        from agent.transports.codex import ResponsesApiTransport
+        transport._last_issuer_kind = "codex"
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            instructions="",
+            session_id=long_session_id,
+            is_github_responses=False,
+            is_xai_responses=False,
+        )
+        pck = kw.get("prompt_cache_key", "")
+        assert len(pck) == 64  # Clamped from 85 chars to exactly 64
+        assert pck == long_session_id[:64]
+
+        # Short session_id is unchanged
+        short_session_id = "cron_job42_20260624_143000"
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            instructions="",
+            session_id=short_session_id,
+            is_github_responses=False,
+            is_xai_responses=False,
+        )
+        pck = kw.get("prompt_cache_key", "")
+        assert len(pck) == len(short_session_id)
+        assert pck == short_session_id
