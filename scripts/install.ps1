@@ -2167,6 +2167,20 @@ function Write-BootstrapMarker {
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($markerPath, $json, $utf8NoBom)
 
+    # Write .install_method stamp for install.ps1 + uv-based installs
+    # This overwrites the "pip" stamp written by the postinstall hook triggered by uv.
+    # The install.ps1 + uv-based install is a Tier-1 supported method and should
+    # be marked as "installer", not "pip". See issue #61827.
+    # Use BOM-less UTF-8 encoding to match hermes_cli/config.py:433's read logic.
+    try {
+        $methodStampPath = Join-Path $InstallDir ".install_method"
+        [System.IO.File]::WriteAllText($methodStampPath, "installer", $utf8NoBom)
+        Write-Success "Install method stamp written: $methodStampPath"
+    } catch {
+        # Best-effort: if the install tree is read-only, silently skip
+        Write-Debug "Failed to write .install_method stamp: $_"
+    }
+
     Write-Success "Bootstrap marker written: $markerPath"
 }
 
@@ -3458,19 +3472,6 @@ function Invoke-PostInstallMode {
 function Main {
     Write-Banner
     Invoke-AllStages
-
-    # Write code-scoped install method stamp
-    # This must come AFTER Invoke-AllStages (which runs the "dependencies" stage)
-    # to overwrite any "pip" stamp written by the postinstall hook triggered by uv.
-    # The install.ps1 + uv-based install is a Tier-1 supported method and should
-    # be marked as "installer", not "pip". See issue #61827.
-    try {
-        $methodStamp = "$InstallDir\.install_method"
-        "installer" | Out-File -FilePath $methodStamp -Encoding utf8 -NoNewline
-    } catch {
-        # Best-effort: if the install tree is read-only, silently skip
-        Write-Debug "Failed to write .install_method stamp: $_"
-    }
 
     if (-not $Json) {
         Write-Completion
