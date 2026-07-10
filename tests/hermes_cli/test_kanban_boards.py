@@ -271,6 +271,47 @@ class TestBoardCRUD:
         kb.remove_board("pinned")
         assert kb.get_current_board() == "default"
 
+    def test_archived_board_prevents_silent_creation(self, fresh_home):
+        """Regression for #61908: archived boards should prevent concurrent creation."""
+        kb.create_board("archived-board")
+        # Archive it.
+        res = kb.remove_board("archived-board", archive=True)
+        assert res["action"] == "archived"
+        archived_path = Path(res["new_path"])
+        assert archived_path.exists()
+
+        # board_exists() should return False because the live dir is gone.
+        assert not kb.board_exists("archived-board")
+
+        # create_board() should refuse to create a new board and raise a clear error.
+        with pytest.raises(ValueError, match="has an archived version"):
+            kb.create_board("archived-board")
+
+        # The live board directory should NOT exist (no silent empty DB creation).
+        live_dir = kb.board_dir("archived-board")
+        assert not live_dir.exists()
+
+    def test_archived_board_not_detected_by_board_exists(self, fresh_home):
+        """Regression for #61908: board_exists() should NOT detect archived versions.
+
+        This test verifies that board_exists() keeps its original semantics:
+        it only checks for live boards, not archived ones. This ensures
+        fallback logic in get_current_board() works correctly.
+        """
+        kb.create_board("another-archived")
+        kb.create_task(kb.connect(board="another-archived"), title="t1")
+
+        # Archive it.
+        kb.remove_board("another-archived", archive=True)
+
+        # board_exists() should return False, even though an archived version exists.
+        assert not kb.board_exists("another-archived")
+
+        # list_boards() should not show it (by default, include_archived=True is deprecated).
+        boards = kb.list_boards(include_archived=False)
+        slugs = [b["slug"] for b in boards]
+        assert "another-archived" not in slugs
+
     @pytest.mark.parametrize("archive", [True, False])
     def test_remove_clears_init_cache_for_recreated_db(self, fresh_home, archive):
         # Regression for #23833: poll loops that call connect(board=slug) right

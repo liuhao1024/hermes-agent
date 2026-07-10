@@ -498,6 +498,23 @@ def board_dir(board: Optional[str] = None) -> Path:
     return boards_root() / slug
 
 
+def _has_archived_version(slug: str) -> bool:
+    """Return True if the board has an archived version.
+
+    When a board is archived via ``remove_board(archive=True)``, it's
+    moved to ``_archived/<slug>-<timestamp>/``. If a concurrent process
+    attempts to create the same slug before manual restore, it silently
+    creates an empty ``kanban.db`` at the live path, causing DB divergence.
+    This guard prevents that silent overwrite.
+    """
+    archive_root = boards_root() / "_archived"
+    if not archive_root.exists():
+        return False
+    pattern = re.compile(f'^{re.escape(slug)}-\\d+$')
+    return any(entry.is_dir() and pattern.match(entry.name)
+               for entry in archive_root.iterdir())
+
+
 def board_exists(board: Optional[str] = None) -> bool:
     """Return True if the board has persisted metadata or a DB on disk.
 
@@ -723,10 +740,23 @@ def create_board(
     Returns the resulting metadata. Raises :class:`ValueError` for a
     malformed slug; returns the existing metadata (not an error) if the
     board already exists — matching ``mkdir -p`` semantics.
+
+    Also refuses to create a new board if an archived version exists,
+    to prevent concurrent silent creation of an empty ``kanban.db`` during
+    manual restore. The caller must restore the archived board explicitly
+    instead.
     """
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
+    if board_exists(normed):
+        # Live board exists: return its metadata (idempotent).
+        return read_board_metadata(normed)
+    if _has_archived_version(normed):
+        raise ValueError(
+            f"board {normed!r} has an archived version; restore it explicitly "
+            f"via the archived directory under {boards_root() / '_archived'}"
+        )
     meta = write_board_metadata(
         normed,
         name=name,
