@@ -1992,7 +1992,7 @@ class RenameBoardBody(BaseModel):
     color: Optional[str] = None
 
 
-def _board_counts(slug: str) -> dict[str, int]:
+def _board_counts(slug: str, include_archived: bool = True) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe on an empty DB."""
     try:
         path = kanban_db.kanban_db_path(board=slug)
@@ -2000,9 +2000,11 @@ def _board_counts(slug: str) -> dict[str, int]:
             return {}
         conn = kanban_db.connect(board=slug)
         try:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
+            query = "SELECT status, COUNT(*) AS n FROM tasks"
+            if not include_archived:
+                query += " WHERE status != 'archived'"
+            query += " GROUP BY status"
+            rows = conn.execute(query).fetchall()
             return {r["status"]: int(r["n"]) for r in rows}
         finally:
             conn.close()
@@ -2017,7 +2019,7 @@ def list_boards(include_archived: bool = Query(False)):
     current = kanban_db.get_current_board()
     for b in boards:
         b["is_current"] = (b["slug"] == current)
-        b["counts"] = _board_counts(b["slug"])
+        b["counts"] = _board_counts(b["slug"], include_archived=include_archived)
         b["total"] = sum(b["counts"].values())
     return {"boards": boards, "current": current}
 
