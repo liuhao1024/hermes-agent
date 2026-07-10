@@ -150,15 +150,33 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     }
 
     if (overlay.sudo) {
+      // Clear overlay locally before RPC to prevent zombie overlay on 4009
+      patchOverlayState({ sudo: null })
+      actions.sys('sudo cancelled')
       return gateway
         .rpc<SudoRespondResponse>('sudo.respond', { password: '', request_id: overlay.sudo.requestId })
-        .then(r => r && (patchOverlayState({ sudo: null }), actions.sys('sudo cancelled')))
+        .catch(err => {
+          // Ignore 4009 "no pending request" errors — user cancelled after timeout
+          if (err?.code === 4009) {
+            return null
+          }
+          throw err
+        })
     }
 
     if (overlay.secret) {
+      // Clear overlay locally before RPC to prevent zombie overlay on 4009
+      patchOverlayState({ secret: null })
+      actions.sys('secret entry cancelled')
       return gateway
         .rpc<SecretRespondResponse>('secret.respond', { request_id: overlay.secret.requestId, value: '' })
-        .then(r => r && (patchOverlayState({ secret: null }), actions.sys('secret entry cancelled')))
+        .catch(err => {
+          // Ignore 4009 "no pending request" errors — user cancelled after timeout
+          if (err?.code === 4009) {
+            return null
+          }
+          throw err
+        })
     }
 
     if (overlay.modelPicker) {
@@ -302,12 +320,23 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       // answering felt like the prompt had locked the entire UI.  Explicitly
       // skip the prompt-overlay early-return for scroll keys so they fall
       // through to the wheel / PageUp / Shift+arrow handlers below.
-      const promptOverlay = overlay.approval || overlay.billing || overlay.clarify || overlay.confirm
+      const promptOverlay = overlay.approval || overlay.billing || overlay.clarify || overlay.confirm || overlay.secret || overlay.sudo
       const fallThroughForScroll = promptOverlay && shouldFallThroughForScroll(key)
 
       if (promptOverlay && !fallThroughForScroll) {
+        // secret/sudo overlays: always handle Esc and Ctrl+C locally (clear overlay first)
+        if (overlay.secret || overlay.sudo) {
+          if (key.escape || isCtrl(key, ch, 'c')) {
+            cancelOverlayFromCtrlC()
+            return
+          }
+        }
+
         if (isCtrl(key, ch, 'c')) {
-          cancelOverlayFromCtrlC()
+          // For approval/clarify/confirm, use existing cancel logic
+          if (overlay.approval || overlay.clarify || overlay.confirm) {
+            cancelOverlayFromCtrlC()
+          }
         }
 
         return

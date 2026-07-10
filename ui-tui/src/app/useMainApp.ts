@@ -916,12 +916,27 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
+      // Empty password = cancel: clear overlay locally before RPC to prevent zombie overlay on 4009
+      if (pw === '') {
+        patchOverlayState({ sudo: null })
+        patchUiState({ status: 'running…' })
+        sys('sudo cancelled')
+        return rpc('sudo.respond', { password: '', request_id: overlay.sudo.requestId }).catch(err => {
+          // Ignore 4009 "no pending request" errors — user cancelled after timeout
+          if (err?.code !== 4009) {
+            sys(`error: ${err?.message || 'sudo cancel failed'}`)
+          }
+          return null
+        })
+      }
+
+      // Normal submit: use original behavior (clear overlay only on success)
       return respondWith('sudo.respond', { password: pw, request_id: overlay.sudo.requestId }, () => {
         patchOverlayState({ sudo: null })
         patchUiState({ status: 'running…' })
       })
     },
-    [overlay.sudo, respondWith]
+    [overlay.sudo, respondWith, sys]
   )
 
   const answerSecret = useCallback(
@@ -930,12 +945,27 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
+      // Empty value = cancel: clear overlay locally before RPC to prevent zombie overlay on 4009
+      if (value === '') {
+        patchOverlayState({ secret: null })
+        patchUiState({ status: 'running…' })
+        sys('secret entry cancelled')
+        return rpc('secret.respond', { request_id: overlay.secret.requestId, value: '' }).catch(err => {
+          // Ignore 4009 "no pending request" errors — user cancelled after timeout
+          if (err?.code !== 4009) {
+            sys(`error: ${err?.message || 'secret cancel failed'}`)
+          }
+          return null
+        })
+      }
+
+      // Normal submit: use original behavior (clear overlay only on success)
       return respondWith('secret.respond', { request_id: overlay.secret.requestId, value }, () => {
         patchOverlayState({ secret: null })
         patchUiState({ status: 'running…' })
       })
     },
-    [overlay.secret, respondWith]
+    [overlay.secret, respondWith, sys]
   )
 
   const onModelSelect = useCallback((value: string) => {
