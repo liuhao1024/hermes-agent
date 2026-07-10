@@ -3448,12 +3448,17 @@ def run_conversation(
                         # Error is purely about the output cap being too large.
                         # Cap output to the available space and retry without
                         # touching context_length or triggering compression.
-                        safe_out = max(1, available_out - 64)  # small safety margin
+                        # Use an exponential safety margin to handle providers that
+                        # report drifting input-token counts on retries (e.g. local vLLM).
+                        # See #61761 for analysis and test data.
+                        safety_margin = 256 * (2 ** compression_attempts)
+                        safe_out = max(1, available_out - safety_margin)
                         agent._ephemeral_max_output_tokens = safe_out
                         agent._buffer_vprint(
                             f"⚠️  Output cap too large for current prompt — "
                             f"retrying with max_tokens={safe_out:,} "
-                            f"(available_tokens={available_out:,}; context_length unchanged at {old_ctx:,})"
+                            f"(available_tokens={available_out:,}; margin={safety_margin:,}; "
+                            f"context_length unchanged at {old_ctx:,})"
                         )
                         # Still count against compression_attempts so we don't
                         # loop forever if the error keeps recurring.
