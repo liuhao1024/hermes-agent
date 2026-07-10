@@ -78,7 +78,7 @@ export function TerminalRail() {
           />
         ))}
         <li className="flex w-full justify-center">
-          <Tip label={hintLabel(t.rightSidebar.terminalNew, newHint)} side="left">
+          <Tip label={hintLabel(t.rightSidebar.terminalNew, newHint)} align="center" side="left">
             <button
               aria-label={t.rightSidebar.terminalNew}
               className={cn(RAIL_ACTION, 'size-7 text-(--ui-text-quaternary)')}
@@ -92,7 +92,7 @@ export function TerminalRail() {
       </ul>
 
       <div className="flex shrink-0 flex-col items-center pb-1.5">
-        <Tip label={t.rightSidebar.terminalHide} side="left">
+        <Tip label={t.rightSidebar.terminalHide} align="center" side="left">
           <button
             aria-label={t.rightSidebar.terminalHide}
             className={cn(RAIL_ACTION, 'opacity-0 transition-opacity group-hover/rail:opacity-100')}
@@ -129,7 +129,7 @@ function TerminalRailItem({ active, canCloseOthers, index, term, toggleHint }: T
               className="absolute inset-y-0.5 right-0 w-0.5 rounded-l-sm bg-(--ui-stroke-primary)"
             />
           )}
-          <Tip label={hintLabel(label, toggleHint)} side="left">
+          <Tip label={hintLabel(label, toggleHint)} align="center" side="left">
             <button
               aria-label={label}
               aria-selected={active}
