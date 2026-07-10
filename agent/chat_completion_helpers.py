@@ -413,34 +413,29 @@ def interruptible_api_call(agent, api_kwargs: dict):
     if _ttfb_timeout <= 0:
         _ttfb_enabled = False
     elif _openai_codex_backend:
-        _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
-        _ttfb_strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if (
-            not _ttfb_strict
-            and _ttfb_disable_above > 0
-            and _est_tokens_for_codex_watchdog >= _ttfb_disable_above
-        ):
-            _ttfb_enabled = False
+        _ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
+
+        # Scale TTFB timeout with context size to allow for large prefill while
+        # still detecting 0-event hangs. The default ladder (12/60/120/180s) is
+        # for idle timeout; TTFB needs headroom for initial prefill.
+        # Ladder: 120s <10k, 300s 10-50k, 600s 50-100k, 1200s >100k.
+        # Environment override HERMES_CODEX_TTFB_MAX_SECONDS takes precedence.
+        if _est_tokens_for_codex_watchdog > 100_000:
+            _ttfb_cap = max(_ttfb_cap, 1200.0)
+        elif _est_tokens_for_codex_watchdog > 50_000:
+            _ttfb_cap = max(_ttfb_cap, 600.0)
+        elif _est_tokens_for_codex_watchdog > 10_000:
+            _ttfb_cap = max(_ttfb_cap, 300.0)
+
+        if _ttfb_cap > 0 and _ttfb_timeout > _ttfb_cap:
             logger.info(
-                "Disabling openai-codex no-byte TTFB watchdog for large request "
-                "(context=~%s tokens >= %.0f). Waiting for backend response instead. "
-                "Set HERMES_CODEX_TTFB_STRICT=1 to force early reconnects.",
+                "Capping openai-codex no-byte TTFB timeout from %.0fs to %.0fs "
+                "(context=~%s tokens). Set HERMES_CODEX_TTFB_MAX_SECONDS to tune.",
+                _ttfb_timeout,
+                _ttfb_cap,
                 f"{_est_tokens_for_codex_watchdog:,}",
-                _ttfb_disable_above,
             )
-        else:
-            _ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
-            if _ttfb_cap > 0 and _ttfb_timeout > _ttfb_cap:
-                logger.info(
-                    "Capping openai-codex no-byte TTFB timeout from %.0fs to %.0fs "
-                    "(context=~%s tokens). Set HERMES_CODEX_TTFB_MAX_SECONDS to tune.",
-                    _ttfb_timeout,
-                    _ttfb_cap,
-                    f"{_est_tokens_for_codex_watchdog:,}",
-                )
-                _ttfb_timeout = _ttfb_cap
+            _ttfb_timeout = _ttfb_cap
 
     _codex_idle_enabled = _codex_watchdog_enabled
     _codex_idle_timeout = _env_float(
