@@ -542,7 +542,9 @@ def redact_sensitive_text(
         code_file = True
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
-    if _has_known_prefix_substring(text):
+    # Skip for code files to avoid false positives on filenames starting with
+    # sk_ (issue #61876)
+    if not code_file and _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
 

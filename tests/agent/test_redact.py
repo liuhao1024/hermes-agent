@@ -1046,3 +1046,64 @@ class TestRedactCdpUrl:
 
     def test_none_returns_empty(self):
         assert redact_cdp_url(None) == ""
+
+
+class TestCodeFilePrefixFalsePositiveFix:
+    """Regression tests for issue #61876: sk_ prefix matching filenames.
+
+    When code_file=True, prefix patterns (sk_, ghp_, etc.) should NOT be
+    applied to avoid false positives on ordinary snake_case filenames
+    that happen to start with a credential prefix.
+    """
+
+    def test_sk_prefix_filename_not_masked_in_code_file(self):
+        """Issue #61876: sk_hynix_.png should NOT be masked in code_file mode."""
+        from agent.redact import redact_sensitive_text
+        text = "Chart saved to /home/roots/sk_hynix_.png"
+        result = redact_sensitive_text(text, code_file=True)
+        # The original filename must survive intact
+        assert text == result
+        assert "sk_hynix_.png" in result
+
+    def test_sk_prefix_filename_not_masked_in_file_read(self):
+        """file_read mode implies code_file=True; same behavior."""
+        from agent.redact import redact_sensitive_text
+        text = "Chart saved to /home/roots/sk_hynix_.png"
+        result = redact_sensitive_text(text, file_read=True)
+        assert text == result
+        assert "sk_hynix_.png" in result
+
+    def test_sk_prefix_filename_masked_without_code_file(self):
+        """Without code_file=True, the prefix pattern should still mask secrets."""
+        from agent.redact import redact_sensitive_text
+        text = "OPENAI_API_KEY=sk_liv...cdef"
+        result = redact_sensitive_text(text, code_file=False)
+        # The key should be masked
+        assert "sk_liv" not in result or result.count("sk_liv") < text.count("sk_liv")
+
+    def test_other_prefixes_also_preserved_in_code_file(self):
+        """All prefix patterns skip when code_file=True, not just sk_."""
+        from agent.redact import redact_sensitive_text
+        # Test sk_, ghp_, gho_, ghu_, ghs_, ghr_ (patterns that match known prefixes)
+        # xai- is length 30+, so "xai_wrapper.js" won't match anyway — not a good test
+        test_cases = [
+            ("path/to/ghp_app.py", "ghp_"),
+            ("script/gho_main.py", "gho_"),
+            ("tool/ghu_helper.py", "ghu_"),
+            ("lib/ghs_server.py", "ghs_"),
+            ("util/ghr_refresh.py", "ghr_"),
+            ("data/sk_dataset.csv", "sk_"),
+        ]
+        for text, prefix in test_cases:
+            result = redact_sensitive_text(text, code_file=True)
+            assert text == result, f"Prefix {prefix} was masked incorrectly"
+            assert prefix in result
+
+    def test_code_file_false_skips_prefix_block(self):
+        """When code_file=False, prefix block runs normally."""
+        from agent.redact import redact_sensitive_text
+        # A real secret (not a filename) should be masked
+        text = "Token: sk_livabcdefghijklmnopqrstuvwx"
+        result = redact_sensitive_text(text, code_file=False)
+        # Should be masked
+        assert "sk_liv...tuvwx" in result or text != result

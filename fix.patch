@@ -1,0 +1,15 @@
+diff --git a/agent/redact.py b/agent/redact.py
+index f8361d29c..f6937f3c0 100644
+--- a/agent/redact.py
++++ b/agent/redact.py
+@@ -541,7 +541,10 @@ def redact_sensitive_text(
+     if file_read:
+         code_file = True
+ 
+-    # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
++    # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
++    # Skip for code files to avoid false positives on filenames starting with
++    # sk_ (issue #61876)
++    if not code_file and _has_known_prefix_substring(text):
+         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
+         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
