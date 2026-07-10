@@ -2872,14 +2872,33 @@ This compaction should PRIORITISE preserving all information related to the focu
             # re-triggers a no-op compression loop.  (#40803)
             self._ineffective_compression_count += 1
             self._last_compression_savings_pct = 0.0
+
+            # Estimate protected tail size to provide actionable guidance
+            # when the tail itself dominates the context window. (#61932)
+            tail_tokens = estimate_messages_tokens_rough(messages[compress_end:])
+            tail_pct = (tail_tokens / self.context_length * 100) if self.context_length > 0 else 0
+
             if not self.quiet_mode:
-                logger.warning(
-                    "Compression skipped: compress_start (%d) >= compress_end (%d) "
-                    "— transcript fits within tail budget, nothing to compress. "
-                    "ineffective_compression_count=%d",
-                    compress_start, compress_end,
-                    self._ineffective_compression_count,
-                )
+                if tail_pct > 50:
+                    # Protected tail dominates the context window — compression
+                    # cannot make meaningful progress without dropping recent turns.
+                    logger.warning(
+                        "Compression skipped: protected recent tail is too large "
+                        "(~%d tokens, %.0f%% of context window). "
+                        "Use /new to start a fresh session, or /compress <topic> "
+                        "for focused compression. compress_start=%d, compress_end=%d, "
+                        "ineffective_compression_count=%d",
+                        tail_tokens, tail_pct, compress_start, compress_end,
+                        self._ineffective_compression_count,
+                    )
+                else:
+                    logger.warning(
+                        "Compression skipped: compress_start (%d) >= compress_end (%d) "
+                        "— transcript fits within tail budget, nothing to compress. "
+                        "tail_tokens=%d (%.0f%% of context), ineffective_compression_count=%d",
+                        compress_start, compress_end, tail_tokens, tail_pct,
+                        self._ineffective_compression_count,
+                    )
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
