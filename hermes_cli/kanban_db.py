@@ -4042,6 +4042,15 @@ def complete_task(
     else:
         verified_cards = []
 
+    # Terminate the worker OS process before clearing worker_pid from DB.
+    # This prevents zombie processes on Windows where reap_worker_zombies is a no-op.
+    worker_pid = conn.execute(
+        "SELECT worker_pid FROM tasks WHERE id = ?",
+        (task_id,)
+    ).fetchone()[0]
+    if worker_pid:
+        _terminate_worker_process(worker_pid, task_id)
+
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -5823,6 +5832,90 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     except Exception:
         pass
     return ("unknown", None)
+
+
+def _terminate_worker_process(pid: int, task_id: str, *, timeout: float = 5.0) -> None:
+    """Terminate a kanban worker process when completing its task.
+
+    This prevents zombie processes on Windows where reap_worker_zombies is a no-op.
+    The worker was spawned with start_new_session=True (POSIX) or CREATE_NO_WINDOW
+    (Windows), so we use process-group termination on POSIX and taskkill on Windows.
+
+    Args:
+        pid: The worker process ID.
+        task_id: The task ID being completed (for logging).
+        timeout: Maximum seconds to wait for graceful termination before escalating.
+    """
+    # First check if the process still exists
+    try:
+        if os.name == "nt":
+            # Windows: use taskkill to terminate the process
+            # /F = force, /PID = process ID
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+        else:
+            # POSIX: worker was spawned with start_new_session=True
+            # so we terminate the entire process group
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                # Process already gone — no action needed
+                return
+    except (subprocess.TimeoutExpired, OSError):
+        # Termination attempt failed, but we'll check if it exited below
+        pass
+
+    # Wait up to timeout for the process to exit
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if os.name == "nt":
+                # Windows: check if process still exists via tasklist
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if str(pid) not in result.stdout:
+                    return  # Process exited
+            else:
+                # POSIX: send signal 0 to check if process exists
+                os.killpg(pid, 0)
+                time.sleep(0.1)
+        except ProcessLookupError:
+            return  # Process exited
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Process still running after timeout — escalate
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+
+    # Log warning that we had to force-kill
+    _log.warning(
+        "Kanban worker process %s for task %s did not exit gracefully after %.1fs; force-terminated",
+        pid, task_id, timeout,
+    )
 
 
 def reap_worker_zombies() -> "list[int]":
