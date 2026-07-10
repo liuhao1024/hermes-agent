@@ -50,10 +50,13 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("openai/gpt-5.5-pro",                     ""),
     ("openai/gpt-5.4-mini",                    ""),
     # Google
+    ("google/gemini-2.5-flash",                "1M context"),
+    ("google/gemini-2.5-flash-lite",           "cheaper alternative"),
     ("google/gemini-3-pro-preview",            ""),
     ("google/gemini-3.1-pro-preview",          ""),
     ("google/gemini-3.5-flash",                ""),
     # xAI
+    ("x-ai/grok-4.3",                          "cheaper than grok-4.5"),
     ("x-ai/grok-4.5",                          ""),
     # DeepSeek
     ("deepseek/deepseek-v4-pro",               ""),
@@ -78,6 +81,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("stepfun/step-3.7-flash",                 ""),
     # NVIDIA
     ("nvidia/nemotron-3-super-120b-a12b",      ""),
+    ("nvidia/nemotron-3-ultra-550b-a55b",      "paid version"),
     # Sakana
     ("sakana/fugu-ultra",                      ""),
     # OpenRouter routers
