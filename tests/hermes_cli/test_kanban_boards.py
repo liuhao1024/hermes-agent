@@ -302,6 +302,24 @@ class TestBoardCRUD:
         assert "task_events" in tables
         assert "tasks" in tables
 
+    def test_board_exists_returns_true_for_archived_board(self, fresh_home):
+        # Regression for #61945: board_exists() must recognize archived boards.
+        kb.create_board("archived-slug")
+        kb.remove_board("archived-slug", archive=True)
+        # After archiving, the live board dir no longer exists.
+        assert not kb.board_dir("archived-slug").exists()
+        # But board_exists() should still return True due to the archived copy.
+        assert kb.board_exists("archived-slug")
+
+    def test_create_board_refuses_when_archived_exists(self, fresh_home):
+        # Regression for #61945: create_board() must refuse when an archived
+        # board with the same slug exists.
+        kb.create_board("blocked-by-archive")
+        kb.remove_board("blocked-by-archive", archive=True)
+        # Attempting to create a live board with the same slug should raise.
+        with pytest.raises(ValueError, match="already exists.*archived"):
+            kb.create_board("blocked-by-archive")
+
     def test_rename_updates_metadata(self, fresh_home):
         kb.create_board("slug-immutable")
         kb.write_board_metadata("slug-immutable", name="New Display Name")

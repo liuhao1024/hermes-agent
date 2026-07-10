@@ -509,7 +509,17 @@ def board_exists(board: Optional[str] = None) -> bool:
     if slug == DEFAULT_BOARD:
         return True
     d = board_dir(slug)
-    return (d / "board.json").exists() or (d / "kanban.db").exists()
+    if (d / "board.json").exists() or (d / "kanban.db").exists():
+        return True
+    # Check for archived boards with the same slug.
+    # Archived boards are named <slug>-<timestamp> or <slug>-<timestamp>-<suffix>.
+    archive_root = boards_root() / "_archived"
+    if archive_root.is_dir():
+        for entry in archive_root.iterdir():
+            if entry.is_dir() and entry.name.startswith(f"{slug}-"):
+                # Found an archived board with this slug.
+                return True
+    return False
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
@@ -709,6 +719,20 @@ def write_board_metadata(
     return meta
 
 
+def _find_archived_board_for_slug(slug: str) -> Optional[Path]:
+    """Return the path to an archived board directory for ``slug``, or None.
+
+    Archived boards are named <slug>-<timestamp> or <slug>-<timestamp>-<suffix>.
+    """
+    archive_root = boards_root() / "_archived"
+    if not archive_root.is_dir():
+        return None
+    for entry in archive_root.iterdir():
+        if entry.is_dir() and entry.name.startswith(f"{slug}-"):
+            return entry
+    return None
+
+
 def create_board(
     slug: str,
     *,
@@ -727,6 +751,16 @@ def create_board(
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
+    # Check for archived boards with the same slug to prevent silent
+    # fabrication of empty live boards during concurrent connections.
+    # See #61945.
+    archived = _find_archived_board_for_slug(normed)
+    if archived is not None:
+        raise ValueError(
+            f"board {normed!r} already exists (archived as {archived.name}). "
+            f"Use 'hermes kanban boards restore {normed}' to recover it, "
+            f"or use a different slug."
+        )
     meta = write_board_metadata(
         normed,
         name=name,
