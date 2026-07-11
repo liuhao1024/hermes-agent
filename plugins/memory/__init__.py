@@ -28,6 +28,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+from utils import env_var_enabled
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,10 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
 
     Returns None if the provider is not found or fails to load.
     """
+    if env_var_enabled("HERMES_SAFE_MODE"):
+        logger.info("HERMES_SAFE_MODE=1 — memory provider loading skipped")
+        return None
+
     provider_dir = find_provider_dir(name)
     if not provider_dir:
         logger.debug("Memory provider '%s' not found in bundled or user plugins", name)

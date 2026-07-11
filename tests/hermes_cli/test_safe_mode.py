@@ -167,3 +167,13 @@ def test_shell_hooks_register_without_safe_mode(monkeypatch):
 
     assert len(registered) == 1
     assert "pre_tool_call" in manager._hooks
+
+
+def test_memory_provider_skipped(monkeypatch):
+    """HERMES_SAFE_MODE=1 should skip memory provider loading."""
+    monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+    from plugins.memory import load_memory_provider
+
+    # Even if honcho.json exists, safe mode should skip loading
+    result = load_memory_provider("honcho")
+    assert result is None
