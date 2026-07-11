@@ -23,7 +23,7 @@ export const REF_RE = /@(file|folder|url|image|tool|line|terminal|session):(`[^`
 const ESC: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }
 
 export function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, ch => ESC[ch] || ch)
+  return value.replace(/[&<>"]/g, ch => ESC[ch] || ch)
 }
 
 export function unquoteRef(raw: string) {
@@ -96,6 +96,44 @@ export function slashChipElement(command: string, kind: SlashChipKind, label?: s
   chip.append(slashIconElement(kind), text)
 
   return chip
+}
+
+/**
+ * Strip leaked bracketed-paste wrapper markers from user-visible text.
+ *
+ * Defensive normalization for cases where terminal/editor handling fails and
+ * bracketed-paste markers end up in the buffer as literal text. This matches the
+ * CLI's `_strip_leaked_bracketed_paste_wrappers` behavior (cli.py:2997).
+ *
+ * We strip canonical wrappers unconditionally and also handle degraded visible
+ * forms like `[200~` / `[201~` and `00~` / `01~` when they look like wrapper
+ * boundaries, not arbitrary user content.
+ *
+ * Desktop sibling of CLI fix (PR #22114, issue #7316).
+ */
+export function stripBracketedPasteMarkers(text: string): string {
+  if (!text) {
+    return text
+  }
+
+  // Strip canonical ESC sequences (ASCII form: ^[)
+  let result = text
+    .replace(/\x1b\[200~/g, '')
+    .replace(/\x1b\[201~/g, '')
+    .replace(/\^\[\[200~/g, '')
+    .replace(/\^\[\[201~/g, '')
+
+  // Strip degraded forms at word boundaries
+  // `[200~` after whitespace, newlines, or punctuation
+  result = result.replace(/(^|[ \n>:])\[200~/g, '$1')
+  // `[201~` before whitespace, newlines, or punctuation
+  result = result.replace(/\[201~(?=$|[ \n<[():;.,!?])/g, '')
+  // `00~` after whitespace, newlines, or punctuation
+  result = result.replace(/(^|[ \n>:])00~/g, '$1')
+  // `01~` before whitespace, newlines, or punctuation
+  result = result.replace(/01~(?=$|[ \n<[():;.,!?])/g, '')
+
+  return result
 }
 
 function appendTextWithBreaks(target: DocumentFragment | HTMLElement, text: string) {

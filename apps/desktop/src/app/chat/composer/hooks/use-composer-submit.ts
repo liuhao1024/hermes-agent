@@ -8,7 +8,7 @@ import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-qu
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
-import { composerPlainText } from '../rich-editor'
+import { composerPlainText, stripBracketedPasteMarkers } from '../rich-editor'
 import type { ChatBarProps } from '../types'
 
 interface UseComposerSubmitArgs {
@@ -74,6 +74,9 @@ export function useComposerSubmit({
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
   const dispatchSubmit = (text: string, attachments?: ComposerAttachment[]) => {
+    // Strip bracketed-paste markers before submitting (Desktop sibling of
+    // CLI fix PR #22114, issue #62557).
+    const sanitizedText = stripBracketedPasteMarkers(text)
     const submittedScope = activeQueueSessionKeyRef.current
     const submittedAttachments = attachments ?? []
 
@@ -86,7 +89,7 @@ export function useComposerSubmit({
       stashAt(submittedScope, text, submittedAttachments)
     }
 
-    void Promise.resolve(attachments ? onSubmit(text, { attachments }) : onSubmit(text))
+    void Promise.resolve(attachments ? onSubmit(sanitizedText, { attachments }) : onSubmit(sanitizedText))
       .then(accepted => void (accepted === false ? restore() : clearSessionDraft(submittedScope)))
       .catch(restore)
   }

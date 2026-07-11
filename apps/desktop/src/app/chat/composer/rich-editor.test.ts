@@ -8,7 +8,8 @@ import {
   normalizeComposerEditorDom,
   refChipElement,
   renderComposerContents,
-  RICH_INPUT_SLOT
+  RICH_INPUT_SLOT,
+  stripBracketedPasteMarkers
 } from './rich-editor'
 
 const caretIn = (editor: HTMLElement) => {
@@ -130,5 +131,78 @@ describe('deleteSelectionInEditor', () => {
     expect(deleteSelectionInEditor(editor)).toBe(false)
 
     editor.remove()
+  })
+})
+
+describe('stripBracketedPasteMarkers', () => {
+  it('strips canonical ESC sequences', () => {
+    expect(stripBracketedPasteMarkers('\x1b[200~test\x1b[201~')).toBe('test')
+    expect(stripBracketedPasteMarkers('\x1b[200~hello\x1b[201~ world')).toBe('hello world')
+  })
+
+  it('strips visible caret notation (^[[)', () => {
+    expect(stripBracketedPasteMarkers('^[[200~test^[[201~')).toBe('test')
+    expect(stripBracketedPasteMarkers('^[[200~hello^[[201~ world')).toBe('hello world')
+  })
+
+  it('strips degraded [200~ at word boundaries', () => {
+    expect(stripBracketedPasteMarkers('[200~test')).toBe('test')
+    expect(stripBracketedPasteMarkers(' [200~test')).toBe(' test')
+    expect(stripBracketedPasteMarkers('\n[200~test')).toBe('\ntest')
+    expect(stripBracketedPasteMarkers('>[200~test')).toBe('>test')
+    expect(stripBracketedPasteMarkers(':[200~test')).toBe(':test')
+    expect(stripBracketedPasteMarkers('[200~test')).toBe('test')
+  })
+
+  it('preserves [200~ in the middle of text (not a boundary)', () => {
+    expect(stripBracketedPasteMarkers('test[200~here')).toBe('test[200~here')
+    expect(stripBracketedPasteMarkers('a[200~b')).toBe('a[200~b')
+  })
+
+  it('strips degraded [201~ at word boundaries', () => {
+    expect(stripBracketedPasteMarkers('test[201~')).toBe('test')
+    expect(stripBracketedPasteMarkers('test[201~ ')).toBe('test ')
+    expect(stripBracketedPasteMarkers('test[201~\n')).toBe('test\n')
+    expect(stripBracketedPasteMarkers('test[201~<')).toBe('test<')
+    expect(stripBracketedPasteMarkers('test[201~[')).toBe('test[')
+    expect(stripBracketedPasteMarkers('test[201~(')).toBe('test(')
+    expect(stripBracketedPasteMarkers('test[201~)')).toBe('test)')
+    expect(stripBracketedPasteMarkers('test[201~:')).toBe('test:')
+    expect(stripBracketedPasteMarkers('test[201~;')).toBe('test;')
+    expect(stripBracketedPasteMarkers('test[201~,')).toBe('test,')
+    expect(stripBracketedPasteMarkers('test[201~.')).toBe('test.')
+    expect(stripBracketedPasteMarkers('test[201~!')).toBe('test!')
+    expect(stripBracketedPasteMarkers('test[201~?')).toBe('test?')
+  })
+
+  it('preserves [201~ in the middle of text (not a boundary)', () => {
+    expect(stripBracketedPasteMarkers('test[201~here')).toBe('test[201~here')
+    expect(stripBracketedPasteMarkers('a[201~b')).toBe('a[201~b')
+  })
+
+  it('strips truncated 00~ and 01~ at boundaries', () => {
+    expect(stripBracketedPasteMarkers('00~test')).toBe('test')
+    expect(stripBracketedPasteMarkers(' [00~test')).toBe(' test')
+    expect(stripBracketedPasteMarkers('test01~')).toBe('test')
+    expect(stripBracketedPasteMarkers('test01~ ')).toBe('test ')
+  })
+
+  it('handles empty string', () => {
+    expect(stripBracketedPasteMarkers('')).toBe('')
+  })
+
+  it('handles string without markers', () => {
+    expect(stripBracketedPasteMarkers('hello world')).toBe('hello world')
+    expect(stripBracketedPasteMarkers('需要时随时叫我。')).toBe('需要时随时叫我。')
+  })
+
+  it('handles real-world corruption pattern from issue #62557', () => {
+    const corrupted = '需要时随时叫我。~[[e~[[e~[[e~[[e'
+    expect(stripBracketedPasteMarkers(corrupted)).toBe('需要时随时叫我。')
+  })
+
+  it('handles multiple markers in sequence', () => {
+    expect(stripBracketedPasteMarkers('\x1b[200~a\x1b[201~\x1b[200~b\x1b[201~')).toBe('ab')
+    expect(stripBracketedPasteMarkers('^[[200~x^[[201~ [200~y[201~')).toBe('xy')
   })
 })
