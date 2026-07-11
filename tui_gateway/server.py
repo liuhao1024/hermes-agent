@@ -3590,11 +3590,16 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             pass
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
     if _tool_progress_enabled(sid):
+        label = _tool_ctx(name, args)
+        # For backward compatibility, context retains the old raw preview semantics.
+        # The friendly label is now sent separately as the 'label' field.
         payload = {
             "tool_id": tool_call_id,
             "name": name,
-            "context": _tool_ctx(name, args),
+            "context": str(args or {}),
         }
+        if label:
+            payload["label"] = label
         if _session_verbose(sid):
             args_text = _tool_args_text(args)
             if args_text:

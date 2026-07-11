@@ -837,7 +837,9 @@ export const ToolTrail = memo(function ToolTrail({
   }
 
   for (const tool of tools) {
-    const label = formatToolCall(tool.name, tool.context || '')
+    // If the gateway sends a pre-formatted friendly label, use it directly.
+    // Otherwise, fall back to the legacy formatToolCall() for backward compatibility.
+    const label = tool.label || formatToolCall(tool.name, tool.context || '')
 
     groups.push({
       color: t.color.text,
