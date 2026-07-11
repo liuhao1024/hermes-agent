@@ -110,7 +110,13 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
   const busy = submitting !== null
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   const allowPermanent = request.allowPermanent !== false
-  const hasCommand = request.command.trim().length > 0
+  // Plugin approval rules set command to a synthetic label (e.g., "<terminal> (plugin approval rule)")
+  // and put the real command in description. Prefer description when command is synthetic.
+  const isSyntheticCommand = request.command.trim().startsWith('<')
+  const displayCommand = isSyntheticCommand && request.description.trim()
+    ? request.description.trim()
+    : request.command.trim()
+  const hasCommand = displayCommand.length > 0
 
   const respond = useCallback(
     async (choice: ApprovalChoice) => {
@@ -244,7 +250,7 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
 
       {showCommand && hasCommand && (
         <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-2.5 py-1.5 font-mono text-xs leading-snug text-foreground">
-          {request.command.trim()}
+          {displayCommand}
         </pre>
       )}
 
@@ -257,7 +263,7 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
 
           {request.command.trim() && (
             <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-2.5 py-1.5 font-mono text-xs leading-snug text-foreground">
-              {request.command.trim()}
+              {displayCommand}
             </pre>
           )}
 
