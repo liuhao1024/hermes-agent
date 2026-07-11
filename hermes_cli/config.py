@@ -5966,6 +5966,10 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # the "auto" sentinel. An explicit true/false the user set is preserved.
     if current_ver < 31:
         config = read_raw_config()
+        # Preserve platforms configuration (issue #62723)
+        # platforms.* is not in DEFAULT_CONFIG, so strip_defaults would drop it.
+        # Save it before migration and restore before persisting.
+        platforms_preserve = config.get("platforms")
         raw_agent = config.get("agent")
         if not isinstance(raw_agent, dict):
             raw_agent = {}
@@ -5977,6 +5981,9 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         if cur is None or is_auto_sentinel:
             raw_agent["verify_on_stop"] = False
             config["agent"] = raw_agent
+            # Restore platforms configuration before persisting (issue #62723)
+            if platforms_preserve is not None:
+                config["platforms"] = platforms_preserve
             _persist_migration(config)
             results["config_added"].append("agent.verify_on_stop=false")
             if not quiet:
@@ -6000,10 +6007,17 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # sets AFTER v32 (config already at version 32) is never touched.
     if current_ver < 32:
         config = read_raw_config()
+        # Preserve platforms configuration (issue #62723)
+        # platforms.* is not in DEFAULT_CONFIG, so strip_defaults would drop it.
+        # Save it before migration and restore before persisting.
+        platforms_preserve = config.get("platforms")
         raw_agent = config.get("agent")
         if isinstance(raw_agent, dict) and raw_agent.get("verify_on_stop") is True:
             raw_agent["verify_on_stop"] = False
             config["agent"] = raw_agent
+            # Restore platforms configuration before persisting (issue #62723)
+            if platforms_preserve is not None:
+                config["platforms"] = platforms_preserve
             _persist_migration(config)
             results["config_added"].append("agent.verify_on_stop=false")
             if not quiet:
