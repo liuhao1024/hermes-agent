@@ -11672,6 +11672,7 @@ async def run_backup(body: BackupRequest):
     args = ["backup"]
     archive: Optional[Path] = None
     if body.output:
+        args.append("--output")
         args.append(body.output.strip())
     else:
         archive = _new_dashboard_backup_path()
@@ -11682,6 +11683,7 @@ async def run_backup(body: BackupRequest):
                 status_code=500,
                 detail=f"Could not create backup directory: {exc}",
             )
+        args.append("--output")
         args.append(str(archive))
     try:
         proc = _spawn_hermes_action(args, "backup")
