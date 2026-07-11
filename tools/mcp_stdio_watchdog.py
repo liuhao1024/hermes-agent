@@ -63,26 +63,18 @@ _POLL_INTERVAL_S = 2.0
 _TERM_GRACE_S = 3.0
 
 
-def _is_orphaned(original_ppid: int, parent_create_time: float, getppid=os.getppid) -> bool:
-    """Mirrors ``tui_gateway.slash_worker._is_orphaned`` exactly.
+def _is_orphaned(original_ppid: int, getppid=os.getppid) -> bool:
+    """True once the process that spawned us is gone.
 
-    True once the process that spawned us is gone. Never trusts a bare
-    ``getppid() == 1`` check (Linux reparents orphans to a subreaper, not
-    always PID 1), and guards against PID reuse via the recorded creation
-    time of the original parent.
+    On POSIX, when the parent process dies, its children are reparented to
+    init or a subreaper (PID 1 or another process). The parent PID changes,
+    which is sufficient to detect orphaning. This avoids the unstable
+    psutil.Process.create_time() check that fails when the system clock changes.
+
+    Mirrors the core logic of ``tui_gateway.slash_worker._is_orphaned`` but
+    without the create_time comparison.
     """
-    if getppid() != original_ppid:
-        return True
-    if psutil is None:
-        # No reliable staleness check available; fall back to the ppid
-        # comparison alone (still catches the common case).
-        return False
-    try:
-        if not psutil.pid_exists(original_ppid):
-            return True
-        return psutil.Process(original_ppid).create_time() != parent_create_time
-    except psutil.Error:
-        return True
+    return getppid() != original_ppid
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
@@ -118,9 +110,9 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
             continue
 
 
-def _watchdog_loop(proc: subprocess.Popen, original_ppid: int, parent_create_time: float) -> None:
+def _watchdog_loop(proc: subprocess.Popen, original_ppid: int) -> None:
     while proc.poll() is None:
-        if _is_orphaned(original_ppid, parent_create_time):
+        if _is_orphaned(original_ppid):
             _terminate_process_group(proc)
             return
         time.sleep(_POLL_INTERVAL_S)
@@ -131,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         description="Parent-death watchdog for a stdio MCP subprocess.",
     )
     parser.add_argument("--ppid", type=int, required=True)
-    parser.add_argument("--create-time", type=float, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
 
@@ -168,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
 
     watchdog = threading.Thread(
         target=_watchdog_loop,
-        args=(proc, args.ppid, args.create_time),
+        args=(proc, args.ppid),
         daemon=True,
     )
     watchdog.start()
