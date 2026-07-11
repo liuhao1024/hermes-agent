@@ -1480,6 +1480,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
             # support the Responses API. Stay on chat_completions.
             fb_api_mode = "chat_completions"
+        elif fb_provider in {"xai", "xai-oauth"}:
+            # xAI/Grok models use the Responses API for reasoning-enabled
+            # models like Grok-4.5. Match the normal initialization path
+            # (agent_init.py:428-429). Fixes #62881.
+            fb_api_mode = "codex_responses"
         elif agent._is_direct_openai_url(fb_base_url):
             fb_api_mode = "codex_responses"
         elif agent._provider_model_requires_responses_api(

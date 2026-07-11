@@ -7649,3 +7649,47 @@ class TestMemoryProviderTurnStart:
         # The extracted body uses ``agent.X`` rather than ``self.X``;
         # assert the extracted-form spelling directly.
         assert "on_turn_start(agent._user_turn_count" in src
+
+
+class TestXaiOauthFallbackApiModeFix_62881:
+    """Bug fix #62881: xai-oauth/Grok-4.5 fallback must use codex_responses.
+
+    Before this fix, _try_activate_fallback() defaulted to chat_completions
+    and had no explicit xai/xai-oauth branch, causing fallback to select the
+    wrong API mode for Grok-4.5 (which uses Responses API for reasoning).
+    """
+
+    def test_fallback_to_xai_oauth_uses_codex_responses_mode(self, agent):
+        agent._fallback_activated = False
+        agent._fallback_model = {"provider": "xai-oauth", "model": "grok-4.5"}
+        agent._fallback_chain = [agent._fallback_model]
+        agent._fallback_index = 0
+
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.x.ai/v1"
+        mock_client.api_key = "***"
+
+        with patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        # xai-oauth/Grok-4.5 must use codex_responses, not chat_completions.
+        # Matches normal initialization path (agent_init.py:428-429).
+        assert agent.api_mode == "codex_responses"
+
+    def test_fallback_to_xai_uses_codex_responses_mode(self, agent):
+        """Plain xai (not oauth) also uses codex_responses."""
+        agent._fallback_activated = False
+        agent._fallback_model = {"provider": "xai", "model": "grok-4.5"}
+        agent._fallback_chain = [agent._fallback_model]
+        agent._fallback_index = 0
+
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.x.ai/v1"
+        mock_client.api_key = "***"
+
+        with patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)):
+            result = agent._try_activate_fallback()
+
+        assert result is True
+        assert agent.api_mode == "codex_responses"

@@ -280,7 +280,11 @@ class ResponsesApiTransport(ProviderTransport):
             # the target model is on the allowlist; otherwise send no
             # `reasoning` key at all and let the model reason on its own.
             if grok_supports_reasoning_effort(model):
-                kwargs["reasoning"] = {"effort": reasoning_effort}
+                # Grok-4.5 accepts only low/medium/high. Normalize inherited
+                # max/xhigh (from OpenAI-Codex primary) to high. Fixes #62881.
+                _grok_effort_clamp = {"max": "high", "xhigh": "high"}
+                normalized_effort = _grok_effort_clamp.get(reasoning_effort, reasoning_effort)
+                kwargs["reasoning"] = {"effort": normalized_effort}
         elif reasoning_enabled:
             if is_github_responses:
                 github_reasoning = params.get("github_reasoning_extra")

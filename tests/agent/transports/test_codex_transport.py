@@ -614,6 +614,37 @@ class TestCodexBuildKwargs:
         )
         assert "reasoning" not in kw
 
+    def test_xai_grok_4_5_normalizes_max_effort_to_high(self, transport):
+        """Grok-4.5 accepts only low/medium/high. Normalize inherited max/xhigh.
+
+        When an OpenAI-Codex primary with reasoning_effort=max falls back to
+        xai-oauth/grok-4.5, the inherited `max` value must be clamped to `high`.
+        Same for `xhigh` (GitHub Models' ultra-high setting). Fixes #62881.
+        """
+        messages = [{"role": "user", "content": "Hi"}]
+        # max -> high
+        kw = transport.build_kwargs(
+            model="grok-4.5", messages=messages, tools=[],
+            is_xai_responses=True,
+            reasoning_config={"effort": "max"},
+        )
+        assert kw.get("reasoning") == {"effort": "high"}
+        # xhigh -> high
+        kw = transport.build_kwargs(
+            model="grok-4.5", messages=messages, tools=[],
+            is_xai_responses=True,
+            reasoning_config={"effort": "xhigh"},
+        )
+        assert kw.get("reasoning") == {"effort": "high"}
+        # low/medium/high unchanged
+        for effort in ("low", "medium", "high"):
+            kw = transport.build_kwargs(
+                model="grok-4.5", messages=messages, tools=[],
+                is_xai_responses=True,
+                reasoning_config={"effort": effort},
+            )
+            assert kw.get("reasoning") == {"effort": effort}
+
     def test_xai_aggregator_prefix_stripped(self, transport):
         """`x-ai/grok-3-mini` (OpenRouter-style slug) still resolves correctly."""
         messages = [{"role": "user", "content": "Hi"}]
