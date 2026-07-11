@@ -1675,11 +1675,71 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
 
-    summary_request = (
-        "You've reached the maximum number of tool-calling iterations allowed. "
-        "Please provide a final response summarizing what you've found and accomplished so far, "
-        "without calling any more tools."
-    )
+    # Detect strict output contracts in the original user message (e.g., "Return ONLY")
+    # to preserve contract compliance even when iteration budget is exhausted.
+    # See #62862: one-shot output-contract violations.
+    original_user_message = ""
+    contract_detected = False
+    contract_pattern = None
+
+    def _extract_text_content(content):
+        """Extract text from content, handling both string and multimodal list formats."""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # Multimodal content: concatenate text blocks
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            return " ".join(text_parts)
+        return ""
+
+    # Walk back to find the original user message that started this turn
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            raw_content = msg.get("content", "")
+            original_user_message = _extract_text_content(raw_content)
+            break
+
+    if original_user_message:
+        # Detect strict contract markers (safe: _extract_text_content guarantees string)
+        contract_patterns = [
+            (r"return\s+only", "strict"),
+            (r"only\s+return", "strict"),
+            (r"strict\s+(output|contract|format)", "strict"),
+            (r"no\s+(extra|additional|meta)\s+text", "strict"),
+            (r"exactly\s+(this|the)", "strict"),
+            (r"no\s+preamble", "strict"),
+            (r"no\s+narration", "strict"),
+        ]
+
+        for pattern, contract_type in contract_patterns:
+            if re.search(pattern, original_user_message, re.IGNORECASE):
+                contract_detected = True
+                contract_pattern = pattern
+                break
+
+    # Build summary request with contract awareness
+    if contract_detected:
+        summary_request = (
+            "You've reached the maximum number of tool-calling iterations allowed. "
+            "Provide a final response that strictly follows the original output format request "
+            "from the user (e.g., table format, single line, specific structure). "
+            "Do NOT add any preamble, meta narration, or explanatory text. "
+            "If you have partial results, output them in the requested format. "
+            "If you cannot provide a complete response in the requested format, "
+            "return a structured failure that respects the format constraints."
+        )
+    else:
+        summary_request = (
+            "You've reached the maximum number of tool-calling iterations allowed. "
+            "Please provide a final response summarizing what you've found and accomplished so far, "
+            "without calling any more tools."
+        )
     messages.append({"role": "user", "content": summary_request})
 
     try:
