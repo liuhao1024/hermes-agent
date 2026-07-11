@@ -522,6 +522,8 @@ class HermesACPAgent(acp.Agent):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
+        self._completion_queue_task: Optional[asyncio.Task] = None
+        self._completion_queue_stop = asyncio.Event()
 
     # ---- Connection lifecycle -----------------------------------------------
 
@@ -529,6 +531,89 @@ class HermesACPAgent(acp.Agent):
         """Store the client connection for sending session updates."""
         self._conn = conn
         logger.info("ACP client connected")
+
+        # Stop any existing completion queue consumer task
+        if self._completion_queue_task and not self._completion_queue_task.done():
+            self._completion_queue_stop.set()
+            self._completion_queue_task.cancel()
+
+        # Start the completion queue consumer task
+        self._completion_queue_stop.clear()
+        self._completion_queue_task = asyncio.create_task(
+            self._drain_completion_queue()
+        )
+        logger.info("ACP completion queue consumer started")
+
+    async def _drain_completion_queue(self) -> None:
+        """Poll completion_queue and dispatch notifications to ACP sessions.
+
+        Routes events to their owning session using event.session_key and emits
+        asynchronous session/update agent-message chunks. Events owned by another
+        session are re-queued for that session's poller.
+        """
+        from tools.process_registry import process_registry, format_process_notification
+
+        _emitted = set()  # dedup re-queued events
+
+        while not self._completion_queue_stop.is_set():
+            try:
+                # Use asyncio.to_thread to avoid blocking the event loop on queue.get
+                evt = await asyncio.to_thread(
+                    process_registry.completion_queue.get, timeout=0.5
+                )
+            except Exception:
+                continue
+
+            # Deduplicate already-emitted events
+            event_id = evt.get("pid") or evt.get("task_id") or evt.get("id")
+            if event_id in _emitted:
+                continue
+
+            # Route to owning session
+            session_key = evt.get("session_key")
+            if not session_key:
+                # No session ownership; skip (orphan or poll/wait/log event)
+                continue
+
+            # Find the session state by session_key
+            state = None
+            for sid, s in self.session_manager._sessions.items():
+                if getattr(s, "session_key", None) == session_key:
+                    state = s
+                    break
+
+            if state is None:
+                # Session no longer exists; re-queue for any other poller
+                process_registry.completion_queue.put(evt)
+                await asyncio.sleep(0.1)
+                continue
+
+            # Emit notification via session/update
+            try:
+                notification_text = format_process_notification(evt)
+                chunk = AgentMessageChunk(
+                    session_id=state.session_id,
+                    content=notification_text,
+                    role="assistant",
+                )
+                self._conn.session_update(chunk)
+                _emitted.add(event_id)
+
+                # Clean up old emitted IDs to prevent unbounded growth
+                if len(_emitted) > 1000:
+                    _emitted.clear()
+
+                logger.debug(
+                    "ACP completion notification sent to session %s: %s",
+                    state.session_id,
+                    notification_text[:100],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ACP failed to send completion notification to session %s: %s",
+                    state.session_id,
+                    exc,
+                )
 
 
     def _session_modes(self, state: SessionState) -> SessionModeState:
