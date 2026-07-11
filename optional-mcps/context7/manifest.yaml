@@ -1,0 +1,34 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: context7
+description: Up-to-date library and version documentation queries via Context7.
+source: https://github.com/upstash/context7-mcp
+
+# Context7 is a tools-only MCP server that provides resolve_library_id
+# and query_docs tools. It requires no authentication (free, no API key).
+transport:
+  type: stdio
+  command: npx
+  args:
+    - "-y"
+    - "@upstash/context7-mcp"
+
+# Context7 is free and requires no credentials.
+auth:
+  type: none
+
+# Tool selection at install time:
+# Context7's MCP server exposes 2 tools (resolve_library_id, query_docs).
+# Both are read-only and safe to enable by default.
+tools:
+  default_enabled:
+    - resolve_library_id
+    - query_docs
+
+post_install: |
+  Context7 provides up-to-date library and version documentation queries.
+  No API key or authentication required.
+
+  Start a new Hermes session to load the Context7 tools.
