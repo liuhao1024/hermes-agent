@@ -210,7 +210,14 @@ export function DesktopController() {
   const routedSessionId = routeSessionId(location.pathname)
   const routeToken = `${location.pathname}:${location.search}:${location.hash}`
   const routeTokenRef = useRef(routeToken)
-  routeTokenRef.current = routeToken
+
+  // Only update routeTokenRef.current when location actually changes, not on every render.
+  // This prevents false-positive session switch detection when routeTokenRef is read
+  // mid-submit after an unrelated render (Fixes #62569).
+  useEffect(() => {
+    routeTokenRef.current = routeToken
+  }, [routeToken])
+
   const getRouteToken = useCallback(() => routeTokenRef.current, [])
 
   const {
