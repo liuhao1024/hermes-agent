@@ -14,6 +14,7 @@ import {
 import { $gateway, ensureGatewayForProfile } from '@/store/gateway'
 import { setConnection } from '@/store/session'
 import { resetStarmapGraph } from '@/store/starmap'
+import { $backendUpdateStatus } from '@/store/updates'
 import type { ProfileInfo } from '@/types/hermes'
 
 // Canonical key for a profile: trimmed, empty → "default". Used everywhere we
@@ -159,6 +160,20 @@ export const $newChatProfile = atom<string | null>(null)
 // currently-open session (store/projects). The chat controller subscribes and
 // resets to the intro draft, so we never strand the user in an orphaned view.
 export const $freshSessionRequest = atom(0)
+
+// Clear cached backend update status when the active gateway profile changes.
+// Switching from remote profile A to remote profile B leaves connection.mode
+// as 'remote', so checkBackendUpdates() does not re-trigger. Without this
+// clear, the (+N) indicator from profile A persists until the next periodic
+// poll (#62770).
+let _lastUpdateProfile: string | null = null
+$activeGatewayProfile.subscribe(value => {
+  const key = normalizeProfileKey(value)
+  if (_lastUpdateProfile !== null && _lastUpdateProfile !== key) {
+    $backendUpdateStatus.set(null)
+  }
+  _lastUpdateProfile = key
+})
 
 export function requestFreshSession(): void {
   $freshSessionRequest.set($freshSessionRequest.get() + 1)
