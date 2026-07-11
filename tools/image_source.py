@@ -108,7 +108,7 @@ async def resolve_image_source(src: str, ctx: ResolveContext) -> ResolvedImage:
 
     # Everything else is a filesystem path — including bare relative names
     # like "pic.png" (accepted on main; a path-shape gate here regressed them).
-    candidate = s[len("file://"):] if s.lower().startswith("file://") else s
+    candidate = s[len("file://")] if s.lower().startswith("file://") else s
     p = Path(os.path.expanduser(candidate))
     # Confinement decision (see module docstring). Under a non-local backend
     # a path is host-readable ONLY if it lands in a media cache (after
@@ -259,19 +259,32 @@ def _permitted_host_read_target(p: Path, ctx: ResolveContext) -> Optional[Path]:
     return None
 
 
-def _get_active_env(task_id: Optional[str]):
+def _get_or_create_env(task_id: Optional[str]):
+    """Get or create the terminal environment for *task_id*.
+
+    This mirrors the pattern from tools/code_execution_tool._get_or_create_env:
+    it reuses the same environment (container/sandbox/SSH session) that the
+    terminal and file tools use, creating one if it doesn't exist yet.
+
+    This fix allows vision_analyze to access images inside SSH/Docker/etc.
+    sandboxes without requiring a prior terminal command to activate the
+    sandbox session (issue #62825).
+    """
     if not task_id:
         return None
     try:
-        from tools.terminal_tool import get_active_env
+        # Import the get-or-create pattern from code_execution_tool
+        from tools.code_execution_tool import _get_or_create_env
 
-        return get_active_env(task_id)
+        # _get_or_create_env returns a tuple (env, env_type), but we only need env
+        env, _env_type = _get_or_create_env(task_id)
+        return env
     except Exception:
         return None
 
 
 async def _resolve_container_fallback(p: Path, ctx: ResolveContext, src: str) -> ResolvedImage:
-    """Read the image bytes inside the sandbox (fail-closed when none exists).
+    """Read the image bytes inside the sandbox (auto-creating if needed).
 
     Reached when a host read is not permitted or the host file is absent. The
     agent can already ``cat`` any container file (file_operations.py reads
@@ -280,17 +293,18 @@ async def _resolve_container_fallback(p: Path, ctx: ResolveContext, src: str) ->
     path from being parsed as a ``base64`` option; ``base64 -w0`` is GNU-only,
     so pipe through ``tr -d`` for BusyBox.
 
-    Fail-closed: if there is no active sandbox env we refuse rather than falling
-    back to a host read, so a non-cache host path under a sandbox never leaks.
+    Fix for #62825: use _get_or_create_env instead of get_active_env so that
+    vision_analyze can activate SSH/Docker/etc. sandboxes on-demand without
+    requiring a prior terminal command.
     """
     import asyncio
     import shlex
 
-    env = _get_active_env(ctx.task_id)
+    env = _get_or_create_env(ctx.task_id)
     if env is None:
         raise SourceNotFound(
-            f"'{p}' is not reachable inside the sandbox and no active sandbox "
-            f"session is available to read it",
+            f"'{p}' is not reachable inside the sandbox and no sandbox "
+            f"session could be activated to read it",
             src=src, origin="container")
 
     # Bound the read INSIDE the sandbox: head -c caps at ingest-limit+1 bytes
@@ -310,9 +324,9 @@ async def _resolve_container_fallback(p: Path, ctx: ResolveContext, src: str) ->
     try:
         data = base64.b64decode(res.get("output", ""), validate=True)
     except Exception as exc:
-        raise NotAnImage(f"sandbox returned non-image data for '{p}': {exc}", src=src)
+        raise NotAnImage(f"sandbox returned non-image data for '{p}': {exc}", src=s)
     if len(data) > _MAX_INGEST_BYTES:
-        raise SourceTooLarge("image exceeds size limit", src=src, origin="container")
+        raise SourceTooLarge("image exceeds size limit", src=s, origin="container")
     return _finalize(data, "", "container", src)
 
 
