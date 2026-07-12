@@ -477,6 +477,20 @@ class TestShellFileOpsHelpers:
         # Non-drive paths are untouched.
         assert file_ops._escape_shell_arg("/tmp/foo") == "'/tmp/foo'"
 
+    def test_escape_shell_arg_native_preserves_windows_drive_paths(self, monkeypatch, file_ops):
+        """Native Windows executables (rg) need C:/... form, not /c/..."""
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        # Native drive path stays as C:/... (normalized backslashes to forward slashes)
+        assert file_ops._escape_shell_arg_native(r"C:\Users\alice\notes.txt") == "'C:/Users/alice/notes.txt'"
+        # POSIX paths unchanged
+        assert file_ops._escape_shell_arg_native("/tmp/foo") == "'/tmp/foo'"
+
+    def test_escape_shell_arg_native_off_windows(self, file_ops):
+        """No-op on non-Windows platforms"""
+        assert file_ops._escape_shell_arg_native("/tmp/foo") == "'/tmp/foo'"
+
     def test_read_file_uses_bash_safe_windows_paths(self, mock_env, monkeypatch):
         import tools.environments.local as local_mod
 

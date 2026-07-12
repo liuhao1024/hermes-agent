@@ -962,7 +962,7 @@ class ShellFileOperations(FileOperations):
 
         On Windows a native drive path (``C:\\Users\\x``) is first rewritten to
         the Git Bash / MSYS ``/c/Users/x`` form: bash eats the backslashes and
-        MSYS otherwise mangles ``C:\\...`` (the "Directory \\drivers\\etc does not
+        MSYS otherwise mangles ``C:\\...`` (the "Directory \\\drivers\\\etc does not
         exist" class of failures). Reuses the env-layer translator so shell file
         ops and the terminal ``cd`` agree on the path form. No-op off Windows and
         for non-drive-qualified paths.
@@ -970,6 +970,21 @@ class ShellFileOperations(FileOperations):
         from tools.environments.local import _windows_to_msys_path
 
         arg = _windows_to_msys_path(arg)
+        # Use single quotes and escape any single quotes in the string
+        return "'" + arg.replace("'", "'\"'\"'") + "'"
+
+    def _escape_shell_arg_native(self, arg: str) -> str:
+        """Escape a path for a NATIVE Windows executable (e.g. rg).
+
+        Hermes disables MSYS argv path conversion in its bash subprocesses
+        (MSYS_NO_PATHCONV=1 / MSYS2_ARG_CONV_EXCL=*), so a native binary
+        receives arguments verbatim. The MSYS form /c/Users/<user> produced by
+        _escape_shell_arg is never translated back and resolves as
+        <drive>:\\c\\Users\\<user> — silently matching nothing. Native tools accept
+        C:/Users/<user>, so pass that through untranslated. No-op for POSIX paths.
+        """
+        # Normalize backslashes to forward slashes (native Windows tools accept both)
+        arg = arg.replace("\\", "/")
         # Use single quotes and escape any single quotes in the string
         return "'" + arg.replace("'", "'\"'\"'") + "'"
 
@@ -2212,7 +2227,7 @@ class ShellFileOperations(FileOperations):
         # Try mtime-sorted first (rg 13+); fall back to unsorted if not supported.
         cmd_sorted = (
             f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} "
-            f"{self._escape_shell_arg(path)} 2>/dev/null "
+            f"{self._escape_shell_arg_native(path)} 2>/dev/null "
             f"| head -n {fetch_limit}"
         )
         result = self._exec(cmd_sorted, timeout=60)
@@ -2223,7 +2238,7 @@ class ShellFileOperations(FileOperations):
             # --sortr may have failed on older rg; retry without it.
             cmd_plain = (
                 f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
-                f"{self._escape_shell_arg(path)} 2>/dev/null "
+                f"{self._escape_shell_arg_native(path)} 2>/dev/null "
                 f"| head -n {fetch_limit}"
             )
             result = self._exec(cmd_plain, timeout=60)
@@ -2279,8 +2294,8 @@ class ShellFileOperations(FileOperations):
         
         # Add pattern and path
         cmd_parts.append(self._escape_shell_arg(pattern))
-        cmd_parts.append(self._escape_shell_arg(path))
-        
+        cmd_parts.append(self._escape_shell_arg_native(path))
+
         # Fetch extra rows so we can report the true total before slicing.
         # For context mode, rg emits separator lines ("--") between groups,
         # so we grab generously and filter in Python.
