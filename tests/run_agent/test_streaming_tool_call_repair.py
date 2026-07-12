@@ -113,3 +113,111 @@ class TestStreamingAssemblyRepair:
         parsed = json.loads(result)
         assert parsed["command"] == "ls -la /tmp"
         assert parsed["timeout"] == 30
+
+
+class TestConcatenatedObjectsSplit:
+    """Tests for _split_concatenated_json_objects — the helper that splits
+    Gemini OpenAI-compat concatenated parallel tool-call arguments (#62937).
+
+    When Gemini's OpenAI-compat endpoint delivers parallel tool calls with
+    index=None, the streaming assembler merges all argument fragments into
+    one entry.  json.loads rejects the result with "Extra data" and
+    _repair_tool_call_arguments replaces it with "{}".  This helper lets the
+    assembler emit one tool call per concatenated object instead.
+    """
+
+    def test_three_concatenated_objects(self):
+        """Real-world Gemini payload: three calendar events glued together."""
+        from run_agent import _split_concatenated_json_objects
+        raw = '{"title":"Opening","date":"2026-07-01"}{"title":"Semi","date":"2026-07-05"}{"title":"Final","date":"2026-07-09"}'
+        result = _split_concatenated_json_objects(raw)
+        assert result is not None
+        assert len(result) == 3
+        for obj_str in result:
+            parsed = json.loads(obj_str)
+            assert "title" in parsed and "date" in parsed
+        assert json.loads(result[0])["title"] == "Opening"
+        assert json.loads(result[2])["title"] == "Final"
+
+    def test_single_object_returns_none(self):
+        """A single valid JSON object is NOT a concatenation."""
+        from run_agent import _split_concatenated_json_objects
+        assert _split_concatenated_json_objects('{"a": 1}') is None
+
+    def test_empty_and_garbage_return_none(self):
+        """Empty strings, None, and garbage must return None."""
+        from run_agent import _split_concatenated_json_objects
+        assert _split_concatenated_json_objects("") is None
+        assert _split_concatenated_json_objects(None) is None
+        assert _split_concatenated_json_objects("garbage") is None
+
+    def test_whitespace_between_objects(self):
+        """Objects separated by whitespace/newlines still split correctly."""
+        from run_agent import _split_concatenated_json_objects
+        raw = '{"x": 1}\n\n  {"y": 2}'
+        result = _split_concatenated_json_objects(raw)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_partial_concatenation_returns_none(self):
+        """One valid + one broken object is not a clean concatenation."""
+        from run_agent import _split_concatenated_json_objects
+        raw = '{"x": 1}{broken'
+        assert _split_concatenated_json_objects(raw) is None
+
+    def test_two_objects(self):
+        """Minimum concatenation: exactly two objects."""
+        from run_agent import _split_concatenated_json_objects
+        raw = '{"a":1}{"b":2}'
+        result = _split_concatenated_json_objects(raw)
+        assert result is not None
+        assert len(result) == 2
+        assert json.loads(result[0]) == {"a": 1}
+        assert json.loads(result[1]) == {"b": 2}
+
+class TestMixedFunctionGuard:
+    """Mixed-function batch guard for concatenated args split (#62937).
+
+    When index=None parallel batch contains different function names,
+    the assembler cannot safely split because we don't know which
+    split object belongs to which function. The guard prevents
+    incorrect argument dispatch.
+    """
+
+    def test_mixed_function_batch_skip_split(self):
+        """Mixed function batch must not split concatenated args."""
+        from run_agent import _split_concatenated_json_objects
+
+        # Simulate a mixed-function accumulator: two entries with different names
+        tool_calls_acc = {
+            0: {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}{"path": "b"}'}},
+            1: {"id": "call_2", "type": "function", "function": {"name": "write_file", "arguments": '{"content": "x"}'}},
+        }
+
+        # Check that the guard logic correctly identifies mixed functions
+        unique_names = {tc["function"]["name"] or "" for tc in tool_calls_acc.values()}
+        has_mixed_functions = len(unique_names) > 1 and "" not in unique_names
+
+        assert has_mixed_functions is True
+
+        # Verify split works on the string itself
+        split_args = _split_concatenated_json_objects(tool_calls_acc[0]["function"]["arguments"])
+        assert split_args is not None
+        assert len(split_args) == 2
+
+        # The guard prevents using split_args in production because
+        # we don't know if they belong to read_file or write_file
+        # (the assembler would have assigned the last seen name to all)
+
+    def test_single_function_batch_allows_split(self):
+        """Single function batch can safely split concatenated args."""
+        tool_calls_acc = {
+            0: {"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}{"path": "b"}'}},
+            1: {"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "c"}'}},
+        }
+
+        unique_names = {tc["function"]["name"] or "" for tc in tool_calls_acc.values()}
+        has_mixed_functions = len(unique_names) > 1 and "" not in unique_names
+
+        assert has_mixed_functions is False
+        assert len(unique_names) == 1

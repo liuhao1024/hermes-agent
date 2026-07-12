@@ -33,6 +33,7 @@ from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
     _sanitize_surrogates,
     _repair_tool_call_arguments,
+    _split_concatenated_json_objects,
 )
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
@@ -2469,6 +2470,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         mock_tool_calls = None
         has_truncated_tool_args = False
         if tool_calls_acc:
+            # Detect mixed-function batches before splitting concatenated args.
+            # If index=None parallel batch contains different function names,
+            # we cannot safely split because we don't know which split object
+            # belongs to which function. Guard: check if all tool_calls_acc
+            # entries have the same non-empty function name (#62937).
+            unique_names = {tc["function"]["name"] or "" for tc in tool_calls_acc.values()}
+            has_mixed_functions = len(unique_names) > 1 and "" not in unique_names
+
             mock_tool_calls = []
             for idx in sorted(tool_calls_acc):
                 tc = tool_calls_acc[idx]
@@ -2478,6 +2487,29 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     try:
                         json.loads(arguments)
                     except json.JSONDecodeError:
+                        # Gemini's OpenAI-compat endpoint sends parallel tool
+                        # calls with index=None, so the assembler merges all
+                        # argument fragments into one entry. Split them back
+                        # into individual calls before attempting repair
+                        # (#62937).
+                        split_args = _split_concatenated_json_objects(arguments)
+                        if split_args and not has_mixed_functions:
+                            for _i, _obj in enumerate(split_args):
+                                mock_tool_calls.append(SimpleNamespace(
+                                    id=tc["id"] if _i == 0 else f'{tc["id"]}_split{_i}',
+                                    type=tc["type"],
+                                    extra_content=tc.get("extra_content") if _i == 0 else None,
+                                    function=SimpleNamespace(
+                                        name=tool_name,
+                                        arguments=_obj,
+                                    ),
+                                ))
+                            logger.info(
+                                "Split concatenated tool_call arguments into "
+                                "%d separate calls for %s (index=None parallel batch)",
+                                len(split_args), tool_name,
+                            )
+                            continue
                         # Attempt repair before flagging as truncated.
                         # Models like GLM-5.1 via Ollama produce trailing
                         # commas, unclosed brackets, Python None, etc.
