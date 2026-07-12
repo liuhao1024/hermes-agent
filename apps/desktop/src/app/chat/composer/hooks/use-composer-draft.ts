@@ -313,10 +313,14 @@ export function useComposerDraft({
     // fire later would just clobber with an older snapshot.
     window.clearTimeout(draftPersistTimerRef.current)
     pendingDraftPersistRef.current = null
-    draftScopeRef.current = activeQueueSessionKey
 
     const { attachments, text } = takeSessionDraft(activeQueueSessionKey)
     loadIntoComposer(text, attachments)
+
+    // Update draftScopeRef after taking the draft, so any stale debounced stash
+    // from the previous session doesn't fire after we've switched scopes. This
+    // prevents cross-session draft leaks (#63054).
+    draftScopeRef.current = activeQueueSessionKey
 
     return () => {
       const latestText = syncDraftFromEditor()
