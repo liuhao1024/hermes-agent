@@ -1213,7 +1213,13 @@ class ContextCompressor(ContextEngine):
             # Keying on real usage compares like with like and fires exactly once
             # per compaction.
             if self._verify_compaction_cleared_threshold:
-                if self.last_prompt_tokens >= self.threshold_tokens:
+                # Treat fallback usage as ineffective: even if the token count fits,
+                # the content quality degraded. Prevents runaway fallback loops (#63008).
+                is_ineffective = (
+                    self.last_prompt_tokens >= self.threshold_tokens
+                    or self._last_summary_fallback_used
+                )
+                if is_ineffective:
                     self._ineffective_compression_count += 1
                     if not self.quiet_mode:
                         logger.warning(
