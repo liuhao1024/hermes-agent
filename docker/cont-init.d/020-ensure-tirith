@@ -1,0 +1,30 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Ensure tirith security scanner is available in Docker containers.
+#
+# tirith downloads lazily via gateway/run.py's ensure_installed() on
+# gateway startup, but container users running 'docker run ... bash' or
+# direct CLI commands never trigger gateway startup, so tirith never
+# gets downloaded and is unavailable. This cont-init.d hook triggers
+# the download at container boot time so tirith is ready regardless
+# of how the container is used.
+
+set -eu
+
+if [ ! -f "/opt/hermes/.venv/bin/python" ]; then
+    echo "[ensure-tirith] Python venv not found, skipping"
+    exit 0
+fi
+
+echo "[ensure-tirith] Ensuring tirith is available..."
+
+# Run as hermes user to respect HERMES_HOME ownership
+# log_failures=False means network errors don't fail the container boot
+/opt/hermes/.venv/bin/python -c "
+import sys
+sys.path.insert(0, '/opt/hermes')
+from tools.tirith_security import ensure_installed
+ensure_installed(log_failures=False)
+" || echo "[ensure-tirith] tirith install check returned non-zero (may be normal)"
+
+echo "[ensure-tirith] Done"
