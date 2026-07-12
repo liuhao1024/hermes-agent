@@ -997,6 +997,70 @@ class TestSessionConfiguration:
         assert state.agent.base_url == "https://anthropic.example/v1"
         assert runtime_calls[-1] == "anthropic"
 
+    @pytest.mark.asyncio
+    async def test_set_session_model_from_blank_provider_clears_stale_base_url(self, tmp_path, monkeypatch):
+        """Regression test for #63222: provider switch from blank attribution should drop stale base_url."""
+        runtime_calls = []
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            runtime_calls.append(requested)
+            provider = requested or "openrouter"
+            return {
+                "provider": provider,
+                "api_mode": "anthropic_messages" if provider == "anthropic" else "chat_completions",
+                "base_url": f"https://{provider}.example/v1",
+                "api_key": f"{provider}-key",
+                "command": None,
+                "args": [],
+            }
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "openrouter", "default": "openrouter/gpt-5"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.models.parse_model_input",
+            lambda raw, current: ("openai-codex", "gpt-5.6-sol"),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.models.detect_provider_for_model",
+            lambda model, current: None,
+        )
+        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            acp_agent = HermesACPAgent(session_manager=manager)
+            state = manager.create_session(cwd="/tmp")
+            # Simulate blank legacy attribution with Gemini's base_url (issue #63222 scenario)
+            state.agent = SimpleNamespace(
+                model="gemini-2.5-pro",
+                provider=None,  # blank legacy attribution
+                base_url="https://generativelanguage.googleapis.com/v1beta",
+                api_mode="anthropic_messages",
+            )
+            result = await acp_agent.set_session_model(
+                model_id="openai-codex:gpt-5.6-sol",
+                session_id=state.session_id,
+            )
+
+        assert isinstance(result, SetSessionModelResponse)
+        assert state.model == "gpt-5.6-sol"
+        assert state.agent.provider == "openai-codex"
+        # After the fix, stale Gemini base_url must be replaced with Codex endpoint
+        assert state.agent.base_url == "https://openai-codex.example/v1"
+        assert runtime_calls[-1] == "openai-codex"
+
 
 # ---------------------------------------------------------------------------
 # prompt
