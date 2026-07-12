@@ -21,6 +21,11 @@ const SESSION_WINDOW_MIN_HEIGHT = 620
 // blurred/occluded windows. A streaming chat app must keep painting in the
 // background, so every chat window opts out. The preload path is injected
 // because it depends on the Electron entry's __dirname.
+//
+// `partition: 'persist:hermes-desktop'` ensures localStorage persists across
+// app updates and relaunches (#63027). Without a persisted partition,
+// localStorage can be lost on update, causing user-organized state like
+// pinned sessions to disappear.
 function chatWindowWebPreferences(preloadPath: string) {
   return {
     preload: preloadPath,
@@ -29,7 +34,8 @@ function chatWindowWebPreferences(preloadPath: string) {
     sandbox: true,
     nodeIntegration: false,
     devTools: true,
-    backgroundThrottling: false
+    backgroundThrottling: false,
+    partition: 'persist:hermes-desktop'
   }
 }
 
