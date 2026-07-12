@@ -2064,6 +2064,11 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             provider=agent.provider,
             api_mode=agent.api_mode,
         )
+        # Store the resolved context_length so subsequent lookups use the
+        # new model's window instead of inheriting the stale value from the
+        # previous model. Without this, prompt_builder._get_context_file_max_chars()
+        # uses the old context_length after a /model switch (issue #63032).
+        agent._config_context_length = new_context_length
 
     # ── Invalidate cached system prompt so it rebuilds next turn ──
     agent._cached_system_prompt = None
