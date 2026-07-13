@@ -330,6 +330,7 @@ def _background_review_write_guard(
                     "maintenance. Ask the user to run "
                     f"`hermes curator unpin {name}` if they want it changed."
                 ),
+                "error_type": "policy_error",
             }
     except Exception:
         logger.debug("pinned skill guard lookup failed for %s", name, exc_info=True)
@@ -344,6 +345,7 @@ def _background_review_write_guard(
                     "the skill lives in skills.external_dirs, which are "
                     "externally owned and read-only to autonomous curation."
                 ),
+                "error_type": "policy_error",
             }
     except Exception:
         logger.debug("external skill guard lookup failed for %s", name, exc_info=True)
@@ -357,6 +359,7 @@ def _background_review_write_guard(
                     f"Refusing background curator {action} for protected "
                     f"built-in skill '{name}'."
                 ),
+                "error_type": "policy_error",
             }
         if skill_usage.is_hub_installed(name):
             return {
@@ -365,6 +368,7 @@ def _background_review_write_guard(
                     f"Refusing background curator {action} for hub-installed "
                     f"skill '{name}'."
                 ),
+                "error_type": "policy_error",
             }
         if skill_usage.is_bundled(name):
             return {
@@ -373,6 +377,7 @@ def _background_review_write_guard(
                     f"Refusing background curator {action} for bundled "
                     f"skill '{name}'."
                 ),
+                "error_type": "policy_error",
             }
     except Exception:
         logger.debug("owned skill guard lookup failed for %s", name, exc_info=True)
@@ -406,6 +411,7 @@ def _background_review_read_before_write_guard(
             "retry the write using the content just returned."
         ),
         "_read_before_write_required": True,
+        "error_type": "policy_error",
     }
 
 
@@ -1010,7 +1016,7 @@ def _patch_skill(
     scan_error = _security_scan_skill(skill_dir)
     if scan_error:
         _atomic_write_text(target, original_content)
-        return {"success": False, "error": scan_error}
+        return {"success": False, "error": scan_error, "error_type": "security_error"}
 
     result = {
         "success": True,
@@ -1363,9 +1369,9 @@ def skill_manage(
 
     elif action == "patch":
         if not old_string:
-            return tool_error("old_string is required for 'patch'. Provide the text to find.", success=False)
+            return json.dumps({"success": False, "error": "old_string is required for 'patch'. Provide the text to find.", "error_type": "schema_error"}, ensure_ascii=False)
         if new_string is None:
-            return tool_error("new_string is required for 'patch'. Use empty string to delete matched text.", success=False)
+            return json.dumps({"success": False, "error": "new_string is required for 'patch'. Use empty string to delete matched text.", "error_type": "schema_error"}, ensure_ascii=False)
         result = _patch_skill(name, old_string, new_string, file_path, replace_all)
 
     elif action == "delete":
