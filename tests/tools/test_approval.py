@@ -12,6 +12,8 @@ from unittest.mock import patch as mock_patch
 import tools.approval as approval_module
 from hermes_constants import get_hermes_home
 from tools.approval import (
+    _check_crontab_guard,
+    check_all_command_guards,
     _get_approval_mode,
     _normalize_approval_mode,
     _smart_approve,
@@ -2454,3 +2456,78 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestCrontabHardlineGuard:
+    """crontab commands must be hardline-blocked; agents should use hermes /cron. (#25271)"""
+
+    def test_crontab_remove_flag(self):
+        is_blocked, desc = _check_crontab_guard("crontab -r")
+        assert is_blocked is True
+        assert "crontab" in desc.lower()
+
+    def test_crontab_stdin_replace(self):
+        is_blocked, _ = _check_crontab_guard("crontab -")
+        assert is_blocked is True
+
+    def test_crontab_edit(self):
+        is_blocked, _ = _check_crontab_guard("crontab -e")
+        assert is_blocked is True
+
+    def test_crontab_list(self):
+        """Even crontab -l (list) is blocked; agents should use hermes /cron."""
+        is_blocked, _ = _check_crontab_guard("crontab -l")
+        assert is_blocked is True
+
+    def test_crontab_pipe_pattern(self):
+        is_blocked, _ = _check_crontab_guard(
+            '(crontab -l 2>/dev/null; echo "0 * * * * cmd") | crontab -'
+        )
+        assert is_blocked is True
+
+    def test_crontab_word_boundary(self):
+        """Ensure 'mycrontab_tool' does not trigger."""
+        is_blocked, _ = _check_crontab_guard("mycrontab_tool --list")
+        assert is_blocked is False
+
+    def test_crontab_not_in_prose(self):
+        """'echo crontab' should NOT be blocked (not at command position)."""
+        is_blocked, _ = _check_crontab_guard("echo crontab")
+        assert is_blocked is False
+
+    def test_crontab_not_in_prose_quoted(self):
+        """'grep "crontab" log' should NOT be blocked (not at command position)."""
+        is_blocked, _ = _check_crontab_guard('grep "crontab" /var/log/syslog')
+        assert is_blocked is False
+
+    def test_crontab_bypasses_yolo(self, monkeypatch):
+        """Crontab guard must fire even when yolo mode is enabled.
+
+        Note: _YOLO_MODE_FROZEN is frozen at module import time for security
+        (prevents prompt-injection from setting HERMES_YOLO_MODE at runtime).
+        This test patches the frozen attribute directly to simulate a YOLO process.
+        """
+        # First verify it blocks without YOLO
+        result = check_all_command_guards("crontab -r", "local")
+        assert result.get("approved") is False
+        assert "crontab" in result.get("message", "").lower()
+
+        # Then verify it still blocks even with YOLO patched True
+        from unittest.mock import patch as mock_patch
+        import tools.approval
+        with (
+            mock_patch.object(tools.approval, "_YOLO_MODE_FROZEN", True),
+        ):
+            result = check_all_command_guards("crontab -r", "local")
+            assert result.get("approved") is False
+            assert "crontab" in result.get("message", "").lower()
+
+    def test_crontab_with_sudo(self):
+        """'sudo crontab -r' should still be blocked."""
+        is_blocked, _ = _check_crontab_guard("sudo crontab -r")
+        assert is_blocked is True
+
+    def test_crontab_in_subshell(self):
+        """Crontab in subshell should still be blocked."""
+        is_blocked, _ = _check_crontab_guard("$(crontab -l)")
+        assert is_blocked is True
