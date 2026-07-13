@@ -15496,7 +15496,14 @@ async def pty_ws(ws: WebSocket) -> None:
         active_session_file = _active_session_file_for_channel(ws.app, channel)
         if force_fresh:
             resume = None
-            _forget_active_session_file(active_session_file)
+            # When starting a fresh session, clear the file content but keep the
+            # channel→path mapping. The path is passed to the TUI child via
+            # HERMES_TUI_ACTIVE_SESSION_FILE, and we want the same channel to
+            # reuse this file on reconnect so the new session can be resumed.
+            try:
+                active_session_file.unlink(missing_ok=True)
+            except OSError:
+                pass
         elif not resume:
             resume = _read_active_session_file(active_session_file)
 

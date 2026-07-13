@@ -131,6 +131,61 @@ def test_fresh_param_ignores_channel_active_session_file(pty_client, monkeypatch
     assert not active_file.exists()
 
 
+def test_fresh_preserves_channel_for_reconnect(pty_client, monkeypatch):
+    """fresh=1 must clear the file but keep the channel→path mapping for reconnect.
+
+    Regression for #63553: the original cleanup popped the mapping entry,
+    breaking reconnect breadcrumbs. The file is cleared (no old session ID),
+    but the same channel must reuse the same path so the new session can be
+    resumed on the next reconnect.
+    """
+    ws, client, token = pty_client
+    channel = "fresh-reconnect-chan"
+
+    # First connection with fresh=1
+    captured_fresh = {}
+
+    def fake_resolve_fresh(resume=None, sidecar_url=None, profile=None, active_session_file=None):
+        captured_fresh["active_session_file"] = active_session_file
+        captured_fresh["resume"] = resume
+        # Simulate TUI writing the new session ID
+        if active_session_file:
+            Path(active_session_file).write_text(
+                json.dumps({"session_id": "sess-fresh"}),
+                encoding="utf-8",
+            )
+        return (["fake-hermes-tui"], None, None)
+
+    monkeypatch.setattr(ws, "_resolve_chat_argv", fake_resolve_fresh)
+
+    with client.websocket_connect(_url(token, channel=channel, fresh="1")) as conn:
+        assert conn.receive_bytes() == b"ready"
+
+    assert captured_fresh["resume"] is None
+    assert captured_fresh["active_session_file"]
+    fresh_path = Path(captured_fresh["active_session_file"])
+    # The file should exist (TUI wrote the new session ID)
+    assert fresh_path.exists()
+    assert json.loads(fresh_path.read_text(encoding="utf-8")) == {"session_id": "sess-fresh"}
+
+    # Second connection on the same channel (no fresh param)
+    captured_resume = {}
+
+    def fake_resolve_resume(resume=None, sidecar_url=None, profile=None, active_session_file=None):
+        captured_resume["active_session_file"] = active_session_file
+        captured_resume["resume"] = resume
+        return (["fake-hermes-tui"], None, None)
+
+    monkeypatch.setattr(ws, "_resolve_chat_argv", fake_resolve_resume)
+
+    with client.websocket_connect(_url(token, channel=channel)) as conn:
+        assert conn.receive_bytes() == b"ready"
+
+    # Must resume from the fresh session (same path)
+    assert captured_resume["resume"] == "sess-fresh"
+    assert captured_resume["active_session_file"] == captured_fresh["active_session_file"]
+
+
 def test_child_eof_closes_socket_and_bridge(pty_client, monkeypatch):
     """Child EOF must close the WS server-side and reap the PTY.
 
