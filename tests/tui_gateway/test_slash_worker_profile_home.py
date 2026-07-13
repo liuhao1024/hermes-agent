@@ -103,17 +103,17 @@ def test_slash_worker_inherits_argv_correctly():
         with patch("subprocess.Popen") as mock_popen:
             mock_popen.return_value.stdout = MagicMock()
             mock_popen.return_value.stderr = MagicMock()
-            
+
             from tui_gateway.server import _SlashWorker
-            
+
             # Test that argv is correct
             worker = _SlashWorker(
                 session_key="my_session",
                 model="gpt-4"
             )
-            
+
             call_args = mock_popen.call_args[0][0]
-            
+
             # Verify argv structure
             assert sys.executable in call_args
             assert "-m" in call_args
@@ -122,3 +122,26 @@ def test_slash_worker_inherits_argv_correctly():
             assert "my_session" in call_args
             assert "--model" in call_args
             assert "gpt-4" in call_args
+
+
+def test_slash_worker_uses_utf8_encoding():
+    """_SlashWorker uses UTF-8 encoding to avoid UnicodeDecodeError on Windows CJK locale."""
+    with patch.dict("sys.modules", {
+        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+    }):
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value.stdout = MagicMock()
+            mock_popen.return_value.stderr = MagicMock()
+
+            from tui_gateway.server import _SlashWorker
+
+            worker = _SlashWorker(
+                session_key="test_session",
+                model="gpt-4"
+            )
+
+            # Verify encoding parameters are passed to Popen
+            popen_kwargs = mock_popen.call_args[1]
+            assert popen_kwargs.get("text") is True
+            assert popen_kwargs.get("encoding") == "utf-8"
+            assert popen_kwargs.get("errors") == "replace"
