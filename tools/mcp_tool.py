@@ -3676,6 +3676,13 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         try:
             return future.result(timeout=wait_timeout)
         except concurrent.futures.TimeoutError:
+            # On Python >= 3.8, concurrent.futures.TimeoutError is an alias for
+            # the builtin TimeoutError, so this except catches both poll timeouts
+            # AND real TimeoutErrors stored in a completed future. If the future
+            # is done, resolve once to distinguish: if it raised a real exception,
+            # propagate it; otherwise it was just a poll timeout and we continue.
+            if future.done():
+                return future.result()
             continue
 
 

@@ -4454,3 +4454,104 @@ class TestMcpParallelToolCalls:
             register_mcp_servers(config_off)
         with _lock:
             assert sanitize_mcp_name_component("toggle_srv") not in _parallel_safe_servers
+
+
+class TestRunOnMCPLoopTimeoutHandling:
+    """Tests for _run_on_mcp_loop timeout handling (Issue #63892)."""
+
+    def test_poll_timeout_continues_when_future_not_done(self):
+        """A poll timeout should continue polling when the future is not done."""
+        import asyncio
+        import concurrent.futures
+        import time
+        from unittest.mock import patch
+
+        from tools.mcp_tool import _run_on_mcp_loop
+
+        async def slow_coro():
+            await asyncio.sleep(10)
+            return "slow result"
+
+        # Mock safe_schedule_threadsafe to return a future that never completes
+        mock_future = concurrent.futures.Future()
+
+        with patch("tools.mcp_tool.safe_schedule_threadsafe", return_value=mock_future):
+            with patch("tools.mcp_tool._lock", MagicMock()):
+                with patch("tools.mcp_tool._mcp_loop"):
+                    with patch("tools.mcp_tool._wrap_with_home_override", side_effect=lambda x: x):
+                        with pytest.raises(TimeoutError, match="MCP call timed out"):
+                            # This should poll until timeout (1s) then raise
+                            _run_on_mcp_loop(slow_coro, timeout=1.0)
+
+    def test_real_timeout_exception_propagates_when_future_done(self):
+        """A real TimeoutError stored in a completed future should propagate immediately."""
+        import asyncio
+        import concurrent.futures
+        from unittest.mock import patch
+
+        from tools.mcp_tool import _run_on_mcp_loop
+
+        async def coro_that_times_out():
+            # Simulate asyncio.wait_for timeout (the real bug scenario)
+            await asyncio.sleep(0.01)
+            raise TimeoutError("Inner timeout from asyncio.wait_for")
+
+        # Schedule the coroutine and let it complete with TimeoutError
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro_that_times_out(), loop)
+
+            # Give it time to complete with the TimeoutError
+            time.sleep(0.1)
+
+            # Verify the future is done with a TimeoutError
+            assert future.done()
+            assert isinstance(future.exception(), TimeoutError)
+
+            # Mock safe_schedule_threadsafe to return our pre-completed future
+            with patch("tools.mcp_tool.safe_schedule_threadsafe", return_value=future):
+                with patch("tools.mcp_tool._lock", MagicMock()):
+                    with patch("tools.mcp_tool._mcp_loop"):
+                        with patch("tools.mcp_tool._wrap_with_home_override", side_effect=lambda x: x):
+                            # The real TimeoutError should propagate immediately, not spin
+                            with pytest.raises(TimeoutError, match="Inner timeout from asyncio.wait_for"):
+                                _run_on_mcp_loop(coro_that_times_out, timeout=10.0)
+
+            # The key check: the exception chain should NOT have grown
+            # (before the fix, each poll would add ~3 frames)
+            traceback_depth = len(future.exception().__traceback__.tb_next.tb_next.tb_next)
+            # A normal asyncio traceback is ~5-7 frames; the bug would cause 50+ frames
+            assert traceback_depth < 20, f"Traceback too deep ({traceback_depth} frames), likely indicates the leak bug"
+
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=1)
+
+    def test_successful_result_propagates_immediately(self):
+        """A successful result should return immediately without spinning."""
+        import concurrent.futures
+        import time
+        from unittest.mock import patch
+
+        from tools.mcp_tool import _run_on_mcp_loop
+
+        async def fast_coro():
+            return "fast result"
+
+        # Create a completed future with a successful result
+        future = concurrent.futures.Future()
+        future.set_result("fast result")
+
+        assert future.done()
+        assert future.result() == "fast result"
+
+        with patch("tools.mcp_tool.safe_schedule_threadsafe", return_value=future):
+            with patch("tools.mcp_tool._lock", MagicMock()):
+                with patch("tools.mcp_tool._mcp_loop"):
+                    with patch("tools.mcp_tool._wrap_with_home_override", side_effect=lambda x: x):
+                        # Should return immediately, not poll
+                        result = _run_on_mcp_loop(fast_coro, timeout=10.0)
+                        assert result == "fast result"
