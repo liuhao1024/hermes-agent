@@ -1,4 +1,5 @@
 import atexit
+import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
@@ -2429,7 +2430,13 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
     try:
         prompt = agent._build_system_prompt(None)
         agent._cached_system_prompt = prompt
-        db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
+        session_id = getattr(agent, "session_id", None) or session_key
+        # AsyncSessionDB wraps all methods via __getattr__ with asyncio.to_thread,
+        # so update_system_prompt returns a coroutine. Fire-and-forget in sync
+        # context via asyncio.run() to ensure the write actually executes.
+        result = db.update_system_prompt(session_id, prompt)
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
     except Exception:
         logger.debug("failed to persist live session system prompt", exc_info=True)
 
