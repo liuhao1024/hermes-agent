@@ -78,6 +78,13 @@ logger = logging.getLogger(__name__)
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
+# Tool calls in this set are allowed after a response has already delivered its
+# final user-facing content. Any other or unknown tool signals that work is still
+# in progress and invalidates cached post-response state.
+_POST_RESPONSE_HOUSEKEEPING_TOOLS = frozenset({
+    "memory", "todo", "skill_manage", "session_search",
+})
+
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
@@ -4460,6 +4467,19 @@ def run_conversation(
                         if repaired:
                             print(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
                             tc.function.name = repaired
+
+                # Classify before validation branches can retry or continue.
+                # Unknown/disabled tools are conservatively substantive.
+                _all_housekeeping = all(
+                    tc.function.name in agent.valid_tool_names
+                    and tc.function.name in _POST_RESPONSE_HOUSEKEEPING_TOOLS
+                    for tc in assistant_message.tool_calls
+                )
+                if not _all_housekeeping:
+                    agent._last_content_with_tools = None
+                    agent._last_content_tools_all_housekeeping = False
+                    agent._mute_post_response = False
+
                 invalid_tool_calls = [
                     tc.function.name for tc in assistant_message.tool_calls
                     if tc.function.name not in agent.valid_tool_names
@@ -4632,24 +4652,6 @@ def run_conversation(
                 assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
                 
                 turn_content = assistant_message.content or ""
-
-                # Classify tools in this turn to determine if they are all housekeeping.
-                # This classification is needed regardless of whether the turn has visible content,
-                # because a substantive tool-only turn must invalidate any older housekeeping fallback.
-                _HOUSEKEEPING_TOOLS = frozenset({
-                    "memory", "todo", "skill_manage", "session_search",
-                })
-                _all_housekeeping = all(
-                    tc.function.name in _HOUSEKEEPING_TOOLS
-                    for tc in assistant_message.tool_calls
-                )
-
-                # If this turn has substantive tools (non-housekeeping), clear any older fallback.
-                # Prevents a two-turn-old housekeeping narration from being treated as if it belonged
-                # to the immediately preceding substantive tool turn.
-                if assistant_message.tool_calls and not _all_housekeeping:
-                    agent._last_content_with_tools = None
-                    agent._last_content_tools_all_housekeeping = False
 
                 # If this turn has both content AND tool_calls, capture the content
                 # as a fallback final response. Common pattern: model delivers its

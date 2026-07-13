@@ -4026,6 +4026,122 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
+    @pytest.mark.parametrize(
+        "later_calls",
+        [
+            pytest.param([("web_search", "{}")], id="valid-substantive"),
+            pytest.param(
+                [("web_search", '{"query": nope}')], id="malformed-json"
+            ),
+            pytest.param([("unknown_tool", "{}")], id="unknown-tool"),
+            pytest.param(
+                [("todo", "{}"), ("web_search", "{}")],
+                id="mixed-housekeeping-and-substantive",
+            ),
+        ],
+    )
+    def test_substantive_tool_turn_invalidates_stale_housekeeping_fallback(
+        self, agent, later_calls
+    ):
+        """Substantive or unknown calls clear stale fallback before any retry."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"todo", "web_search"}
+        todo_call = _mock_tool_call(name="todo", arguments="{}", call_id="todo1")
+        later_tool_calls = [
+            _mock_tool_call(name=name, arguments=arguments, call_id=f"later{index}")
+            for index, (name, arguments) in enumerate(later_calls)
+        ]
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="I'll begin the work.",
+                finish_reason="tool_calls",
+                tool_calls=[todo_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=later_tool_calls,
+            ),
+            _mock_response(content="", finish_reason="stop"),
+            _mock_response(content="Recovered after nudge.", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="ok"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("do the full task")
+
+        assert result["final_response"] == "Recovered after nudge."
+        assert result["api_calls"] == 4
+        assert result["turn_exit_reason"].startswith("text_response")
+
+    def test_housekeeping_tool_turn_keeps_same_turn_content_fallback(self, agent):
+        """Final content followed only by housekeeping remains a valid fallback."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"todo"}
+        todo_call = _mock_tool_call(name="todo", arguments="{}", call_id="todo1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="The task is complete.",
+                finish_reason="tool_calls",
+                tool_calls=[todo_call],
+            ),
+            _mock_response(content="", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="ok"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("finish the task")
+
+        assert result["final_response"] == "The task is complete."
+        assert result["api_calls"] == 2
+        assert result["turn_exit_reason"] == "fallback_prior_turn_content"
+
+    def test_substantive_tool_turn_clears_post_response_mute(self, agent):
+        """Substantive work must become visible after housekeeping muted output."""
+        self._setup_agent(agent)
+        agent.valid_tool_names = {"todo", "web_search"}
+        agent.stream_delta_callback = MagicMock()
+        todo_call = _mock_tool_call(name="todo", arguments="{}", call_id="todo1")
+        search_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search1"
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="The task is complete.",
+                finish_reason="tool_calls",
+                tool_calls=[todo_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[search_call],
+            ),
+            _mock_response(content="Actually complete now.", finish_reason="stop"),
+        ]
+        mute_states = []
+
+        def record_mute_state(*args, **kwargs):
+            mute_states.append(agent._mute_post_response)
+
+        with (
+            patch.object(agent, "_execute_tool_calls", side_effect=record_mute_state),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("finish the task")
+
+        assert result["final_response"] == "Actually complete now."
+        assert mute_states == [True, False]
+
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
