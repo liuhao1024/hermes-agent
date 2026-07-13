@@ -3912,7 +3912,7 @@ const TITLE_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
 
 const TITLE_ERROR_RE =
-  /\b(access denied|attention required|captcha|error|forbidden|just a moment|request blocked|too many requests)\b/i
+  /\b(access denied|attention required|captcha|error|forbidden|just a moment|page not found|request blocked|too many requests)\b/i
 
 const HTML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" }
 
