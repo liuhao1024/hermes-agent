@@ -186,9 +186,11 @@ class OSSBackend(Mem0Backend):
             "embedder": oss_config["embedder"],
             "version": "v1.1",
         }
+        if "reranker" in oss_config:
+            config["reranker"] = oss_config["reranker"]
+        if "custom_instructions" in oss_config:
+            config["custom_instructions"] = oss_config["custom_instructions"]
         self._memory = Memory.from_config(config)
-
-    @staticmethod
     def _recreate_collection_if_dims_changed(provider: str, vs_config: dict, expected_dims: int) -> None:
         """Delete stale vector collection when embedding dimensions change."""
         collection_name = vs_config.get("collection_name", "mem0")
