@@ -571,6 +571,45 @@ class TestWriteFilePreservesPermissions:
         assert "new content B" in content
         assert "old content" not in content
 
+    def test_write_file_preserves_owner_on_posix(self, tmp_path, monkeypatch):
+        """Existing file owner should survive an atomic write on POSIX systems."""
+        import os
+        import stat
+
+        # Skip on non-POSIX platforms (Windows)
+        if os.name != "posix":
+            return
+
+        # Mock _preserve_file_owner to return a non-None owner tuple
+        from utils import _preserve_file_owner, _restore_file_owner
+        from unittest.mock import patch
+
+        mem_file = tmp_path / "MEMORY.md"
+        mem_file.write_text("old content", encoding="utf-8")
+
+        # Get the actual owner
+        original_owner = _preserve_file_owner(mem_file)
+
+        # Mock _restore_file_owner to verify it's called with the right owner
+        restore_calls = []
+        def mock_restore(path, owner):
+            restore_calls.append((path, owner))
+            # Still call the real function to preserve actual behavior
+            _restore_file_owner(path, owner)
+
+        with patch("tools.memory_tool._restore_file_owner", side_effect=mock_restore):
+            MemoryStore._write_file(mem_file, ["new content"])
+
+        # Verify _restore_file_owner was called
+        assert len(restore_calls) == 1
+        assert restore_calls[0][1] == original_owner
+
+        # Verify the actual file owner is preserved (no regression)
+        # Note: We can't reliably chown in tests (requires root), so we
+        # verify the call pattern and that no exception was raised.
+        # The _restore_file_owner helper already tests the chown logic
+        # in utils.py's test suite.
+
 
 class TestMemoryStoreSnapshot:
     def test_snapshot_frozen_at_load(self, store):

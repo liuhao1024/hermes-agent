@@ -31,9 +31,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
-from utils import _preserve_file_mode, _restore_file_mode
+from utils import _preserve_file_mode, _restore_file_mode, _preserve_file_owner, _restore_file_owner
 from typing import Dict, Any, List, Optional
-
+from utils import atomic_replace
 from utils import atomic_replace
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -768,11 +768,14 @@ class MemoryStore:
         """
         content = ENTRY_DELIMITER.join(entries) if entries else ""
         try:
-            # Preserve existing file permissions before atomic replace.
+            # Preserve existing file permissions and owner before atomic replace.
             # tempfile.mkstemp() creates files with 0600, and os.replace()
             # inherits those restrictive permissions, silently dropping
-            # group access on shared/managed deployments.
+            # group access on shared/managed deployments. Similarly, the temp
+            # file's owner (often root in Docker/NAS setups) can replace the
+            # file's original owner, breaking permissions for the runtime user.
             original_mode = _preserve_file_mode(path)
+            original_owner = _preserve_file_owner(path)
 
             # Write to temp file in same directory (same filesystem for atomic rename)
             fd, tmp_path = tempfile.mkstemp(
@@ -784,6 +787,7 @@ class MemoryStore:
                     f.flush()
                     os.fsync(f.fileno())
                 real_path = atomic_replace(tmp_path, path)
+                _restore_file_owner(Path(real_path), original_owner)
                 _restore_file_mode(Path(real_path), original_mode)
             except BaseException:
                 # Clean up temp file on any failure
