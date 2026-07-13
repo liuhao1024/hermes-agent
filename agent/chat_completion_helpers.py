@@ -2360,10 +2360,22 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
             # Accumulate text content — fire callback only when no tool calls
             if delta and delta.content:
-                content_parts.append(delta.content)
+                # Normalize delta.content to string for providers that return
+                # content-block dicts (e.g., Mistral, NVIDIA custom endpoints)
+                # in streaming follow-up requests after tool calls.
+                _delta_content = delta.content
+                if not isinstance(_delta_content, str):
+                    if isinstance(_delta_content, list):
+                        _delta_content = "".join(
+                            (block.get("text", "") if isinstance(block, dict) else str(block))
+                            for block in _delta_content
+                        )
+                    else:
+                        _delta_content = str(_delta_content)
+                content_parts.append(_delta_content)
                 if not tool_calls_acc:
                     _fire_first_delta()
-                    agent._fire_stream_delta(delta.content)
+                    agent._fire_stream_delta(_delta_content)
                     deltas_were_sent["yes"] = True
                 # Tool calls suppress regular content streaming (avoids
                 # displaying chatty "I'll use the tool..." text alongside
@@ -2378,8 +2390,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # box is already closed (tool boundary flush).
                 elif agent.stream_delta_callback:
                     try:
-                        agent.stream_delta_callback(delta.content)
-                        agent._record_streamed_assistant_text(delta.content)
+                        agent.stream_delta_callback(_delta_content)
+                        agent._record_streamed_assistant_text(_delta_content)
                     except Exception:
                         pass
 
