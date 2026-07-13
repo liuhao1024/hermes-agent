@@ -64,7 +64,7 @@ def test_acp_edit_approval_requester_uses_config_timeout():
             timeout=approval_timeout,
         )
 
-        proposal = EditProposal(path="/tmp/test.txt", original_content="old", new_content="new")
+        proposal = EditProposal(path="/tmp/test.txt", old_text="old", new_content="new")
         result = requester(proposal)
 
         assert result is True
