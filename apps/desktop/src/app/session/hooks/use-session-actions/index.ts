@@ -215,6 +215,13 @@ export function useSessionActions({
         const uiEffort = $currentReasoningEffort.get().trim()
         const uiFast = $currentFastMode.get()
 
+        // When creating a session inside a project folder, pass the project_id
+        // so the session is properly associated with the project in projects.db.
+        // This fixes issue #63516 where sessions created under project folders
+        // weren't persisted and were lost after app restart.
+        const currentProjectScope = $projectScope.get()
+        const projectId = currentProjectScope !== ALL_PROJECTS ? currentProjectScope : undefined
+
         const created = await requestGateway<SessionCreateResponse>('session.create', {
           cols: 96,
           source: 'desktop',
@@ -222,7 +229,8 @@ export function useSessionActions({
           ...(newChatProfile ? { profile: newChatProfile } : {}),
           ...(uiModel ? { model: uiModel, ...(uiProvider ? { provider: uiProvider } : {}) } : {}),
           ...(uiEffort ? { reasoning_effort: uiEffort } : {}),
-          ...(uiFast ? { fast: true } : {})
+          ...(uiFast ? { fast: true } : {}),
+          ...(projectId ? { project_id: projectId } : {})
         })
 
         const stored = created.stored_session_id ?? null
