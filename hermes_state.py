@@ -29,6 +29,14 @@ from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
+# Strip leading machine-injected workspace_context tags from user-visible text.
+# Only removes the prefix; later user-authored mentions are preserved.
+_WORKSPACE_CONTEXT_RE = re.compile(r"<workspace_context\s[^>]*>")
+
+def _strip_leading_workspace_context(text: str) -> str:
+    """Remove a leading <workspace_context ...> tag if present at the start."""
+    return _WORKSPACE_CONTEXT_RE.sub("", text).lstrip()
+
 logger = logging.getLogger(__name__)
 
 
@@ -3484,8 +3492,10 @@ class SessionDB:
             # Build the preview from the raw substring
             raw = s.pop("_preview_raw", "").strip()
             if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
+                # Strip leading machine-injected workspace_context tags
+                clean = _strip_leading_workspace_context(raw)
+                text = clean[:60]
+                s["preview"] = text + ("..." if len(clean) > 60 else "")
             else:
                 s["preview"] = ""
             # Drop the internal ordering column so callers see a clean dict.
@@ -3627,8 +3637,10 @@ class SessionDB:
         s = dict(row)
         raw = s.pop("_preview_raw", "").strip()
         if raw:
-            text = raw[:60]
-            s["preview"] = text + ("..." if len(raw) > 60 else "")
+            # Strip leading machine-injected workspace_context tags
+            clean = _strip_leading_workspace_context(raw)
+            text = clean[:60]
+            s["preview"] = text + ("..." if len(clean) > 60 else "")
         else:
             s["preview"] = ""
         return s

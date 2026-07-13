@@ -5,12 +5,21 @@ adds latency to the user-facing reply.
 """
 
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
 from agent.auxiliary_client import call_llm
 
 logger = logging.getLogger(__name__)
+
+# Strip leading machine-injected workspace_context tags from user-visible text.
+# Only removes the prefix; later user-authored mentions are preserved.
+_WORKSPACE_CONTEXT_RE = re.compile(r"<workspace_context\s[^>]*>")
+
+def _strip_leading_workspace_context(text: str) -> str:
+    """Remove a leading <workspace_context ...> tag if present at the start."""
+    return _WORKSPACE_CONTEXT_RE.sub("", text).lstrip()
 
 # Callback signature: (task_name, exception) -> None. Used to surface
 # auxiliary failures to the user through AIAgent._emit_auxiliary_failure
@@ -67,7 +76,9 @@ def generate_title(
     of silently accumulating untitled sessions.
     """
     # Truncate long messages to keep the request small
-    user_snippet = user_message[:500] if user_message else ""
+    # Strip leading machine-injected workspace_context tags from user_message
+    user_clean = _strip_leading_workspace_context(user_message) if user_message else ""
+    user_snippet = user_clean[:500]
     assistant_snippet = assistant_response[:500] if assistant_response else ""
 
     language = _title_language()
