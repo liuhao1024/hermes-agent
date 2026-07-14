@@ -976,14 +976,56 @@ class MoAChatCompletions:
 
         if aggregator.get("provider") == "moa":
             raise RuntimeError("MoA aggregator cannot be another MoA preset")
+
+        agg_runtime = _slot_runtime(aggregator)
         agg_kwargs = dict(api_kwargs)
         agg_kwargs["messages"] = agg_messages
+        # Forward the aggregator's resolved runtime (base_url/api_key/api_mode)
+        # so the call goes to the real provider, not the virtual MoA identity.
+        agg_kwargs.update(agg_runtime)
+
         # Record the exact aggregator INPUT (incl. the injected reference
         # context) into the pending trace so a trace captures what the
         # aggregator actually saw, not a reconstruction.
         if self._pending_trace is not None:
             self._pending_trace["aggregator_input_messages"] = agg_messages
             self._pending_trace["aggregator_label"] = _slot_label(aggregator)
+
+        # ── Reasoning config propagation for MoA aggregator ───────────────
+        # The agent loop builds api_kwargs using its own provider/base_url
+        # (virtual "moa"/"moa://local" on the MoA path), so _supports_reasoning_extra_body()
+        # always returns False and reasoning_config is never propagated to extra_body.
+        # Fix: when agent.reasoning_config exists, rebuild extra_body from scratch
+        # using the resolved aggregator runtime so the reasoning gate check sees the
+        # real provider/base_url instead of the virtual MoA identity.
+        reasoning_config = api_kwargs.get("reasoning_config")
+        if reasoning_config and reasoning_config.get("reasoning_effort"):
+            # Build a minimal agent stub with the aggregator's resolved runtime
+            # so _supports_reasoning_extra_body() checks the real provider.
+            from run_agent import AIAgent
+
+            _stub_provider = agg_runtime.get("provider") or "custom"
+            _stub_base_url = agg_runtime.get("base_url") or ""
+            _stub_model = agg_runtime.get("model") or ""
+
+            _stub = AIAgent(
+                provider=_stub_provider,
+                model=_stub_model,
+                base_url=_stub_base_url,
+                # Pass minimal config to reach _base_url_lower initialization
+            )
+
+            if _stub._supports_reasoning_extra_body():
+                # Propagate reasoning_config to extra_body using the aggregator's runtime
+                agg_kwargs.setdefault("extra_body", {})
+                agg_kwargs["extra_body"]["reasoning"] = {
+                    "max_tokens": reasoning_config.get("reasoning_max_tokens"),
+                    "type": reasoning_config.get("reasoning_type"),
+                }
+                # Only include reasoning_effort if the config specifies it
+                _effort = reasoning_config.get("reasoning_effort")
+                if _effort is not None:
+                    agg_kwargs["extra_body"]["reasoning"]["effort"] = _effort
         # The aggregator is the acting model. Resolve its slot to the provider's
         # real runtime (base_url/api_key/api_mode) and call it through the same
         # request-building path any model uses — so per-model wire-format
@@ -1018,7 +1060,6 @@ class MoAChatCompletions:
             tools=agg_kwargs.get("tools"),
             extra_body=agg_kwargs.get("extra_body"),
             **stream_kwargs,
-            **_slot_runtime(aggregator),
         )
         # Non-streaming path (quiet mode / eval / subagents): the aggregator
         # output is available inline, so capture it into the pending trace now.
