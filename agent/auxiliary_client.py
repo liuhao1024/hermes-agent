@@ -2005,7 +2005,10 @@ def _try_azure_foundry(
     Returns ``(client, model)`` or ``(None, None)`` on failure.
     """
     try:
-        from hermes_cli.runtime_provider import _resolve_azure_foundry_runtime
+        from hermes_cli.runtime_provider import (
+            _resolve_azure_foundry_runtime,
+            _parse_api_mode,
+        )
         from hermes_cli.auth import AuthError
         from hermes_cli.config import load_config
     except ImportError:
@@ -2036,7 +2039,14 @@ def _try_azure_foundry(
 
     api_key = runtime.get("api_key")
     base_url = str(runtime.get("base_url", "") or "")
-    runtime_api_mode = api_mode or runtime.get("api_mode") or "chat_completions"
+    # Normalize the explicit api_mode parameter so user-facing aliases
+    # (e.g., ``responses``) map to canonical values (``codex_responses``).
+    # runtime.get("api_mode") is already normalized by the resolver.
+    if api_mode is not None:
+        normalized_api_mode = _parse_api_mode(api_mode)
+        runtime_api_mode = normalized_api_mode or runtime.get("api_mode") or "chat_completions"
+    else:
+        runtime_api_mode = runtime.get("api_mode") or "chat_completions"
 
     # Empty-string check on api_key here would be wrong for callable
     # token providers (callables are truthy and non-empty by definition).
