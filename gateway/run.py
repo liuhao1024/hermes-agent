@@ -16620,6 +16620,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # persisted session JSON on the next turn, so dropping it here is safe.
         if hasattr(agent, "_session_messages"):
             agent._session_messages = []
+        # Close the evicted agent's memory provider to prevent resource leaks.
+        # The provider will be re-created when the session resumes.
+        # This fixes #64278: without this, soft eviction leaves the old provider
+        # running (writer thread, HTTP clients, etc.) while the resumed session
+        # builds a fresh provider, accumulating leaked resources.
+        try:
+            if hasattr(agent, "shutdown_memory_provider"):
+                agent.shutdown_memory_provider()
+        except Exception:
+            pass
 
     def _enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents when cache exceeds _AGENT_CACHE_MAX_SIZE.
