@@ -1165,6 +1165,55 @@ class TelegramAdapter(BasePlatformAdapter):
             retry_kwargs.pop("direct_messages_topic_id", None)
             return await send_fn(**retry_kwargs)
 
+    async def _send_with_flood_control_retry(
+        self,
+        send_fn: Any,
+        send_kwargs: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]],
+        reply_to_message_id: Optional[int],
+        media_label: str,
+        reset_media: Optional[Any] = None,
+    ) -> Any:
+        """Send media with flood-control retry (up to 3 attempts).
+
+        Wraps _send_with_dm_topic_reply_anchor_retry and adds RetryAfter
+        handling for Telegram flood control. Mirrors the flood-control retry
+        logic used for plain text sends (see the "Telegram flood control on
+        send" retry loop in the send() method).
+        """
+        for attempt in range(3):
+            try:
+                return await self._send_with_dm_topic_reply_anchor_retry(
+                    send_fn,
+                    send_kwargs,
+                    metadata,
+                    reply_to_message_id,
+                    media_label,
+                    reset_media,
+                )
+            except Exception as send_err:
+                retry_after = getattr(send_err, "retry_after", None)
+                if retry_after is not None or "retry after" in str(send_err).lower():
+                    if attempt < 2:
+                        wait = float(retry_after) if retry_after is not None else 1.0
+                        safe_send_error = _redact_telegram_error_text(send_err)
+                        logger.warning(
+                            "[%s] Telegram flood control on %s send (attempt %d/3), retrying in %.1fs: %s",
+                            self.name,
+                            media_label,
+                            attempt + 1,
+                            wait,
+                            safe_send_error,
+                        )
+                        if reset_media is not None:
+                            reset_media()
+                        await asyncio.sleep(wait)
+                        continue
+                # Not a retryable flood-control error, or attempts exhausted
+                raise
+        # Should not reach here (exhausted attempts will raise above)
+        raise
+
     def _fallback_ips(self) -> list[str]:
         """Return validated fallback IPs from config (populated by _apply_env_overrides)."""
         configured = self.config.extra.get("fallback_ips", []) if getattr(self.config, "extra", None) else []
@@ -5864,7 +5913,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         reply_to_message_id=reply_to_id,
                         reply_to_mode=self._reply_to_mode
                     )
-                    msg = await self._send_with_dm_topic_reply_anchor_retry(
+                    msg = await self._send_with_flood_control_retry(
                         self._bot.send_voice,
                         {
                             "chat_id": normalize_telegram_chat_id(chat_id),
@@ -5890,7 +5939,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         reply_to_message_id=reply_to_id,
                         reply_to_mode=self._reply_to_mode
                     )
-                    msg = await self._send_with_dm_topic_reply_anchor_retry(
+                    msg = await self._send_with_flood_control_retry(
                         self._bot.send_audio,
                         {
                             "chat_id": normalize_telegram_chat_id(chat_id),
@@ -6029,7 +6078,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         except Exception:
                             pass
 
-                await self._send_with_dm_topic_reply_anchor_retry(
+                await self._send_with_flood_control_retry(
                     self._bot.send_media_group,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
@@ -6087,7 +6136,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_mode=self._reply_to_mode
             )
             with open(image_path, "rb") as image_file:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                msg = await self._send_with_flood_control_retry(
                     self._bot.send_photo,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
@@ -6182,12 +6231,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_mode=self._reply_to_mode
             )
 
-            with open(file_path, "rb") as f:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
+            with open(file_path, "rb") as file_obj:
+                msg = await self._send_with_flood_control_retry(
                     self._bot.send_document,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
-                        "document": f,
+                        "document": file_obj,
                         "filename": display_name,
                         "caption": caption[:1024] if caption else None,
                         "reply_to_message_id": reply_to_id,
@@ -6197,7 +6246,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     metadata,
                     reply_to_id,
                     "document",
-                    reset_media=lambda: f.seek(0),
+                    reset_media=lambda: file_obj.seek(0),
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -6233,12 +6282,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            with open(video_path, "rb") as f:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
+            with open(video_path, "rb") as file_obj:
+                msg = await self._send_with_flood_control_retry(
                     self._bot.send_video,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
-                        "video": f,
+                        "video": file_obj,
                         "caption": caption[:1024] if caption else None,
                         "reply_to_message_id": reply_to_id,
                         **thread_kwargs,
@@ -6247,7 +6296,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     metadata,
                     reply_to_id,
                     "video",
-                    reset_media=lambda: f.seek(0),
+                    reset_media=lambda: file_obj.seek(0),
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -6289,7 +6338,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            msg = await self._send_with_dm_topic_reply_anchor_retry(
+            msg = await self._send_with_flood_control_retry(
                 self._bot.send_photo,
                 {
                     "chat_id": normalize_telegram_chat_id(chat_id),
@@ -6326,7 +6375,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     reply_to_message_id=reply_to_id,
                     reply_to_mode=self._reply_to_mode
                 )
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                msg = await self._send_with_flood_control_retry(
                     self._bot.send_photo,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
@@ -6373,7 +6422,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            msg = await self._send_with_dm_topic_reply_anchor_retry(
+            msg = await self._send_with_flood_control_retry(
                 self._bot.send_animation,
                 {
                     "chat_id": normalize_telegram_chat_id(chat_id),
