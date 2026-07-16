@@ -1002,6 +1002,16 @@ def compress_context(
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
 
+        # Flush pending memory retains before the compaction boundary to avoid
+        # silently losing turns dispatched after the last successful retain but
+        # before compaction fires. Without this flush, pending turns are dropped
+        # when on_session_switch clears the Hindsight turn buffer.
+        try:
+            if agent._memory_manager:
+                agent._memory_manager.flush_pending(timeout=5.0)
+        except Exception as _fp_err:
+            logger.debug("memory flush before compaction: %s", _fp_err)
+
         # Notify memory providers of the compaction boundary so provider-cached
         # per-session state (Hindsight's _document_id, accumulated turn buffers,
         # counters) refreshes. reset=False because the logical conversation
