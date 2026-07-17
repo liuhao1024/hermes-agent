@@ -125,17 +125,17 @@ Prompt 使用点号表示法访问 webhook payload 中的嵌套字段：
 
 - `{pull_request.title}` 解析为 `payload["pull_request"]["title"]`
 - `{repository.full_name}` 解析为 `payload["repository"]["full_name"]`
-- `{__raw__}` — 特殊 token，将**整个 payload** 以缩进 JSON 格式转储（截断至 4000 个字符）。适用于监控告警或通用 webhook，agent 需要完整上下文时使用。
+- `{__raw__}` — 特殊 token，将**整个 payload** 以缩进 JSON 格式转储。裸写形式默认截断至 4000 个字符；使用 `{__raw__:N}`（例如 `{__raw__:20000}`）可为单次使用设置字符上限。
 - 缺失的键保留为字面量 `{key}` 字符串（不报错）
 - 嵌套的 dict 和 list 会被 JSON 序列化并截断至 2000 个字符
 
-可以将 `{__raw__}` 与常规模板变量混合使用：
+可以将任一 raw payload 形式与常规模板变量混合使用：
 
 ```yaml
-prompt: "PR #{pull_request.number} by {pull_request.user.login}: {__raw__}"
+prompt: "PR #{pull_request.number} by {pull_request.user.login}: {__raw__:20000}"
 ```
 
-若路由未配置 `prompt` 模板，则将整个 payload 以缩进 JSON 格式转储（截断至 4000 个字符）。
+若路由未配置 `prompt` 模板，则整个 payload 仍以缩进 JSON 格式转储，并保持 4000 个字符的默认上限。`{__raw__:N}` 覆盖只适用于已配置的模板。
 
 `deliver_extra` 的值中同样支持点号表示法模板。
 
@@ -322,7 +322,7 @@ hermes webhook subscribe antenna-matches \
 
 - `deliver_only: true` 要求 `deliver` 为真实目标。`deliver: log`（或省略 `deliver`）在启动时会被拒绝——适配器发现路由配置错误时拒绝启动。
 - 直接投递模式下 `skills` 字段被忽略（不运行 agent，无处注入 skill）。
-- 模板渲染使用与 agent 模式相同的 `{dot.notation}` 语法，包括 `{__raw__}` token。
+- 模板渲染使用与 agent 模式相同的 `{dot.notation}` 语法，包括默认上限为 4000 个字符的 `{__raw__}`，以及可设置单次上限的 `{__raw__:N}`。
 - 幂等性使用相同的 `X-GitHub-Delivery` / `X-Request-ID` 请求头——携带相同 ID 的重试返回 `status=duplicate` 且**不**重复投递。
 
 ---

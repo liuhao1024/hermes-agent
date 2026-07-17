@@ -125,17 +125,17 @@ Prompts use dot-notation to access nested fields in the webhook payload:
 
 - `{pull_request.title}` resolves to `payload["pull_request"]["title"]`
 - `{repository.full_name}` resolves to `payload["repository"]["full_name"]`
-- `{__raw__}` — special token that dumps the **entire payload** as indented JSON (truncated at 4000 characters). Useful for monitoring alerts or generic webhooks where the agent needs the full context.
+- `{__raw__}` — special token that dumps the **entire payload** as indented JSON. The bare form is truncated at 4000 characters; use `{__raw__:N}` (for example, `{__raw__:20000}`) to set a per-use character limit.
 - Missing keys are left as the literal `{key}` string (no error)
 - Nested dicts and lists are JSON-serialized and truncated at 2000 characters
 
-You can mix `{__raw__}` with regular template variables:
+You can mix either raw-payload form with regular template variables:
 
 ```yaml
-prompt: "PR #{pull_request.number} by {pull_request.user.login}: {__raw__}"
+prompt: "PR #{pull_request.number} by {pull_request.user.login}: {__raw__:20000}"
 ```
 
-If no `prompt` template is configured for a route, the entire payload is dumped as indented JSON (truncated at 4000 characters).
+If no `prompt` template is configured for a route, the entire payload is dumped as indented JSON with the unchanged 4000-character limit. The `{__raw__:N}` override applies only inside a configured template.
 
 The same dot-notation templates work in `deliver_extra` values.
 
@@ -322,7 +322,7 @@ hermes webhook subscribe antenna-matches \
 
 - `deliver_only: true` requires `deliver` to be a real target. `deliver: log` (or omitting `deliver`) is rejected at startup — the adapter refuses to start if it finds a misconfigured route.
 - The `skills` field is ignored in direct delivery mode (no agent runs, so there's nothing to inject skills into).
-- Template rendering uses the same `{dot.notation}` syntax as agent mode, including the `{__raw__}` token.
+- Template rendering uses the same `{dot.notation}` syntax as agent mode, including `{__raw__}` with its 4000-character default and `{__raw__:N}` for a per-use limit.
 - Idempotency uses the same `X-GitHub-Delivery` / `X-Request-ID` header — retries with the same ID return `status=duplicate` and do NOT re-deliver.
 
 ---
