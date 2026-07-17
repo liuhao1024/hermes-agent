@@ -730,6 +730,38 @@ class TestWebServerEndpoints:
         restored = self.client.get("/api/sessions").json()
         assert any(s["id"] == "arch-me" for s in restored["sessions"])
 
+    def test_get_sessions_total_uses_projected_tip_archive_state(self):
+        """The API page and total must agree when only a lineage root is archived."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="archived-root", source="cli")
+            db.append_message(
+                session_id="archived-root", role="user", content="root message"
+            )
+            db.end_session("archived-root", "compression")
+            db.create_session(
+                session_id="live-tip",
+                source="cli",
+                parent_session_id="archived-root",
+            )
+            db.append_message(
+                session_id="live-tip", role="user", content="continued message"
+            )
+            db._conn.execute(
+                "UPDATE sessions SET archived = 1 WHERE id = ?",
+                ("archived-root",),
+            )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        payload = self.client.get("/api/sessions?limit=1&offset=0").json()
+
+        assert [session["id"] for session in payload["sessions"]] == ["live-tip"]
+        assert payload["total"] == 1
+
     def test_patch_session_without_fields_is_400(self):
         """An existing session + empty body is a bad request, not a 404."""
         from hermes_state import SessionDB

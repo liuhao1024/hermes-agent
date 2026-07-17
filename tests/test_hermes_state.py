@@ -3596,6 +3596,7 @@ class TestCompressionChainProjection:
         # The projected row carries the tip's archived status (0), not the
         # root's (1).
         assert tip_row["archived"] == 0
+        assert db.session_count(source="cli", exclude_children=True) == 1
 
     def test_list_hides_chain_when_tip_archived(self, db):
         """When the tip is archived (and root via cascade), the entire chain
@@ -3613,6 +3614,27 @@ class TestCompressionChainProjection:
 
         assert tip_id not in ids
         assert root_id not in ids
+
+    def test_list_filters_projected_archive_before_pagination(self, db):
+        """An archived lineage must not consume a LIMIT slot before filtering."""
+        import time as _time
+
+        t0 = _time.time() - 3600
+        _, _, _, tip_id = self._build_compression_chain(db, t0)
+        db.set_session_archived(tip_id, True)
+
+        db.create_session("older-live", "cli")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (t0 - 100, "older-live"),
+        )
+        db.append_message("older-live", "user", "still visible")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(source="cli", limit=1)
+
+        assert [s["id"] for s in sessions] == ["older-live"]
+        assert db.session_count(source="cli", exclude_children=True) == 1
 
     def test_list_shows_archived_chain_with_include_archived(self, db):
         """With include_archived=True, archived compression chains are
