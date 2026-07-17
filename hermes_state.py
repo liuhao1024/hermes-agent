@@ -61,6 +61,79 @@ _COMPRESSION_CHILD_SQL = (
 _LISTABLE_CHILD_SQL = f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')})"
 
 
+def _compression_child_choice_sql(parent_id: str) -> str:
+    """Return the canonical query for choosing one compression continuation."""
+    return f"""
+        SELECT child.id
+        FROM sessions parent
+        JOIN sessions child ON child.parent_session_id = parent.id
+        WHERE parent.id = {parent_id}
+          AND parent.end_reason = 'compression'
+          AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+          AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+          AND COALESCE(child.source, '') != 'tool'
+        ORDER BY
+          CASE
+            WHEN child.end_reason = 'compression' THEN 0
+            WHEN child.ended_at IS NULL THEN 1
+            ELSE 2
+          END,
+          COALESCE(
+            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = child.id),
+            child.started_at
+          ) DESC,
+          child.started_at DESC,
+          child.id DESC
+        LIMIT 1
+    """
+
+
+def _selected_compression_tip_ctes(seed_where_sql: str) -> str:
+    """Build CTEs that resolve each surfaced root to its projected tip."""
+    child_choice_sql = _compression_child_choice_sql("lineage.cur_id")
+    return f"""
+        selected_compression_chain(root_id, cur_id, depth) AS (
+            SELECT s.id, s.id, 0
+            FROM sessions s
+            {seed_where_sql}
+            UNION ALL
+            SELECT
+                lineage.root_id,
+                ({child_choice_sql}),
+                lineage.depth + 1
+            FROM selected_compression_chain lineage
+            WHERE lineage.cur_id IS NOT NULL
+              AND lineage.depth < 100
+        ),
+        selected_compression_tips AS (
+            SELECT lineage.root_id, lineage.cur_id AS tip_id
+            FROM selected_compression_chain lineage
+            WHERE lineage.cur_id IS NOT NULL
+              AND lineage.depth = (
+                  SELECT MAX(candidate.depth)
+                  FROM selected_compression_chain candidate
+                  WHERE candidate.root_id = lineage.root_id
+                    AND candidate.cur_id IS NOT NULL
+              )
+        )
+    """
+
+
+def _projected_tip_archive_filter(root_alias: str = "s") -> str:
+    """Filter on the archive state of the row list projection will surface."""
+    return f"""
+        COALESCE(
+            (
+                SELECT tip.archived
+                FROM selected_compression_tips selected_tip
+                JOIN sessions tip ON tip.id = selected_tip.tip_id
+                WHERE selected_tip.root_id = {root_alias}.id
+            ),
+            {root_alias}.archived
+        ) = 0
+    """
+
+
 def _ephemeral_child_sql(alias: str = "s") -> str:
     """Subagent runs (cascade-delete targets), not branches or compression tips."""
     branch = _BRANCH_CHILD_SQL.format(a=alias)
@@ -2541,29 +2614,7 @@ class SessionDB:
         for _ in range(100):
             with self._lock:
                 cursor = self._conn.execute(
-                    """
-                    SELECT child.id
-                    FROM sessions parent
-                    JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.id = ?
-                      AND parent.end_reason = 'compression'
-                      AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
-                      AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
-                      AND COALESCE(child.source, '') != 'tool'
-                    ORDER BY
-                      CASE
-                        WHEN child.end_reason = 'compression' THEN 0
-                        WHEN child.ended_at IS NULL THEN 1
-                        ELSE 2
-                      END,
-                      COALESCE(
-                        (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = child.id),
-                        child.started_at
-                      ) DESC,
-                      child.started_at DESC,
-                      child.id DESC
-                    LIMIT 1
-                    """,
+                    _compression_child_choice_sql("?"),
                     (current,),
                 )
                 row = cursor.fetchone()
@@ -2679,12 +2730,11 @@ class SessionDB:
         if min_message_count > 0:
             where_clauses.append("s.message_count >= ?")
             params.append(min_message_count)
-        # When projecting compression tips, defer the archive filter to
-        # post-projection so archived compression roots can still seed the
-        # chain walk.  Without this, an archived root is filtered out at
-        # SQL level, its live (non-archived) tip never gets projected, and
-        # the entire conversation disappears from the listing.  (Issue #55588)
-        _defer_archive = (
+        # Default listings filter the archive state of the projected tip, not
+        # the root. Historical compression races can leave an archived root
+        # pointing at a live continuation, so the root must still seed the
+        # chain walk. Resolve that visibility in SQL before LIMIT/OFFSET.
+        _project_archive_visibility = (
             project_compression_tips
             and not include_children
             and not include_archived
@@ -2692,10 +2742,25 @@ class SessionDB:
         )
         if archived_only:
             where_clauses.append("s.archived = 1")
-        elif not include_archived and not _defer_archive:
+        elif not include_archived and not _project_archive_visibility:
             where_clauses.append("s.archived = 0")
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        archive_tip_ctes = ""
+        effective_where_sql = where_sql
+        if _project_archive_visibility:
+            tip_seed_where_sql = (
+                f"{where_sql} AND s.end_reason = 'compression'"
+                if where_sql
+                else "WHERE s.end_reason = 'compression'"
+            )
+            archive_tip_ctes = _selected_compression_tip_ctes(tip_seed_where_sql)
+            archive_filter = _projected_tip_archive_filter()
+            effective_where_sql = (
+                f"{where_sql} AND {archive_filter}"
+                if where_sql
+                else f"WHERE {archive_filter}"
+            )
 
         # Optional session-id filter, pushed into SQL so callers (Desktop
         # session-id search) don't have to fetch every row and filter in
@@ -2720,7 +2785,7 @@ class SessionDB:
             # races can insert the continuation row before the parent's
             # ended_at is written, while stale websocket siblings may satisfy
             # the timestamp test and hijack resume/list projection.
-            outer_where = where_sql
+            outer_where = effective_where_sql
             id_params: List[Any] = []
             if id_needle:
                 # Admit a surfaced row if its own id or any id in its forward
@@ -2740,10 +2805,15 @@ class SessionDB:
                 )
                 id_params = [like_pattern]
                 outer_where = (
-                    f"{where_sql} AND {id_clause}" if where_sql else f"WHERE {id_clause}"
+                    f"{effective_where_sql} AND {id_clause}"
+                    if effective_where_sql
+                    else f"WHERE {id_clause}"
                 )
+            archive_cte_prefix = f"{archive_tip_ctes}," if archive_tip_ctes else ""
             query = f"""
-                WITH RECURSIVE chain(root_id, cur_id) AS (
+                WITH RECURSIVE
+                {archive_cte_prefix}
+                chain(root_id, cur_id) AS (
                     SELECT s.id, s.id FROM sessions s {where_sql}
                     UNION ALL
                     SELECT c.root_id, child.id
@@ -2784,11 +2854,16 @@ class SessionDB:
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
-            # WHERE params apply twice (CTE seed + outer select); the id filter
-            # only applies to the outer select.
-            params = params + params + id_params + [limit, offset]
+            # Base WHERE params apply to the optional tip CTE seed, the activity
+            # chain seed, and the outer select. The id filter is outer-only.
+            param_copies = 3 if archive_tip_ctes else 2
+            params = params * param_copies + id_params + [limit, offset]
         else:
+            archive_cte_prefix = (
+                f"WITH RECURSIVE {archive_tip_ctes}" if archive_tip_ctes else ""
+            )
             query = f"""
+                {archive_cte_prefix}
                 SELECT s.*,
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
@@ -2802,11 +2877,12 @@ class SessionDB:
                         s.started_at
                     ) AS last_active
                 FROM sessions s
-                {where_sql}
+                {effective_where_sql}
                 ORDER BY s.started_at DESC
                 LIMIT ? OFFSET ?
             """
-            params.extend([limit, offset])
+            param_copies = 2 if archive_tip_ctes else 1
+            params = params * param_copies + [limit, offset]
         with self._lock:
             cursor = self._conn.execute(query, params)
             rows = cursor.fetchall()
@@ -2861,12 +2937,6 @@ class SessionDB:
                 merged["_lineage_root_id"] = s["id"]
                 projected.append(merged)
             sessions = projected
-
-        # Post-projection archive filter: when the archive filter was deferred
-        # to let archived roots seed the compression chain walk, remove
-        # sessions whose projected tip is archived.  (Issue #55588)
-        if _defer_archive:
-            sessions = [s for s in sessions if not s.get("archived")]
 
         return sessions
 
@@ -4454,15 +4524,43 @@ class SessionDB:
         if min_message_count > 0:
             where_clauses.append("s.message_count >= ?")
             params.append(min_message_count)
+        project_archive_visibility = (
+            exclude_children and not include_archived and not archived_only
+        )
         if archived_only:
             where_clauses.append("s.archived = 1")
-        elif not include_archived:
+        elif not include_archived and not project_archive_visibility:
             where_clauses.append("s.archived = 0")
 
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         with self._lock:
-            cursor = self._conn.execute(f"SELECT COUNT(*) FROM sessions s{where_sql}", params)
+            if project_archive_visibility:
+                tip_seed_where_sql = (
+                    f"{where_sql} AND s.end_reason = 'compression'"
+                    if where_sql
+                    else " WHERE s.end_reason = 'compression'"
+                )
+                tip_ctes = _selected_compression_tip_ctes(tip_seed_where_sql)
+                archive_filter = _projected_tip_archive_filter()
+                effective_where_sql = (
+                    f"{where_sql} AND {archive_filter}"
+                    if where_sql
+                    else f" WHERE {archive_filter}"
+                )
+                cursor = self._conn.execute(
+                    f"""
+                    WITH RECURSIVE {tip_ctes}
+                    SELECT COUNT(*)
+                    FROM sessions s
+                    {effective_where_sql}
+                    """,
+                    params + params,
+                )
+            else:
+                cursor = self._conn.execute(
+                    f"SELECT COUNT(*) FROM sessions s{where_sql}", params
+                )
             return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:
