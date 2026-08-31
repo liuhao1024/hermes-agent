@@ -13778,7 +13778,10 @@ function spawnQuickEntryWindow() {
     // of the taskbar/alt-tab list; on macOS use an NSPanel so the frameless
     // capture window never becomes the app's cmd-tab anchor.
     skipTaskbar: !IS_MAC,
-    hasShadow: true,
+    // Like the other transparent overlays (pet, HUD, wake indicator): a native
+    // shadow on a transparent window paints a faint grey rounded outline behind
+    // the card; the card's own CSS boxShadow already provides the drop shadow.
+    hasShadow: false,
     alwaysOnTop: true,
     type: IS_MAC ? 'panel' : undefined,
     hiddenInMissionControl: IS_MAC,
