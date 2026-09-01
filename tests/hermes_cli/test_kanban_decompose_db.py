@@ -88,5 +88,69 @@ def test_decompose_records_audit_comment_and_event(kanban_home):
     assert any(ev.kind == "decomposed" for ev in events)
 
 
+def _create_triage_dir(conn, workspace_path):
+    return kb.create_task(
+        conn,
+        title="code-gen idea",
+        assignee=None,
+        triage=True,
+        workspace_kind="dir",
+        workspace_path=workspace_path,
+    )
+
+
+def test_decompose_children_escape_root_dir_without_path(kanban_home):
+    """Regression for #100684: a root with kind='dir' but no path used to
+    propagate that unusable pair to every child, and resolve_workspace()
+    then hard-blocked each spawn (spawn_failed -> gave_up). Children must
+    fall back to per-task scratch instead."""
+    with kb.connect() as conn:
+        tid = _create_triage_dir(conn, workspace_path=None)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "child A", "assignee": "researcher"},
+                {"title": "child B", "assignee": "engineer", "parents": [0]},
+            ],
+            author="decomposer",
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        for cid in child_ids:
+            child = kb.get_task(conn, cid)
+            assert child.workspace_kind == "scratch"
+            assert not child.workspace_path
+            # The dispatch-time contract: resolution must succeed rather
+            # than raise "has workspace_kind=dir but no workspace_path".
+            resolved = kb.resolve_workspace(child)
+            assert resolved == kb.workspaces_root() / child.id
+            assert resolved.is_dir()
+
+
+def test_decompose_children_inherit_root_dir_with_path(kanban_home):
+    """The fallback must not weaken normal inheritance: a root dir with a
+    valid absolute path still passes kind and path through to children."""
+    explicit = kanban_home / "projects" / "feature-x"
+    with kb.connect() as conn:
+        tid = _create_triage_dir(conn, workspace_path=str(explicit))
+        child_ids = kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="orchestrator",
+            children=[{"title": "child A", "assignee": "researcher"}],
+            author="decomposer",
+        )
+    assert child_ids is not None
+
+    with kb.connect() as conn:
+        child = kb.get_task(conn, child_ids[0])
+        assert child.workspace_kind == "dir"
+        assert child.workspace_path == str(explicit)
+        assert kb.resolve_workspace(child) == explicit
+
+
 
 

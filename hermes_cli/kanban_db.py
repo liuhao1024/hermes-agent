@@ -7427,6 +7427,16 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
+            # A 'dir' workspace is only meaningful with an explicit path —
+            # resolve_workspace() raises on kind='dir' with no path, so
+            # propagating that combination (inherited from a root that was
+            # never dispatched, or an explicit child override) hard-blocks
+            # every spawn after the failure limit. Fall back to per-task
+            # scratch, which materializes workspaces_root/<task-id> on
+            # dispatch, instead of persisting the unusable pair.
+            if child_ws_kind == "dir" and not child_ws_path:
+                child_ws_kind = "scratch"
+                child_ws_path = None
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
