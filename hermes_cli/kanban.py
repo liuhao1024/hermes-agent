@@ -606,7 +606,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_comment.add_argument("task_id")
     p_comment.add_argument("text", nargs="+", help="Comment body")
     p_comment.add_argument("--author", default=None,
-                           help="Author name (default: $HERMES_PROFILE or 'user')")
+                           help="Author name (default: $HERMES_PROFILE or 'user'); "
+                                "reserved identities (registered profiles, "
+                                "'dashboard', 'user') are rejected")
     p_comment.add_argument("--max-len", type=int, default=None,
                            help="Trim the stored comment body to this many characters")
 
@@ -1216,6 +1218,27 @@ def _profile_author() -> str:
         return get_active_profile_name() or "user"
     except Exception:
         return "user"
+
+
+def _reserved_comment_authors() -> frozenset[str]:
+    """Author identities that only their owning surface may write.
+
+    Registered profile names are human identities; ``dashboard`` and ``user``
+    are the UI / interactive-CLI default labels. The agent tool path already
+    derives its comment author from the worker's runtime identity because a
+    caller-supplied override let a worker forge authoritative-looking names
+    (see the comment in ``tools/kanban_tools.py``); this extends the same
+    anti-forgery rule to an explicit ``--author`` on the CLI, where any
+    process with shell access could otherwise mint a comment that reads as
+    coming from a human user or the desktop UI.
+    """
+    names = {"dashboard", "user"}
+    try:
+        from hermes_cli.profiles import list_profile_names
+        names.update(str(n).strip().casefold() for n in list_profile_names())
+    except Exception:
+        pass
+    return frozenset(names)
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
@@ -2215,6 +2238,17 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             suffix = f"\n\n[trimmed to {args.max_len} chars by --max-len]"
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
+    if args.author is not None:
+        claimed = args.author.strip().casefold()
+        if claimed and claimed in _reserved_comment_authors():
+            print(
+                f"kanban: --author '{args.author.strip()}' is a reserved "
+                "identity (registered profile or UI identity); comments under "
+                "it can only be written by that surface. Use a bot/automation "
+                "label instead.",
+                file=sys.stderr,
+            )
+            return 2
     with kb.connect_closing() as conn:
         kb.add_comment(conn, args.task_id, author, body)
     print(f"Comment added to {args.task_id}")

@@ -179,3 +179,70 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# comment --author anti-forgery (issue #102693)
+# ---------------------------------------------------------------------------
+
+def _comment_probe_task() -> str:
+    with kb.connect_closing() as conn:
+        return kb.create_task(conn, title="author forging probe")
+
+
+def _comment_authors_on(tid: str) -> list:
+    with kb.connect_closing() as conn:
+        return [c.author for c in kb.list_comments_after(conn, tid, after_id=0)]
+
+
+def test_comment_rejects_author_claiming_registered_profile(kanban_home, monkeypatch):
+    """An explicit --author may not claim a registered profile's identity.
+
+    Mirrors the agent tool path, which ignores caller-supplied authors so a
+    worker cannot forge authoritative-looking names (#102693).
+    """
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(
+        profiles_mod, "list_profile_names", lambda: ["default", "bob"]
+    )
+    tid = _comment_probe_task()
+
+    out = kc.run_slash(f"comment {tid} approved, proceed --author bob")
+
+    assert "reserved identity" in out
+    assert _comment_authors_on(tid) == []  # fail-closed: nothing was written
+
+
+def test_comment_rejects_reserved_ui_and_case_folded_authors(kanban_home, monkeypatch):
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(
+        profiles_mod, "list_profile_names", lambda: ["default", "bob"]
+    )
+    tid = _comment_probe_task()
+
+    assert "reserved identity" in kc.run_slash(
+        f"comment {tid} from the UI --author dashboard"
+    )
+    assert "reserved identity" in kc.run_slash(
+        f"comment {tid} case variant --author Bob"
+    )
+    assert "reserved identity" in kc.run_slash(
+        f"comment {tid} cli default label --author user"
+    )
+    assert _comment_authors_on(tid) == []
+
+
+def test_comment_allows_bot_label_and_default_author(kanban_home, monkeypatch):
+    """Scripted bot/automation labels keep working; no-flag default is unchanged."""
+    monkeypatch.delenv("HERMES_PROFILE_NAME", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    tid = _comment_probe_task()
+
+    out = kc.run_slash(f"comment {tid} deploy finished --author deploy-bot")
+    assert "Comment added" in out
+    assert _comment_authors_on(tid) == ["deploy-bot"]
+
+    out = kc.run_slash(f"comment {tid} second note")
+    assert "Comment added" in out
+    authors = _comment_authors_on(tid)
+    assert len(authors) == 2 and authors[1]
+
+
