@@ -1235,6 +1235,10 @@ DEFAULT_CONFIG = {
         # Max parallel children per batch AND max concurrent background delegation units; async
         # dispatches beyond it run synchronously. Floor 1, no ceiling.
         "max_concurrent_children": 10,
+        # Each delegated child gets its own git worktree off the parent's HEAD so parallel
+        # children never contend for one working copy. Git repos + local backend only;
+        # otherwise silently ignored.
+        "worktree_isolation": False,
         # Orchestrator role controls. Depth floored at 1, no ceiling; each level multiplies cost.
         "max_spawn_depth": 1,  # 1 = flat, 2 = orchestrator→leaf, 3+ = deeper
         "orchestrator_enabled": True,  # kill switch for role="orchestrator"
