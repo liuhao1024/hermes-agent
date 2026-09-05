@@ -457,6 +457,7 @@ class SessionDB(
         # _fts_cjk_loaded: tokenizer on the writer connection; _fts_cjk_available: messages_fts_cjk
         # is queryable AND not marked stale.
         self._fts_cjk_loaded = self._fts_cjk_available = self._fts_unavailable_warned = False
+        self._fts_orphan_repair_needed = False
         self._conn = None
         # Async token accounting; distinct from self._lock so enqueue/flush never contends with writes.
         self._token_queue: deque = deque()

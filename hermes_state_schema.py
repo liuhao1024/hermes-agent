@@ -1043,7 +1043,12 @@ class SessionSchemaMixin:
                 # Trigram is optional; without it CJK search falls back to LIKE.
                 trigram_enabled = self._ensure_fts_schema(cursor, "messages_fts_trigram", trigram_sql)
                 self._trigram_available = trigram_enabled
-                if base_triggers_missing or (trigram_enabled and trigram_triggers_missing):
+                if (
+                    base_triggers_missing
+                    or (trigram_enabled and trigram_triggers_missing)
+                    # An orphan-repaired index starts empty: backfill from messages.
+                    or self._fts_orphan_repair_needed
+                ):
                     self._run_admitted_startup_rebuild(
                         cursor,
                         lambda: self._rebuild_fts_indexes(cursor, legacy=legacy_fts, include_trigram=trigram_enabled),

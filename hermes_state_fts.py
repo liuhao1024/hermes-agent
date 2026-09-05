@@ -122,6 +122,55 @@ def load_fts5_cjk_extension(conn: sqlite3.Connection) -> bool:
         return False
 
 
+# FTS5 shadow tables the virtual-table engine creates internally. A ``.recover``
+# restore re-materializes them as ordinary tables without the virtual table
+# entry, so every later CREATE VIRTUAL TABLE fails with
+# "shadow table ... already exists" until the orphans are dropped.
+_FTS5_SHADOW_TABLE_SUFFIXES = ("content", "data", "docsize", "idx", "config")
+
+
+def _fts5_vtable_exists(conn: sqlite3.Connection, base_name: str) -> bool:
+    """True when the named FTS5 virtual table itself is registered. SQLite
+    records virtual tables in sqlite_master with type='table' (not 'virtual'),
+    so the CREATE VIRTUAL TABLE prefix is what distinguishes a live vtable
+    from an ordinary table of the same name."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = ? AND type = 'table' "
+        "AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+        (base_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _repair_orphan_fts_shadow_tables(
+    conn: sqlite3.Connection, base_name: str
+) -> bool:
+    """Drop FTS5 shadow tables whose virtual table is gone from sqlite_master.
+
+    Both vtables are external-content over ``messages``/its view, so the
+    shadows are pure derived index state: dropping them loses nothing and the
+    repaired index is rebuilt from the canonical table. Returns True when any
+    orphan was found and dropped."""
+    expected = {f"{base_name}_{suffix}" for suffix in _FTS5_SHADOW_TABLE_SUFFIXES}
+    placeholders = ",".join("?" for _ in expected)
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            f"AND name IN ({placeholders})",
+            sorted(expected),
+        ).fetchall()
+    }
+    if not existing:
+        return False
+    if _fts5_vtable_exists(conn, base_name):
+        # The virtual table is live: these shadows belong to it.
+        return False
+    for tbl in sorted(existing):
+        conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+    return True
+
+
 class SessionFtsSetupMixin:
     """FTS table/trigger lifecycle shared by schema init, optimize and the write path."""
 
@@ -239,6 +288,12 @@ class SessionFtsSetupMixin:
             self._fts_cjk_available = False
             return
         try:
+            # A .recover restore may also orphan these shadows; the helper is a
+            # no-op when the vtable is live, and the backfill markers below
+            # make a recreated index consistent again.
+            _repair_orphan_fts_shadow_tables(
+                getattr(cursor, "connection", cursor), "messages_fts_cjk"
+            )
             cursor.executescript(FTS_CJK_TABLE_SQL)
             if not cjk_present:
                 # An old stale breadcrumb refers to a table that no longer exists.
@@ -283,11 +338,25 @@ class SessionFtsSetupMixin:
         status = self._fts_table_probe(cursor, table_name)
         if status is None:
             return False
+        # Callers pass either a cursor or (conn-as-cursor) the connection itself.
+        conn = getattr(cursor, "connection", cursor)
+        if status is False and _repair_orphan_fts_shadow_tables(conn, table_name):
+            # A .recover restore left the shadow tables behind without the
+            # vtable: drop them so the DDL below can create the index.
+            self._note_fts_shadow_repair(table_name)
         try:
             # Run even when the table exists: recreates triggers a no-FTS5 runtime dropped.
             cursor.executescript(ddl)
             return True
         except sqlite3.OperationalError as exc:
+            err_lower = str(exc).lower()
+            if "shadow table" in err_lower and "already exists" in err_lower:
+                # Orphans the proactive check could not see (e.g. a race with a
+                # concurrent open): repair once, then retry the DDL once.
+                if _repair_orphan_fts_shadow_tables(conn, table_name):
+                    self._note_fts_shadow_repair(table_name)
+                    cursor.executescript(ddl)
+                    return True
             if not self._is_fts5_unavailable_error(exc):
                 raise
             # A missing tokenizer disables only that table; the base FTS5 table is fine.
@@ -296,6 +365,14 @@ class SessionFtsSetupMixin:
             else:
                 self._warn_fts5_unavailable(exc)
             return False
+
+    def _note_fts_shadow_repair(self, table_name: str) -> None:
+        logger.warning(
+            "Dropped orphan FTS5 shadow tables for %s; the index is recreated "
+            "from the canonical messages table on this open",
+            table_name,
+        )
+        self._fts_orphan_repair_needed = True
 
     @staticmethod
     def _is_fts_write_corruption_error(exc: sqlite3.DatabaseError) -> bool:

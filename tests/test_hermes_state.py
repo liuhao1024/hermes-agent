@@ -5852,3 +5852,96 @@ class TestFts5SanitizerCharacterClass:
         # text; keep % intact there (pre-existing contract).
         sanitized = self._sanitize("完成50%")
         assert "%" in sanitized
+
+
+def test_orphan_fts_shadow_tables_are_repaired_on_open(tmp_path):
+    """Orphan FTS5 shadow tables (vtable gone from sqlite_master, shadows left
+    behind by a ``.recover`` restore) are dropped on open so the CREATE can
+    succeed again and the index is rebuilt from canonical messages. Regression
+    test for #56815 / #103840."""
+    db_path = tmp_path / "state.db"
+
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("s1", "cli")
+        db.append_message("s1", role="user", content="hello world")
+        assert db.search_messages("hello") != []
+    finally:
+        db.close()
+
+    # Simulate the .recover aftermath: remove the vtable entry, keep shadows.
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute(
+        "DELETE FROM sqlite_master WHERE name = 'messages_fts' AND type = 'table'"
+    )
+    conn.execute("PRAGMA writable_schema = OFF")
+    conn.commit()
+    orphans = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts_%'"
+        )
+    ]
+    assert orphans, "shadow tables should survive the vtable removal"
+    assert (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'messages_fts' AND type = 'table'"
+        ).fetchone()
+        is None
+    )
+    conn.close()
+
+    db2 = SessionDB(db_path=db_path)
+    try:
+        assert db2._fts_enabled is True
+        # The repaired index is rebuilt from the canonical messages table.
+        assert db2.search_messages("hello") != []
+    finally:
+        db2.close()
+
+
+def test_repair_orphan_fts_shadow_tables_noop_on_healthy_vtable(tmp_path):
+    """A healthy install must stay untouched: the helper never classifies the
+    shadows of a live vtable as orphaned (sqlite_master records vtables with
+    type='table', matched via their CREATE VIRTUAL TABLE SQL)."""
+    from hermes_state_fts import (
+        _fts5_vtable_exists,
+        _repair_orphan_fts_shadow_tables,
+    )
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", "cli")
+        db.append_message("s1", role="user", content="hello world")
+        assert db.search_messages("hello") != []
+        assert _fts5_vtable_exists(db._conn, "messages_fts") is True
+        assert _repair_orphan_fts_shadow_tables(db._conn, "messages_fts") is False
+        # The untouched index still serves search.
+        assert db.search_messages("hello") != []
+    finally:
+        db.close()
+
+
+def test_repair_orphan_fts_shadow_tables_proactive_detection(tmp_path):
+    """The helper itself detects and drops orphans; a second call is a no-op."""
+    from hermes_state_fts import _repair_orphan_fts_shadow_tables
+
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("s1", "cli")
+    finally:
+        db.close()
+
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute(
+        "DELETE FROM sqlite_master WHERE name = 'messages_fts' AND type = 'table'"
+    )
+    conn.execute("PRAGMA writable_schema = OFF")
+    conn.commit()
+
+    assert _repair_orphan_fts_shadow_tables(conn, "messages_fts") is True
+    assert _repair_orphan_fts_shadow_tables(conn, "messages_fts") is False
+    conn.close()
