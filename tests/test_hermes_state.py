@@ -5945,3 +5945,61 @@ def test_repair_orphan_fts_shadow_tables_proactive_detection(tmp_path):
     assert _repair_orphan_fts_shadow_tables(conn, "messages_fts") is True
     assert _repair_orphan_fts_shadow_tables(conn, "messages_fts") is False
     conn.close()
+
+
+def test_orphan_base_family_repair_preserves_healthy_trigram(tmp_path):
+    """A ``.recover`` half-failure may orphan only the base ``messages_fts``
+    family while ``messages_fts_trigram`` stays healthy. The base-family repair
+    matches shadow tables by exact ``<family>_<suffix>`` names, so it must not
+    touch the trigram family's tables, and the family stays queryable after the
+    open-time repair. Field-report scenario from #103840."""
+    db_path = tmp_path / "state.db"
+
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("s1", "cli")
+        db.append_message("s1", role="user", content="orphanbasetrigram 大别山项目")
+        assert [m["session_id"] for m in db.search_messages("大别山")] == ["s1"]
+    finally:
+        db.close()
+
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    trigram_rows_before = {
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT rowid, name FROM sqlite_master "
+            "WHERE type = 'table' AND name LIKE 'messages_fts_trigram%'"
+        )
+    }
+    assert trigram_rows_before, "healthy trigram family should exist before repair"
+    # Orphan only the base family: drop its vtable entry, keep the shadows.
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute(
+        "DELETE FROM sqlite_master WHERE name = 'messages_fts' AND type = 'table'"
+    )
+    conn.execute("PRAGMA writable_schema = OFF")
+    conn.commit()
+    conn.close()
+
+    db2 = SessionDB(db_path=db_path)
+    try:
+        # The base index is repaired and rebuilt from canonical messages.
+        assert db2._fts_enabled is True
+        assert (
+            [m["session_id"] for m in db2.search_messages("orphanbasetrigram")]
+            == ["s1"]
+        )
+        # The healthy trigram family survived untouched: same sqlite_master
+        # rows (rowid included), not dropped and recreated by the repair.
+        assert db2._trigram_available is True
+        trigram_rows_after = {
+            (row[0], row[1])
+            for row in db2._conn.execute(
+                "SELECT rowid, name FROM sqlite_master "
+                "WHERE type = 'table' AND name LIKE 'messages_fts_trigram%'"
+            )
+        }
+        assert trigram_rows_after == trigram_rows_before
+        assert [m["session_id"] for m in db2.search_messages("大别山")] == ["s1"]
+    finally:
+        db2.close()
