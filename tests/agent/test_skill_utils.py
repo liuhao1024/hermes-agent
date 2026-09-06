@@ -198,6 +198,54 @@ def test_iter_skill_index_files_keeps_support_named_categories(tmp_path):
     assert is_excluded_skill_path(scripts_skill / "SKILL.md") is False
 
 
+@pytest.mark.require_symlinks
+def test_iter_skill_index_files_self_referential_symlink_no_duplicates(tmp_path):
+    """A self-referential symlink inside a skill dir yields one entry (#104316).
+
+    ``ln -sf`` against an existing symlink-to-directory creates ``demo/demo ->
+    demo``; without loop protection every descent re-emits the same SKILL.md
+    under a longer path, quadrupling the ``<available_skills>`` block.
+    """
+    demo = tmp_path / "creative" / "demo"
+    demo.mkdir(parents=True)
+    (demo / "SKILL.md").write_text("---\nname: demo\n---\n", encoding="utf-8")
+    (demo / "demo").symlink_to(demo)
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [demo / "SKILL.md"]
+
+
+@pytest.mark.require_symlinks
+def test_iter_skill_index_files_indirect_symlink_loop_terminates(tmp_path):
+    """An indirect A->B->A symlink loop terminates with each real skill listed once."""
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    (alpha / "SKILL.md").write_text("---\nname: alpha\n---\n", encoding="utf-8")
+    beta = tmp_path / "beta"
+    beta.mkdir()
+    (beta / "SKILL.md").write_text("---\nname: beta\n---\n", encoding="utf-8")
+    (alpha / "to-beta").symlink_to(beta)
+    (beta / "to-alpha").symlink_to(alpha)
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [alpha / "SKILL.md", beta / "SKILL.md"]
+
+
+@pytest.mark.require_symlinks
+def test_iter_skill_index_files_symlink_alias_of_real_dir_deduped(tmp_path):
+    """Two names resolving to the same real dir yield one entry, not two."""
+    real = tmp_path / "creative" / "demo"
+    real.mkdir(parents=True)
+    (real / "SKILL.md").write_text("---\nname: demo\n---\n", encoding="utf-8")
+    (tmp_path / "creative" / "alias").symlink_to(real)
+
+    found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
+
+    assert found == [real / "SKILL.md"]
+
+
 def test_skill_support_path_uses_explicit_discovery_root_not_cwd(tmp_path, monkeypatch):
     discovery_root = tmp_path / "site-packages" / "skills"
     umbrella = discovery_root / "category" / "umbrella"

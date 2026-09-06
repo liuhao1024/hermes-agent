@@ -737,11 +737,15 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     """Walk skills_dir yielding sorted paths matching *filename*; prunes
     EXCLUDED_SKILL_DIRS and support dirs of skill roots. Org mirrors are
     TOKEN-GATED: only the active org's subdir is walked, so leaving an org
-    stops its skills resolving without manual cleanup."""
+    stops its skills resolving without manual cleanup. Symlinked dirs are
+    followed, but a dir whose resolved real path was already visited is
+    pruned, so symlink loops (self-referential or indirect) and two names
+    aliasing the same dir can't duplicate catalogue entries (#104316)."""
     skills_dir_str = str(skills_dir)
     active_org = read_active_org_id(skills_dir)
     org_root = os.path.join(skills_dir_str, ORG_MIRROR_DIR_NAME)
     matches: list[str] = []
+    visited_real_dirs = {os.path.realpath(skills_dir_str)}
     for root, dirs, files in os.walk(skills_dir_str, followlinks=True):
         has_skill_md = "SKILL.md" in files
         if root == skills_dir_str and ORG_MIRROR_DIR_NAME in dirs and active_org is None:
@@ -749,6 +753,14 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
         elif root == org_root:
             dirs[:] = [d for d in dirs if d == active_org]
         dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS and not (has_skill_md and d in SKILL_SUPPORT_DIRS)]
+        first_seen: list[str] = []
+        for d in dirs:
+            real = os.path.realpath(os.path.join(root, d))
+            if real in visited_real_dirs:
+                continue
+            visited_real_dirs.add(real)
+            first_seen.append(d)
+        dirs[:] = first_seen
         if filename in files:
             matches.append(os.path.join(root, filename))
     yield from map(Path, sorted(matches))
