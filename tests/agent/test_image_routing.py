@@ -665,3 +665,35 @@ class TestProbeApiKeyForwarding:
         ) as detect:
             _lookup_supports_vision("custom", "llava", {"model": {"api_key": key}})
         assert detect.call_args.kwargs.get("api_key") == key
+
+    def test_resolve_inference_api_key_mints_runtime_token_source(self):
+        """A ``key_cmd`` provider's runtime api_key is a CommandTokenSource callable;
+        probes must receive the minted token, not the object repr (#104460)."""
+        from agent.auxiliary_client import clear_runtime_main, set_runtime_main
+        from agent.image_routing import _resolve_inference_api_key
+
+        def mint() -> str:
+            return "minted-probe-token"
+
+        set_runtime_main("custom", "some-model", api_key=mint)
+        try:
+            resolved = _resolve_inference_api_key({"model": {}}, "custom")
+        finally:
+            clear_runtime_main()
+        assert resolved == "minted-probe-token"
+
+    def test_resolve_inference_api_key_runtime_mint_failure_is_empty(self):
+        """A minting failure downgrades to no credential — the probe still runs
+        (unsigned) instead of sending the token source's repr (#104460)."""
+        from agent.auxiliary_client import clear_runtime_main, set_runtime_main
+        from agent.image_routing import _resolve_inference_api_key
+
+        def broken_mint() -> str:
+            raise RuntimeError("key_cmd failed")
+
+        set_runtime_main("custom", "some-model", api_key=broken_mint)
+        try:
+            resolved = _resolve_inference_api_key({"model": {}}, "custom")
+        finally:
+            clear_runtime_main()
+        assert resolved == ""

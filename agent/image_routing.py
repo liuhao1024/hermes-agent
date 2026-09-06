@@ -104,7 +104,15 @@ def _runtime_main(key: str) -> str:
     try:
         from agent.auxiliary_client import _runtime_main_value
 
-        return _clean_str(_runtime_main_value(key))
+        value = _runtime_main_value(key)
+        if callable(value):
+            # ``key_cmd`` credentials ride the runtime as a CommandTokenSource callable
+            # (set_runtime_main keeps them for the wire clients, which mint per request).
+            # Resolve it here so probes sign with the real token instead of the object
+            # repr (#104460); a failed mint downgrades to no credential, as probes are
+            # best-effort anyway.
+            value = value()
+        return _clean_str(value)
     except Exception:
         return ""
 
