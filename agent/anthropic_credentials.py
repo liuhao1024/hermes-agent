@@ -1,8 +1,11 @@
 """Anthropic credential sources, OAuth flows, and token resolution.
 
 ``resolve_anthropic_token()`` order: ``ANTHROPIC_TOKEN`` / ``CLAUDE_CODE_OAUTH_TOKEN``,
-``ANTHROPIC_API_KEY``, ``~/.claude/.credentials.json`` / macOS Keychain, then the
-``auth.json`` credential pool. ``~/.hermes/.anthropic_oauth.json`` (Hermes PKCE) and
+``ANTHROPIC_API_KEY``, the ``auth.json`` credential pool (Hermes-owned grants only —
+the borrowed ``claude_code`` row is skipped), then ``~/.claude/.credentials.json`` /
+macOS Keychain as the borrowed fallback. Refreshing that shared file spends Claude
+Code's single-use refresh rotation, so a Hermes-owned grant must always win first
+(#104622). ``~/.hermes/.anthropic_oauth.json`` (Hermes PKCE) and
 the Claude Code file are *singletons*: ``credential_pool._seed_from_singletons()``
 re-reads them on every ``load_pool()``, so a failed write here is a failed refresh
 (``CredentialPersistError``), not a cache miss.
@@ -424,10 +427,15 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[s
     return None
 
 
-def _resolve_anthropic_pool_token() -> Optional[str]:
+def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[str]:
     """First available Anthropic OAuth token from credential_pool, read-only: enumerates with ``clear_expired=False,
     refresh=False`` (never ``select()``) so diagnostic call sites (account_usage, ``hermes models``) never mutate
-    auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery."""
+    auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery.
+
+    *skip_borrowed* also skips the ``claude_code`` row: it is a live mirror of
+    ``~/.claude/.credentials.json`` re-seeded on every ``load_pool()``, so leasing it
+    would still borrow (and refresh, i.e. spend) Claude Code's login instead of a
+    Hermes-owned grant."""
     try:
         from agent.credential_pool import AUTH_TYPE_OAUTH, load_pool
         entries, _pending = load_pool("anthropic")._available_entries(clear_expired=False, refresh=False)
@@ -438,6 +446,8 @@ def _resolve_anthropic_pool_token() -> Optional[str]:
         # access_token may be an explicit null on a persisted entry; None.strip() would crash the resolver.
         token = (getattr(entry, "access_token", None) or "").strip()
         if getattr(entry, "auth_type", None) != AUTH_TYPE_OAUTH or not token:
+            continue
+        if skip_borrowed and getattr(entry, "source", None) == "claude_code":
             continue
         # load_pool() re-seeds rows from the singleton files, so a spent-but-uncommitted rotation
         # (possibly from another process) looks healthy here.
@@ -461,7 +471,11 @@ def resolve_anthropic_token() -> Optional[str]:
     api_key = _first_env("ANTHROPIC_API_KEY")  # an explicit API key must not be shadowed by discovered OAuth creds
     if api_key:
         return api_key
-    return _resolve_claude_code_token_from_credentials(_read_creds()) or _resolve_anthropic_pool_token()
+    # Hermes-owned pool grants first: refreshing the borrowed Claude Code login rewrites
+    # the shared ~/.claude/.credentials.json and spends its single-use refresh token,
+    # logging Claude Code out (#104622). The borrowed login stays as the fallback for
+    # setups that never registered their own grant.
+    return _resolve_anthropic_pool_token(skip_borrowed=True) or _resolve_claude_code_token_from_credentials(_read_creds())
 
 
 def run_oauth_setup_token() -> Optional[str]:
