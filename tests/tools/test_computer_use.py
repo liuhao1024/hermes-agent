@@ -1658,6 +1658,25 @@ class TestStickyTargetSelector:
         assert backend._last_app == "国际象棋"
         assert backend._last_app_selector == ""
 
+    def test_frontmost_capture_on_reused_backend_drops_stale_selector(self):
+        # Sticky app exists, then an unqualified capture resolves to a *different* frontmost app:
+        # the retained selector would keep vouching for the old app and let input(app=<old
+        # selector>) pass the guard while keystrokes go to the new frontmost target.
+        windows = [
+            {"app_name": "Safari", "pid": 300, "window_id": 3,
+             "is_on_screen": True, "title": "News", "z_index": 5},
+            *self._WINDOWS,
+        ]
+        backend = _make_cua_backend_with_windows_and_apps(windows, self._APPS)
+
+        with patch("tools.computer_use.cua_backend.sys.platform", "linux"):
+            backend.capture(mode="ax", app="com.apple.Chess")
+            assert backend._last_app_selector == "com.apple.Chess"
+            res = backend.capture(mode="ax")
+
+        assert res.app == "Safari"
+        assert backend._last_app_selector == ""
+
     def test_clear_active_target_forgets_selector(self):
         from tools.computer_use.cua_backend import CuaDriverBackend
 

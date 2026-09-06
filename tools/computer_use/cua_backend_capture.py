@@ -298,6 +298,11 @@ class _CaptureMixin:
         if app or not self._last_app:
             self._last_app = app_name or app or ""
             self._last_app_selector = (app or "").strip()
+        else:
+            # Frontmost capture retargets to whatever is now frontmost, so the sticky selector no longer
+            # vouches for the active target: keeping it would let input(app=<old selector>) pass the guard
+            # while keystrokes go to the new frontmost app (#104170).
+            self._last_app_selector = ""
         png_b64, image_mime_type, elements, window_title = (
             self._capture_vision() if mode == "vision" else self._capture_window_state())
         png_bytes_len, width, height = _png_metrics(png_b64, 0, 0) if png_b64 else (0, 0, 0)
