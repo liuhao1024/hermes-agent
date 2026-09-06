@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -2373,9 +2374,12 @@ def run_job(
         # No audit row when we failed before the agent existed; the audit write must never raise.
         if _audit is not None:
             _audit.write({}, error_msg)
+        # The output doc carries the traceback (the one-line error_msg stays the contract for
+        # last_error/delivery summarizers); without it a bare "Connection error." says nothing
+        # about which layer failed (#104538).
         output = (
             _run_doc_header(job, f"{job_name} (FAILED)", job_id, prompt)
-            + f"## Error\n\n```\n{error_msg}\n```\n"
+            + f"## Error\n\n```\n{error_msg}\n\n{traceback.format_exc()}\n```\n"
         )
         return False, output, "", error_msg
 

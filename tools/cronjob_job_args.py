@@ -366,6 +366,9 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "last_delivery_error": job.get("last_delivery_error"),
         "last_delivery_unverified": job.get("last_delivery_unverified"),
         "last_fire_error": job.get("last_fire_error"),
+        # The run-side counterpart of last_delivery_error: without it `cronjob(action='list')`
+        # shows last_status="error" with every error field null (#104538).
+        "last_error": job.get("last_error"),
         "enabled": job.get("enabled", True),
         # Derive from enabled so half-paused records never render as paused.
         "state": effective_job_state(job),
