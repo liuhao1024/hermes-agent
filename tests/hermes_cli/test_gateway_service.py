@@ -221,6 +221,19 @@ class TestGeneratedSystemdUnits:
         )
         return f"TimeoutStopSec={timeout}"
 
+    def test_planned_restart_exit_status_counts_as_success(self):
+        """#104251: exit 75 is the *planned* restart signal, so the unit must
+        classify it as success — otherwise every `hermes update` / gateway
+        restart lands the unit in systemd's failed state and fires OnFailure=
+        alerts."""
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        assert (
+            f"SuccessExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
+        )
+        assert (
+            f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
+        )
+
     def test_timeout_stop_sec_covers_default_cron_drain_floor(self, monkeypatch):
         """#94759: default restart_drain_timeout=0 still leaves a 30s cron
         floor plus cleanup reserve. The old max(60, drain+30)=60 unit
