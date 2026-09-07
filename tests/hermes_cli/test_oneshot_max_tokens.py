@@ -43,6 +43,23 @@ class TestResolveMaxTokens:
         cfg = {"model": {"max_tokens": 9999}}
         assert _resolve_max_tokens(cfg, {"max_output_tokens": 1111}) == 1111
 
+    def test_non_positive_env_falls_through_to_runtime(self, monkeypatch):
+        # A parseable but non-positive HERMES_MAX_TOKENS is treated as unset at that level
+        # (a 0 cap would request an empty or erroring completion); like the unparseable
+        # case above, the config key stays skipped and the provider entry applies.
+        for raw in ("0", "-5"):
+            _no_env(monkeypatch)
+            monkeypatch.setenv("HERMES_MAX_TOKENS", raw)
+            cfg = {"model": {"max_tokens": 9999}}
+            assert _resolve_max_tokens(cfg, {"max_output_tokens": 1111}) == 1111
+
+    def test_non_positive_config_ignored_runtime_fills(self, monkeypatch):
+        # Same clamp at the config level: max_tokens: 0 is not a usable cap, so the
+        # provider entry's max_output_tokens applies.
+        _no_env(monkeypatch)
+        cfg = {"model": {"max_tokens": 0}}
+        assert _resolve_max_tokens(cfg, {"max_output_tokens": 1111}) == 1111
+
     def test_non_dict_model_section_ignored(self, monkeypatch):
         _no_env(monkeypatch)
         cfg = {"model": "custom-name"}

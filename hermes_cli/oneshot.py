@@ -344,16 +344,19 @@ def _resolve_max_tokens(cfg: dict, runtime: dict) -> Optional[int]:
     """Output cap for the one-shot AIAgent: ``HERMES_MAX_TOKENS`` > ``model.max_tokens`` >
     the provider entry's ``max_output_tokens`` — the same precedence the interactive CLI
     (``self.max_tokens``) and the gateway (``gateway/run.py``) already resolve. Without this,
-    a one-shot request carries no cap at all and the endpoint's own default applies. See #104485."""
+    a one-shot request carries no cap at all and the endpoint's own default applies. See #104485.
+    A non-positive value at any level is treated as unset (a ``0`` cap would request an empty
+    or erroring completion) and resolution falls through to the next level."""
     max_tokens = None
     env_mt = os.environ.get("HERMES_MAX_TOKENS")
     if env_mt:
         with suppress(ValueError, TypeError):
-            max_tokens = int(env_mt)
+            parsed = int(env_mt)
+            max_tokens = parsed if parsed > 0 else None
     else:
         model_cfg = cfg.get("model")
         config_mt = model_cfg.get("max_tokens") if isinstance(model_cfg, dict) else None
-        max_tokens = config_mt if isinstance(config_mt, int) else None
+        max_tokens = config_mt if isinstance(config_mt, int) and config_mt > 0 else None
     if max_tokens is None:
         runtime_mt = runtime.get("max_output_tokens")
         if isinstance(runtime_mt, int) and runtime_mt > 0:
