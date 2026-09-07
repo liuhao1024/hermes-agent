@@ -1,5 +1,5 @@
 """Tests for the provider-agnostic streaming TTS backend (tools.tts_streaming)
-and its dispatch through tools.tts_tool.stream_tts_to_speaker.
+and its dispatch through tools.tts_tool_speaker.stream_tts_to_speaker.
 
 No live audio or network: the ElevenLabs/OpenAI SDKs, sounddevice, and the sync
 synth path are all mocked. Covers the registry/resolver, provider availability,
@@ -316,6 +316,7 @@ def test_streamer_path_handles_misaligned_pcm_chunks(monkeypatch):
     audio fragments. The fix carries leftover bytes into the next chunk.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     class _OddChunkProvider(ts.StreamingTTSProvider):
         sample_rate = 24000
@@ -338,7 +339,7 @@ def test_streamer_path_handles_misaligned_pcm_chunks(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_OddChunkProvider({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     # Every chunk must have been written — no drops from misalignment.
     assert out.write.called, "expected PCM chunks written despite odd byte counts"
@@ -368,6 +369,7 @@ def test_streamer_path_survives_portaudio_write_error(monkeypatch):
     must log and break, not crash — otherwise _playback_done never fires.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     class _Fake(ts.StreamingTTSProvider):
         sample_rate = 24000
@@ -388,7 +390,7 @@ def test_streamer_path_survives_portaudio_write_error(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Fake({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert out.write.called, "expected at least one write attempt"
     assert done.is_set(), "done event must fire even after PortAudio error"
@@ -408,6 +410,7 @@ def test_streamer_reinit_after_portaudio_error_plays_remaining_sentences(monkeyp
     be written to that fresh stream, proving the pipeline recovered.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     class _Fake(ts.StreamingTTSProvider):
         sample_rate = 24000
@@ -443,7 +446,7 @@ def test_streamer_reinit_after_portaudio_error_plays_remaining_sentences(monkeyp
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Fake({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert broken_out.write.called, "first stream should have received a write"
     assert fresh_out.write.called, (
@@ -462,6 +465,7 @@ def test_streamer_tempfile_fallback_after_reinit_exhausted(monkeypatch):
     via the temp-file fallback, not be silently dropped.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     class _Fake(ts.StreamingTTSProvider):
         sample_rate = 24000
@@ -501,7 +505,7 @@ def test_streamer_tempfile_fallback_after_reinit_exhausted(monkeypatch):
                return_value=_Fake({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd), \
          patch("tools.voice_mode.play_audio_file", side_effect=_fake_play):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     # The stream was created 4 times: initial + 3 reinit attempts.
     assert sd.OutputStream.call_count == 4, (
@@ -531,6 +535,7 @@ def test_streamer_tempfile_fallback_after_reinit_exhausted(monkeypatch):
 def test_hybrid_first_sentence_streamed_individually(monkeypatch, streaming, expected):
     """The first sentence must get its own stream() call for low TTFA."""
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     stream_calls: list[str] = []
 
@@ -555,7 +560,7 @@ def test_hybrid_first_sentence_streamed_individually(monkeypatch, streaming, exp
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Tracking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert stream_calls == expected
     assert done.is_set()
@@ -570,6 +575,7 @@ def test_hybrid_subsequent_sentences_prefetched_individually(monkeypatch):
     prefetch fires the HTTP request the moment each sentence completes,
     eliminating inter-sentence gaps."""
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     stream_calls: list[str] = []
 
@@ -598,7 +604,7 @@ def test_hybrid_subsequent_sentences_prefetched_individually(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Tracking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     # Exactly 4 calls: one per sentence.
     assert len(stream_calls) == 4, (
@@ -621,6 +627,7 @@ def test_hybrid_short_sentences_each_get_own_call(monkeypatch):
     """Short sentences should each get their own stream() call — no batching,
     no waiting for a threshold or end-of-text."""
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     stream_calls: list[str] = []
 
@@ -646,7 +653,7 @@ def test_hybrid_short_sentences_each_get_own_call(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Tracking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert len(stream_calls) == 2, (
         f"expected 2 stream() calls (1 per sentence), "
@@ -665,6 +672,7 @@ def test_hybrid_done_event_waits_for_prefetch(monkeypatch):
     """The done event must not fire until the prefetch thread has finished,
     otherwise continuous voice mode could overlap turns."""
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     prefetch_done = threading.Event()
 
@@ -697,7 +705,7 @@ def test_hybrid_done_event_waits_for_prefetch(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Blocking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     # done.is_set() is true — but only after the prefetch joined.
     assert done.is_set()
@@ -715,6 +723,7 @@ def test_hybrid_done_event_waits_for_prefetch(monkeypatch):
 def test_hybrid_single_sentence_still_works(monkeypatch):
     """A single-sentence reply should stream immediately with no batch."""
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     stream_calls: list[str] = []
 
@@ -736,7 +745,7 @@ def test_hybrid_single_sentence_still_works(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Tracking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert len(stream_calls) == 1, (
         f"single sentence should trigger exactly 1 stream() call, got {stream_calls}"
@@ -756,6 +765,7 @@ def test_hybrid_playback_serialized_no_overlap(monkeypatch):
     should be inside _play_pcm_chunks at any time.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     active_plays = [0]
     max_concurrent = [0]
@@ -795,7 +805,7 @@ def test_hybrid_playback_serialized_no_overlap(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Tracking({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert done.is_set()
     assert max_concurrent[0] <= 1, (
@@ -818,6 +828,7 @@ def test_hybrid_prefetch_fires_http_immediately(monkeypatch):
     """
     import time
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     stream_start_times: list[float] = []
     playback_done_times: list[float] = []
@@ -856,7 +867,7 @@ def test_hybrid_prefetch_fires_http_immediately(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_BlockingFirst({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
 
     assert done.is_set()
     assert len(stream_start_times) == 2, (
@@ -887,6 +898,7 @@ def test_display_callback_not_called_when_streaming_enabled(monkeypatch):
     still works correctly (no crash, no display).
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     class _Fake(ts.StreamingTTSProvider):
         sample_rate = 24000
@@ -906,7 +918,7 @@ def test_display_callback_not_called_when_streaming_enabled(monkeypatch):
     with patch("tools.tts_streaming.resolve_streaming_provider",
                return_value=_Fake({}, {})), \
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
-        tts_tool.stream_tts_to_speaker(q, stop, done, display_callback=None)
+        stream_tts_to_speaker(q, stop, done, display_callback=None)
 
     assert done.is_set()
     # No assertion on display — the point is no crash and done is set.
@@ -929,6 +941,7 @@ def _timed_sync_run(monkeypatch, sentences, *, synth_s=0.12, play_s=0.12,
     with kinds "synth"/"play", timestamps from a shared monotonic origin.
     """
     from tools import tts_tool
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     origin = time.monotonic()
     events = []
@@ -961,7 +974,7 @@ def _timed_sync_run(monkeypatch, sentences, *, synth_s=0.12, play_s=0.12,
 
     q = _drain_queue(sentences)
     with patch("tools.tts_streaming.resolve_streaming_provider", return_value=None):
-        tts_tool.stream_tts_to_speaker(q, stop, done)
+        stream_tts_to_speaker(q, stop, done)
     return events, stop, done
 
 
@@ -1012,7 +1025,7 @@ def test_sync_pipeline_stop_skips_queued_playback(monkeypatch):
 
 
 def test_sync_pipeline_cleans_temp_files(monkeypatch):
-    from tools import tts_tool
+    from tools import tts_tool_speaker
 
     created = []
     real_mkstemp = tempfile.mkstemp
@@ -1022,7 +1035,7 @@ def test_sync_pipeline_cleans_temp_files(monkeypatch):
         created.append(path)
         return fd, path
 
-    monkeypatch.setattr(tts_tool.tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(tts_tool_speaker.tempfile, "mkstemp", tracking_mkstemp)
     events, _stop, done = _timed_sync_run(monkeypatch,
                                           ["First full sentence here. ",
                                            "Second full sentence here. "])
