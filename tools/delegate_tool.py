@@ -180,6 +180,10 @@ def _build_child_agent(
     if callable(_ensure_parent_session_row):
         with _quiet("subagent: failed to ensure parent session row before spawn"):
             _ensure_parent_session_row()
+    else:
+        logger.debug(
+            "delegate_task: parent agent exposes no _ensure_db_session; skipping pre-spawn row ensure"
+        )
     with delegated_child_context():
         try:
             child = AIAgent(
