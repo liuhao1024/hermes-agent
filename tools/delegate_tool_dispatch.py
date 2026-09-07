@@ -43,6 +43,7 @@ class _Batch:
     origin_ui_session_id: str
     origin_owner_transport: Any
     origin_owner_session_record: Any
+    origin_wake_capable: bool
     overall_start: float
     # Set on per-group units carved out by ``_dispatch_background``; None for the whole batch / ungrouped units.
     group: Optional[str] = None
@@ -66,17 +67,22 @@ def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) ->
         _hdr = f"  🔀 [{format_batch_tag(live_deleg_id, parent_agent)}] delegating {n_tasks} tasks"
         _print_completion_line(parent_agent, getattr(parent_agent, "_delegate_spinner", None), _hdr, console_line=_hdr)
 
-def _capture_origin() -> tuple[str, str, Any, Any]:
-    """``(wake_sid, ui_session_id, owner_transport, owner_session_record)`` of the
+def _capture_origin() -> tuple[str, str, Any, Any, bool]:
+    """``(wake_sid, ui_session_id, owner_transport, owner_session_record, wake_capable)`` of the
     ORIGINATING session, captured BEFORE building any child: AIAgent construction
-    clobbers the HERMES_SESSION_ID ContextVar/os.environ with the subagent's id."""
+    clobbers the HERMES_SESSION_ID ContextVar/os.environ with the subagent's id.  The wake-
+    capability flag rides the same request-scoped binding and is captured here for the same
+    reason — and fails closed: a binding that never declared it (or a read error) leaves the
+    session treated as non-wake-capable (#98619)."""
     from tools.async_delegation import _current_origin_session_id
     _origin_wake_sid = _current_origin_session_id()
     _origin_ui_session_id = ""
+    _origin_wake_capable = False
     with _quiet(None):
-        from gateway.session_context import get_session_env
+        from gateway.session_context import get_session_env, wake_capable_session
         _origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
-    return (_origin_wake_sid, _origin_ui_session_id, *_capture_gateway_steer_authority(_origin_ui_session_id))
+        _origin_wake_capable = wake_capable_session()
+    return (_origin_wake_sid, _origin_ui_session_id, *_capture_gateway_steer_authority(_origin_ui_session_id), _origin_wake_capable)
 
 def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tasks, remaining) -> None:
     """Print one completion line for a finished child and refresh the spinner text. Failed/errored/timed-out children
@@ -199,14 +205,16 @@ def _run_sync_with_note(batch: _Batch, reason: str) -> str:
         result["note"] = _SYNC_FALLBACK_NOTES[reason]
     return json.dumps(result, ensure_ascii=False)
 
-def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
+def _resolve_async_wake_sid(origin_wake_sid: str, origin_wake_capable: bool = False) -> Optional[str]:
     """Wake target for a detached batch, or None to force synchronous execution.
 
     Finite sessions (stateless HTTP requests, one-shot Kanban workers) cannot route a detached result back after their
-    turn/process ends — but if a raw session id is bound (the API server always binds one), gateway.wake can still
-    reach it by self-POSTing /v1/chat/completions, so only fall back to sync when there is truly no session id to
-    wake. Uses the origin captured BEFORE child construction — HERMES_SESSION_ID here would be the subagent's internal
-    id.
+    turn/process ends — but if a raw, WAKE-CAPABLE session id is bound (one its client can address again: an explicit
+    X-Hermes-Session-Id, a native /api/sessions/{id} id, a /v1/runs id), gateway.wake can still reach it by self-POSTing
+    /v1/chat/completions, so only fall back to sync when there is truly no such id. A bound id alone is NOT enough
+    (#98619): a fingerprint-derived id from a header-less client makes the self-post hard-fail (no API_SERVER_KEY) or
+    land in a session whose history the client never reloads, so the result would be undeliverable by construction.
+    Uses the origin captured BEFORE child construction — HERMES_SESSION_ID here would be the subagent's internal id.
     """
     try:
         # Finite sessions cannot route a detached subagent result back to the agent after their turn/process
@@ -218,13 +226,19 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
             return ""
     except Exception:
         return ""
-    if origin_wake_sid:
+    if origin_wake_sid and origin_wake_capable:
         logger.info(
-            "delegate_task: async delivery unsupported on this session, but a session id is bound (%s) — dispatching "
-            "in the background and waking the session via self-post when it completes instead of forcing synchronous "
-            "execution.", origin_wake_sid,
+            "delegate_task: async delivery unsupported on this session, but a wake-capable session id is bound (%s) — "
+            "dispatching in the background and waking the session via self-post when it completes instead of forcing "
+            "synchronous execution.", origin_wake_sid,
         )
         return origin_wake_sid
+    if origin_wake_sid:
+        logger.info(
+            "delegate_task: session id %s is bound but not wake-capable (fingerprint-derived for a header-less client "
+            "— the wake self-post cannot deliver where the client will read it, #98619) — running the batch "
+            "synchronously instead.", origin_wake_sid,
+        )
     return None
 
 def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> tuple[str, str]:
@@ -354,7 +368,7 @@ def _dispatch_background(batch: _Batch) -> str:
     running synchronously (with an explanatory ``note``) when the session cannot receive detached completions or the
     async pool is at capacity."""
     from tools.delegate_tool import _get_max_async_children
-    wake_sid = _resolve_async_wake_sid(batch.origin_wake_sid)
+    wake_sid = _resolve_async_wake_sid(batch.origin_wake_sid, batch.origin_wake_capable)
     if wake_sid is None:
         logger.info("delegate_task: async delivery unsupported on this session runtime; running the batch synchronously instead.")
         return _run_sync_with_note(batch, "no_async")

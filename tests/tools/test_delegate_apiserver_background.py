@@ -41,6 +41,10 @@ def _clean_queue_and_context(monkeypatch):
     for var in sc._VAR_MAP.values():
         var.set(sc._UNSET)
     sc._SESSION_ASYNC_DELIVERY.set(sc._UNSET)
+    # wake-capable lives outside _VAR_MAP (no env fallback by design, #98619),
+    # so reset it explicitly — a leaked "1" would hand the next test wake
+    # authority its binder never declared.
+    sc._SESSION_WAKE_CAPABLE.set(sc._UNSET)
     # set_current_session_id (invoked by the clobber-reproducing fake child
     # build) writes os.environ directly — scrub it so it can't leak into
     # other test modules.
@@ -108,8 +112,10 @@ def _patch_delegate(monkeypatch):
 
 
 def test_apiserver_session_with_id_dispatches_background(monkeypatch):
-    """async_delivery=False + a raw session id (HERMES_SESSION_ID) →
-    background dispatch (the completion wakes the session via the
+    """async_delivery=False + a raw session id (HERMES_SESSION_ID) that its binder
+    DECLARED wake-capable (audited producer: explicit X-Hermes-Session-Id, a
+    native /api/sessions id, a /v1/runs id — the client can address the id
+    again) → background dispatch (the completion wakes the session via the
     api_server self-post), NOT the forced-sync fallback."""
     dt = _patch_delegate(monkeypatch)
     monkeypatch.setenv("HERMES_SESSION_ID", "raw-sid-7")
@@ -119,6 +125,7 @@ def test_apiserver_session_with_id_dispatches_background(monkeypatch):
         session_key="raw-sid-7",
         session_id="raw-sid-7",
         async_delivery=False,
+        wake_capable="1",
     )
 
     out = dt.delegate_task(
@@ -165,3 +172,85 @@ def test_apiserver_session_without_id_stays_synchronous(monkeypatch):
     assert parsed.get("status") != "dispatched", parsed
     assert "SYNCHRONOUSLY" in parsed.get("note", "")
     assert process_registry.completion_queue.empty()
+
+
+# ---------------------------------------------------------------------------
+# #98619 — wake capability must be DECLARED, never assumed
+# ---------------------------------------------------------------------------
+
+
+def test_apiserver_wake_capability_omission_fails_closed(monkeypatch):
+    """#98619 public-omission regression: a binder that binds a raw session id
+    but NEVER declares wake capability (set_session_vars called without the
+    flag — exactly what a future, not-yet-audited binding path would do) must
+    NOT get background dispatch. Wake authority is proof-carrying: omitted
+    means denied, and the batch stays synchronous."""
+    dt = _patch_delegate(monkeypatch)
+    set_session_vars(
+        platform="api_server",
+        chat_id="raw-sid-undeclared",
+        session_key="raw-sid-undeclared",
+        session_id="raw-sid-undeclared",
+        async_delivery=False,
+    )
+
+    out = dt.delegate_task(
+        goal="bg undeclared", context="ctx",
+        background=True, parent_agent=_fake_parent(),
+    )
+    parsed = json.loads(out)
+    assert parsed.get("status") != "dispatched", parsed
+    assert "SYNCHRONOUSLY" in parsed.get("note", "")
+    assert process_registry.completion_queue.empty()
+
+
+def test_apiserver_derived_session_id_stays_synchronous(monkeypatch):
+    """#98619: a bound-but-derived chat id (header-less OpenAI-compatible
+    client, no X-Hermes-Session-Id) must NOT dispatch background — the wake
+    self-post would hard-fail (no API_SERVER_KEY) or land in a session whose
+    history the client never reloads. A session id merely existing is not
+    wake-capable; the binding must declare it."""
+    dt = _patch_delegate(monkeypatch)
+    set_session_vars(
+        platform="api_server",
+        chat_id="fingerprint-hex-0123456789abcdef",
+        session_key="fingerprint-hex-0123456789abcdef",
+        session_id="fingerprint-hex-0123456789abcdef",
+        wake_capable="",
+        async_delivery=False,
+    )
+
+    out = dt.delegate_task(
+        goal="bg derived", context="ctx",
+        background=True, parent_agent=_fake_parent(),
+    )
+    parsed = json.loads(out)
+    assert parsed.get("status") != "dispatched", parsed
+    assert "SYNCHRONOUSLY" in parsed.get("note", "")
+    assert process_registry.completion_queue.empty()
+
+
+def test_wake_capable_session_reader_is_default_deny(monkeypatch):
+    """#98619: wake_capable_session() True ONLY for the literal "1". _UNSET
+    (never declared) and "" (declared not capable) both fail closed, and a
+    leaked HERMES_SESSION_WAKE_CAPABLE env var must NOT grant authority —
+    the reader never falls back to os.environ."""
+    import gateway.session_context as sc
+    from gateway.session_context import wake_capable_session
+
+    # Never bound in this context: _UNSET sentinel, no env fallback even when
+    # the variable is present in the environment.
+    monkeypatch.setenv("HERMES_SESSION_WAKE_CAPABLE", "1")
+    assert wake_capable_session() is False
+
+    # Declared wake-capable (audited producer): "1".
+    tokens = set_session_vars(platform="api_server", wake_capable="1")
+    assert wake_capable_session() is True
+    sc.clear_session_vars(tokens)
+    # A cleared context has declared nothing: back to denied.
+    assert wake_capable_session() is False
+
+    # Explicitly declared NOT wake-capable (fingerprint-derived id): "".
+    tokens = set_session_vars(platform="api_server", wake_capable="")
+    assert wake_capable_session() is False
+    sc.clear_session_vars(tokens)

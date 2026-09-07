@@ -2385,6 +2385,40 @@ class TestSessionIdHeader:
             assert call_kwargs["conversation_history"] == db_history
             assert call_kwargs["user_message"] == "new question"
 
+    @pytest.mark.asyncio
+    async def test_wake_capability_follows_session_id_provenance(self, auth_adapter):
+        """#98619: wake_capable must be "1" only when the session id was
+        explicitly provided (a header client that can resume it), "" when it is
+        fingerprint-derived (a header-less client) — delegate_task's background
+        gate keys on it to keep the forced-sync fallback where the wake
+        self-post could never deliver."""
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={"X-Hermes-Session-Id": "client-held-session", "Authorization": "Bearer sk-secret"},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+                assert resp.status == 200
+                assert mock_run.call_args.kwargs["wake_capable"] == "1"
+
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                # Header-less: the session id is derived from the message
+                # fingerprint — this client will never resume that session.
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
+                )
+                assert resp.status == 200
+                assert mock_run.call_args.kwargs["wake_capable"] == ""
+
 
 # ---------------------------------------------------------------------------
 # X-Hermes-Session-Key header (long-term memory scoping)

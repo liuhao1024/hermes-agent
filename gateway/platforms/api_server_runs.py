@@ -486,7 +486,12 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             session_tokens = self._bind_api_server_session(
                 chat_id=session_id or "", session_key=run.approval_session_key, session_id=session_id or "",
                 browser_control_principal=run.browser_control_principal,
-                browser_control_transport_family=run.browser_control_transport_family)
+                browser_control_transport_family=run.browser_control_transport_family,
+                # #98619 audited opt-in: every /v1/runs session id is one the client can address
+                # again (body session_id, a response chain id, a declared session key, or the
+                # run_id fallback returned by the create response) — and a wake-injected turn
+                # lands in session history a later run on the same id will load.
+                wake_capable="1")
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
             if run.agent_kwargs["room_dispatch"] is not None:
