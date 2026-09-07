@@ -86,6 +86,17 @@ SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])(?:\s|\n)|(?:\n\n)")
 _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL)
 
 
+def _streaming_min_len(tts_config: Dict) -> int:
+    """Read the whole-response minimum, preserving the gateway's coercion and floor."""
+    streaming = tts_config.get("streaming")
+    if not isinstance(streaming, dict):
+        return 20
+    try:
+        return max(1, int(streaming.get("min_len", 20)))
+    except (TypeError, ValueError, OverflowError):
+        return 20
+
+
 class SentenceChunker:
     """Incremental sentence cutter for LLM token deltas.
 
@@ -94,11 +105,24 @@ class SentenceChunker:
     ``<think>`` blocks (even split across deltas) and merges fragments shorter
     than *min_len* into the following sentence, so "Ha!" rides along with the
     sentence after it instead of stalling as a tiny clip.
+    *first_min_len* can release a short opener sooner without changing later batching.
     """
 
-    def __init__(self, min_len: int = 20):
+    def __init__(self, min_len: int = 20, *, first_min_len: Optional[int] = None):
         self.min_len = min_len
+        self._next_min_len = min_len if first_min_len is None else first_min_len
         self.buf = ""
+
+    @classmethod
+    def from_config(cls, tts_config: Dict) -> SentenceChunker:
+        """Apply the same whole-response and first-emission controls on every surface."""
+        min_len = _streaming_min_len(tts_config)
+        streaming = tts_config.get("streaming")
+        value = streaming.get("first_sentence_min_chars") if isinstance(streaming, dict) else None
+        if value is not None and (type(value) is not int or value < 1):
+            logger.warning("Invalid tts.streaming.first_sentence_min_chars; using min_len")
+            value = None
+        return cls(min_len=min_len, first_min_len=value)
 
     def feed(self, delta: str) -> List[str]:
         """Absorb *delta*; return every complete sentence now ready to speak."""
@@ -109,10 +133,11 @@ class SentenceChunker:
         start = 0  # skip boundaries that would leave the head too short
         while m := SENTENCE_BOUNDARY_RE.search(self.buf, start):
             head = self.buf[: m.end()]
-            if len(head.strip()) < self.min_len:
+            if len(head.strip()) < self._next_min_len:
                 start = m.end()
                 continue
             out.append(head)
+            self._next_min_len = self.min_len
             self.buf = self.buf[m.end():]
             start = 0
         return out
@@ -121,6 +146,8 @@ class SentenceChunker:
         """Drain the tail (end-of-text or long-idle flush)."""
         tail = _THINK_BLOCK_RE.sub("", self.buf).strip()
         self.buf = ""
+        if tail:
+            self._next_min_len = self.min_len
         return [tail] if tail else []
 
 

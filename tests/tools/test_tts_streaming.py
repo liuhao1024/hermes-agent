@@ -34,23 +34,34 @@ class TestSentenceChunker:
         opener = "Yes. "
         opening = c.feed(opener[:split_at]) + c.feed(opener[split_at:])
         assert opening == ([opener] if first_min_len == 1 else [])
-        assert c.feed("OK. ") == []  # Later short sentences still batch normally.
+        middle = c.feed("OK. ")
+        assert middle == (["Yes. OK. "] if first_min_len == 6 else [])
         rest = c.feed("This is the longer sentence. Tail")
-        assert rest == ["OK. This is the longer sentence. " if opening else
-                        "Yes. OK. This is the longer sentence. "]
+        expected_rest = {1: "OK. This is the longer sentence. ",
+                         6: "This is the longer sentence. "}.get(first_min_len,
+                         "Yes. OK. This is the longer sentence. ")
+        assert rest == [expected_rest]
         assert c.flush() == ["Tail"]
         assert c.flush() == []
-        assert "".join(opening + rest + ["Tail"]) == "Yes. OK. This is the longer sentence. Tail"
+        assert "".join(opening + middle + rest + ["Tail"]) == "Yes. OK. This is the longer sentence. Tail"
 
         # Several sentences in one delta obey the same first-only rule.
         batched = ts.SentenceChunker(first_min_len=first_min_len)
-        assert batched.feed("Yes. OK. This is the longer sentence. ") == opening + rest
+        assert batched.feed("Yes. OK. This is the longer sentence. ") == opening + middle + rest
 
         # An idle flush of a nonempty tail counts as the first emitted sentence.
         idle = ts.SentenceChunker(first_min_len=first_min_len)
         assert idle.feed("Hi") == []
         assert idle.flush() == ["Hi"]
         assert idle.feed("OK. ") == []
+
+        # After an opener, restore the configured global minimum, not a hard-coded 20.
+        configured = ts.SentenceChunker.from_config({"streaming": {
+            "min_len": 6, "first_sentence_min_chars": 1,
+        }})
+        assert configured.feed("Yes. ") == ["Yes. "]
+        assert configured.feed("OK. ") == []
+        assert configured.feed("Fine. ") == ["OK. Fine. "]
 
     def test_cuts_sentence_the_moment_its_boundary_arrives(self):
         c = ts.SentenceChunker()
@@ -511,8 +522,13 @@ def test_streamer_tempfile_fallback_after_reinit_exhausted(monkeypatch):
     sys.platform == "darwin",
     reason="macOS deliberately skips the sounddevice OutputStream path (PR #62601)",
 )
-@pytest.mark.parametrize("first_min_chars", [None, 1])
-def test_hybrid_first_sentence_streamed_individually(monkeypatch, first_min_chars):
+@pytest.mark.parametrize("streaming, expected", [
+    ({}, ["Yes. OK. Fine. This is the next full sentence."]),
+    ({"first_sentence_min_chars": 1}, ["Yes.", "OK. Fine. This is the next full sentence."]),
+    ({"min_len": 6}, ["Yes. OK.", "Fine. This is the next full sentence."]),
+    ({"min_len": 6, "first_sentence_min_chars": 1}, ["Yes.", "OK. Fine.", "This is the next full sentence."]),
+])
+def test_hybrid_first_sentence_streamed_individually(monkeypatch, streaming, expected):
     """The first sentence must get its own stream() call for low TTFA."""
     from tools import tts_tool
 
@@ -530,8 +546,8 @@ def test_hybrid_first_sentence_streamed_individually(monkeypatch, first_min_char
             yield b"\x00\x00" * 10
 
     sd, out = _sd_mock()
-    text = "This is the first complete sentence." if first_min_chars is None else "Yes. OK. This is the next full sentence."
-    config = {} if first_min_chars is None else {"streaming": {"first_sentence_min_chars": first_min_chars}}
+    text = "Yes. OK. Fine. This is the next full sentence."
+    config = {"streaming": streaming}
     monkeypatch.setattr(tts_tool, "_load_tts_config", lambda: config)
     q = _drain_queue([text])
     stop, done = threading.Event(), threading.Event()
@@ -541,8 +557,7 @@ def test_hybrid_first_sentence_streamed_individually(monkeypatch, first_min_char
          patch.object(tts_tool, "_import_sounddevice", return_value=sd):
         tts_tool.stream_tts_to_speaker(q, stop, done)
 
-    assert stream_calls == ([text] if first_min_chars is None else
-                            ["Yes.", "OK. This is the next full sentence."])
+    assert stream_calls == expected
     assert done.is_set()
 
 

@@ -4104,7 +4104,7 @@ def stream_tts_to_speaker(
                     logger.warning("sounddevice OutputStream failed: %s", exc)
                     output_stream = None
 
-        chunker = SentenceChunker()
+        chunker = SentenceChunker.from_config(tts_config)
         long_flush_len = 100
         queue_timeout = 0.5
         _spoken_sentences: list[str] = []  # track spoken sentences to skip duplicates
