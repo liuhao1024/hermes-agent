@@ -623,6 +623,66 @@ class TestResolveVisionCustomProvider:
         assert kwargs.get("explicit_base_url") == "https://configured.example/v1"
         assert kwargs.get("explicit_api_key") == "sk-configured"
 
+    def test_zz_leak_runtime_main_like_earlier_test(self):
+        """Deliberately leak runtime-main state, as an earlier test might (#105888).
+
+        The class fixture's teardown clears the leak after this test; the canary
+        below then proves a leaked binding cannot affect custom-vision resolution.
+        CI shards rarely pair a polluting test with this class, so the leak is
+        replayed inline to keep the order-independence guarantee observable.
+        """
+        import agent.auxiliary_client as aux
+
+        aux.set_runtime_main(
+            "openrouter",
+            "gpt-5.5",
+            base_url="https://stale.example/v1",
+            api_key="sk" + "-stale",
+            api_mode="chat_completions",
+            auth_mode="bearer",
+        )
+        # No reset on purpose — the stale binding and mirrors stay behind.
+
+    def test_zz_canary_custom_resolution_after_leak(self, monkeypatch):
+        """Canary after the deliberate leak above: resolution must be unaffected.
+
+        Passes while the class fixture re-establishes the empty runtime-main
+        baseline before each test; fails if that isolation is ever removed.
+        """
+        import agent.auxiliary_client as aux
+
+        monkeypatch.setattr(aux, "_RUNTIME_MAIN_BASE_URL", "https://my.endpoint.example/v1")
+        monkeypatch.setattr(aux, "_RUNTIME_MAIN_API_KEY", "sk" + "-runtime-key")
+        monkeypatch.setattr(aux, "_RUNTIME_MAIN_API_MODE", "anthropic_messages")
+
+        with (
+            patch(
+                "agent.auxiliary_client._read_main_provider", return_value="custom",
+            ),
+            patch(
+                "agent.auxiliary_client._read_main_model", return_value="claude-opus-4-8",
+            ),
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=("auto", None, None, None, None),
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client"
+            ) as mock_resolve,
+        ):
+            mock_resolve.return_value = (MagicMock(), "claude-opus-4-8")
+
+            from agent.auxiliary_client import resolve_vision_provider_client
+
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "custom"
+        assert client is not None
+        kwargs = mock_resolve.call_args.kwargs
+        assert kwargs.get("explicit_base_url") == "https://my.endpoint.example/v1"
+        assert kwargs.get("explicit_api_key") == "sk" + "-runtime-key"
+        assert kwargs.get("is_vision") is True
+
 
 # ── Constant cleanup ────────────────────────────────────────────────────────
 
