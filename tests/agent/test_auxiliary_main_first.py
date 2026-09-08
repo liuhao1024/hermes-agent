@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 
 # ── Text aux tasks — _resolve_auto_route ──────────────────────────────────────────
@@ -500,6 +502,25 @@ class TestResolveVisionCustomProvider:
     provider=auto``.  The fix recovers the live endpoint that
     ``set_runtime_main()`` recorded for the turn.
     """
+
+    @pytest.fixture(autouse=True)
+    def _clean_runtime_main_state(self):
+        """Isolate the process-global runtime-main state these tests read.
+
+        ``reset_runtime_main()`` only rewinds the context var; the legacy
+        mirrors published by ``set_runtime_main()`` persist process-wide.
+        When an earlier test (in this file or another) has recorded a main
+        runtime, ``_compat_runtime_main()`` exposes the leftover
+        provider/model alongside the mirrors patched below and re-routes the
+        ``auto`` vision resolution, so these tests pass or fail depending on
+        execution order. Start from the module-default empty state and leave
+        it empty for whatever runs next.
+        """
+        import agent.auxiliary_client as aux
+
+        aux.clear_runtime_main()
+        yield
+        aux.clear_runtime_main()
 
     def test_custom_main_forwards_runtime_endpoint(self, monkeypatch):
         """custom main with recorded runtime endpoint → Step 1 builds a client."""
