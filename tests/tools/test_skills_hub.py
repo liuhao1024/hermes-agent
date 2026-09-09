@@ -16,7 +16,8 @@ from tools.skills_hub_install import (
 from tools.skills_hub_models import SkillBundle, SkillMeta, SkillSource, _referenced_support_paths
 from tools.skills_hub_official import OptionalSkillSource
 from tools.skills_hub_search import (
-    HERMES_INDEX_TTL, _load_hermes_index, create_source_router, parallel_search_sources, unified_search,
+    HERMES_INDEX_TTL, _load_hermes_index, _select_active_sources, create_source_router,
+    parallel_search_sources, unified_search,
 )
 from tools.skills_hub_skillssh import SkillsShSource
 from tools.skills_hub_sources import LobeHubSource, UrlSource, WellKnownSkillSource
@@ -592,6 +593,69 @@ class TestCreateSourceRouter:
         url_idx = next(i for i, src in enumerate(sources) if isinstance(src, UrlSource))
         gh_idx = next(i for i, src in enumerate(sources) if isinstance(src, GitHubSource))
         assert url_idx < gh_idx
+
+
+# ---------------------------------------------------------------------------
+# _select_active_sources: custom taps must override the index shortcut (#106729)
+# ---------------------------------------------------------------------------
+
+
+def _selectable_source(source_id: str, **attrs):
+    src = MagicMock(spec=SkillSource)
+    src.source_id.return_value = source_id
+    for name, value in attrs.items():
+        setattr(src, name, value)
+    return src
+
+
+class TestSelectActiveSources:
+
+    @staticmethod
+    def _sources(github_index_covered=None):
+        github = _selectable_source("github")
+        if github_index_covered is not None:
+            github.index_covered = github_index_covered
+        return [
+            _selectable_source("hermes-index", is_available=True),
+            _selectable_source("official"),
+            github,
+            _selectable_source("skills-sh"),
+            _selectable_source("clawhub"),
+        ]
+
+    def test_index_available_skips_api_sources(self):
+        # Baseline: with the index up and a default GitHubSource, API sources stay skipped.
+        active = [s.source_id() for s in _select_active_sources(self._sources(), "all")]
+        assert active == ["hermes-index", "official"]
+
+    def test_custom_tap_keeps_github_source_active(self):
+        # The index never mirrors custom taps, so a GitHubSource carrying them
+        # (index_covered False) must keep searching; the other API sources stay skipped.
+        active = [s.source_id() for s in _select_active_sources(self._sources(github_index_covered=False), "all")]
+        assert active == ["hermes-index", "official", "github"]
+
+    def test_source_filter_bypasses_index_shortcut(self):
+        active = [s.source_id() for s in _select_active_sources(self._sources(), "github")]
+        assert active == ["official", "github"]
+
+    def test_index_down_keeps_all_sources(self):
+        sources = self._sources()
+        sources[0].is_available = False
+        active = [s.source_id() for s in _select_active_sources(sources, "all")]
+        assert "github" in active and "skills-sh" in active
+
+
+class TestGitHubSourceIndexCovered:
+
+    def test_extra_taps_mark_source_uncovered(self):
+        tap = {"repo": "callacat/hermes-capabilities", "path": "skills/"}
+        with_tap = GitHubSource(auth=MagicMock(spec=GitHubAuth), extra_taps=[tap])
+        assert with_tap.index_covered is False
+        assert tap in with_tap.taps
+
+    def test_default_taps_only_stay_covered(self):
+        plain = GitHubSource(auth=MagicMock(spec=GitHubAuth))
+        assert plain.index_covered is True
 
 
 # ---------------------------------------------------------------------------

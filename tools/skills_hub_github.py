@@ -186,7 +186,8 @@ class GitHubSource(SkillSource):
 
     def __init__(self, auth: GitHubAuth, extra_taps: Optional[List[Dict]] = None):
         self.auth = auth
-        self.taps = list(self.DEFAULT_TAPS) + list(extra_taps or [])
+        self._extra_taps = list(extra_taps or [])
+        self.taps = list(self.DEFAULT_TAPS) + self._extra_taps
         # Per-instance repo -> (default_branch, tree_entries); lives for one
         # search/install flow so repeated tree lookups cost no API calls.
         self._tree_cache: Dict[str, Tuple[str, List[dict]]] = {}
@@ -198,6 +199,12 @@ class GitHubSource(SkillSource):
     @property
     def is_rate_limited(self) -> bool:  # whether the GitHub API rate limit was hit during operations
         return self._rate_limited
+
+    @property
+    def index_covered(self) -> bool:
+        """False when custom taps add repos the centralized Hermes index never mirrors, so the
+        index shortcut in source selection must keep this adapter searching (#106729)."""
+        return not self._extra_taps
 
     def trust_level_for(self, identifier: str) -> str:
         # identifier format: "owner/repo/path/to/skill"

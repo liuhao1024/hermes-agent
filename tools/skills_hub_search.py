@@ -128,7 +128,11 @@ def _select_active_sources(sources: List[SkillSource], source_filter: str) -> Li
         sid = src.source_id()
         if effective != "all" and sid != effective and sid != "official":
             continue
-        if index_available and sid in _API_SOURCE_IDS:
+        # The centralized index mirrors the DEFAULT GitHub taps but never custom ones (those
+        # live only in the user's taps.json, inside GitHubSource): an adapter declaring
+        # ``index_covered = False`` must keep searching, or `skills search` and short-name
+        # `skills install` resolution cannot see tap skills at all (#106729).
+        if index_available and sid in _API_SOURCE_IDS and getattr(src, "index_covered", True):
             continue
         active.append(src)
     return active
