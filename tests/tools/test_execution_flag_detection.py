@@ -1,5 +1,6 @@
 """Execution-bearing option detection across interpreters and read-only tools."""
 
+import functools
 import os
 import shlex
 import shutil
@@ -9,6 +10,34 @@ import time
 import pytest
 
 from tools.approval import detect_dangerous_command, detect_hardline_command
+
+
+@functools.lru_cache(maxsize=None)
+def _gnu_sort() -> bool:
+    """BSD sort splits -S 1K bulk into per-line temp segments, spawning the
+    compress program once per line until the test timeout expires."""
+    try:
+        version = subprocess.run(
+            ["sort", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "GNU" in version.stdout
+
+
+@functools.lru_cache(maxsize=None)
+def _script_runs_command_flag() -> bool:
+    """Only util-linux script supports -c <command>; BSD script rejects it."""
+    try:
+        probe = subprocess.run(
+            ["script", "-qec", "true", "/dev/null"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
 
 
 @pytest.mark.parametrize(
@@ -49,6 +78,10 @@ def test_real_binaries_execute_leading_dash_program_payload(
     """A PATH marker proves these binaries do not reparse '-program' as an option."""
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
+    if tool == "sort" and not _gnu_sort():
+        pytest.skip("non-GNU sort: -S 1K bulk is re-segmented per line, timing out")
+    if needs_tty and not _script_runs_command_flag():
+        pytest.skip("script lacks the util-linux -c command flag")
 
     marker = tmp_path / "executed"
     payload = tmp_path / "-payload-marker"
