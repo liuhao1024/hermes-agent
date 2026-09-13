@@ -4365,13 +4365,23 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
             inferred = ""
         headers = _endpoint_default_headers(sync_base_url, inferred, is_vision=is_vision, xai=True)
     # Named-custom entries lift user extra_headers onto the sync client's default_headers; the
-    # rebuild would drop them — carry user-configured (non-SDK-generated) headers across (#109595).
-    _sdk_header_keys = {"accept", "content-type", "user-agent", "authorization"}
-    _sync_user_headers = {
-        k: v for k, v in dict(getattr(sync_client, "default_headers", None) or {}).items()
-        if str(k).lower() not in _sdk_header_keys and not str(k).lower().startswith(("x-stainless", "openai-"))
-    }
-    headers = {**_sync_user_headers, **(headers or {})}
+    # rebuild would drop them — carry the explicitly configured mapping across (#109595). The
+    # SDK's ``_custom_headers`` is exactly what the client was constructed with, so taking it
+    # whole (rather than inferring SDK ownership from header names) preserves configured
+    # Authorization/User-Agent/OpenAI-* credentials and routing values that named entries are
+    # allowed to set. The SDK merges custom headers last, so they keep precedence over both the
+    # endpoint defaults above and the bearer minted by the key provider.
+    _configured_headers = getattr(sync_client, "_custom_headers", None)
+    if _configured_headers is None:
+        # Non-SDK-shaped client: conservatively filter the merged default_headers view.
+        _sdk_owned_keys = {"accept", "content-type", "user-agent", "authorization"}
+        _sync_user_headers = {
+            k: v for k, v in dict(getattr(sync_client, "default_headers", None) or {}).items()
+            if str(k).lower() not in _sdk_owned_keys and not str(k).lower().startswith(("x-stainless", "openai-"))
+        }
+    else:
+        _sync_user_headers = dict(_configured_headers)
+    headers = {**(headers or {}), **_sync_user_headers}
     if headers:
         async_kwargs["default_headers"] = headers
     _apply_required_codex_headers(async_kwargs, access_token=sync_client.api_key, base_url=sync_base_url)
