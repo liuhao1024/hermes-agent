@@ -9,6 +9,8 @@ import re
 import shlex
 from typing import Iterable
 
+from agent.delegation_context import SCOPED_SUBPROCESS_ENV_MARKERS
+
 # Bridged per-session vars (gateway.session_context._VAR_MAP) are injected fresh onto every
 # command's process env and must NEVER persist in the shared bash snapshot: one long-lived
 # backend serves many sessions, so a snapshot carrying the FIRST session's HERMES_SESSION_ID
@@ -25,10 +27,12 @@ from typing import Iterable
 # Stripping them from the snapshot is safe because they are re-injected on every command; a snapshot should
 # only carry the user's own shell state (PATH, functions, exports they set), not Hermes' per-turn session
 # identity. Used by unit tests as the Python-side contract for the exclusion set; the dump path unsets by
-# name/prefix instead of grepping declare lines (see below / issue #71296).
+# name/prefix instead of grepping declare lines (see below / issue #71296). The scoped-subprocess
+# markers are appended from SCOPED_SUBPROCESS_ENV_MARKERS so both sides of this file (the regex
+# contract and the unset command) derive from the one authoritative tuple and cannot drift apart.
 _SNAPSHOT_EXCLUDED_ENV_REGEX = (
     "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_AUTO_DELIVER_|"
-    "HERMES_CRON_SESSION|HERMES_BROWSER_CONTROL_)")
+    "HERMES_BROWSER_CONTROL_|" + "|".join(SCOPED_SUBPROCESS_ENV_MARKERS) + ")")
 _SHELL_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # mktemp template suffix + the shell variable holding the allocated temp path.
@@ -60,8 +64,6 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
     the snapshot and execute on the next ``source`` (issue #71296). Unsetting first means ``export -p``
     never emits those vars — including any continuation lines.
     """
-    from agent.delegation_context import SCOPED_SUBPROCESS_ENV_MARKERS
-
     # ${!PREFIX*} is bash 3.2+ name-prefix expansion; empty matches are ignored
     # under 2>/dev/null. Caller names are quoted so malformed config can never
     # become shell syntax (valid names stay unquoted by shlex.quote()).

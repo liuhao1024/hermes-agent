@@ -41,6 +41,21 @@ def test_regex_matches_bridged_session_vars():
         assert rx.search(line), f"{name} should be excluded from the snapshot"
 
 
+def test_regex_matches_scoped_subprocess_markers():
+    """The scoped subprocess markers must be in the regex's exclusion set too.
+
+    The regex is the Python-side contract mirroring the shell unset command,
+    and both are built from SCOPED_SUBPROCESS_ENV_MARKERS; this pins the
+    derivation so a future refactor cannot silently hand-maintain one side
+    again (the exact drift this closes)."""
+    rx = re.compile(_SNAPSHOT_EXCLUDED_ENV_REGEX)
+    from agent.delegation_context import SCOPED_SUBPROCESS_ENV_MARKERS
+
+    for name in SCOPED_SUBPROCESS_ENV_MARKERS:
+        line = f'declare -x {name}="whatever"'
+        assert rx.search(line), f"{name} should be excluded from the snapshot"
+
+
 def test_export_snippet_shape():
     snippet = _export_dump_excluding_session_vars('"$__hermes_snap_tmp"')
     assert "export -p" in snippet
