@@ -501,14 +501,21 @@ class TestBareNamedAuxCredentialChain:
     }
 
     def test_async_resolve_keeps_key_cmd_provider(self, tmp_path):
-        """async resolve must carry the key_cmd token provider, not the empty .api_key snapshot."""
+        """async resolve must carry the key_cmd token provider, not the empty .api_key snapshot.
+
+        AsyncOpenAI awaits its provider before every request, so the assertion runs the SDK's
+        real refresh: a dropped provider leaves ``api_key`` unset and an unwrapped sync
+        provider raises TypeError on await."""
+        import asyncio
+
         _write_config(tmp_path, self.CFG)
         from agent.auxiliary_client import resolve_vision_provider_client
         _prov, client, model = resolve_vision_provider_client(async_mode=True)
         assert client is not None
         provider = getattr(client, "_api_key_provider", None)
         assert callable(provider), "async client lost the key_cmd token provider (#109595)"
-        assert provider() == "vk-test-1234"
+        asyncio.run(client._refresh_api_key())
+        assert client.api_key == "vk-test-1234"
 
     def test_async_resolve_keeps_extra_headers(self, tmp_path):
         """The named entry's extra_headers must reach the async client's default headers."""
@@ -521,6 +528,8 @@ class TestBareNamedAuxCredentialChain:
 
     def test_text_task_async_chain_keeps_provider(self, tmp_path):
         """The generic text-task path (get_text_auxiliary_client) has the same rebuild."""
+        import asyncio
+
         _write_config(tmp_path, self.CFG)
         from agent.auxiliary_client import get_text_auxiliary_client
         client, model = get_text_auxiliary_client("compression")
@@ -528,4 +537,5 @@ class TestBareNamedAuxCredentialChain:
         async_client, _ = _to_async_client(client, model)
         provider = getattr(async_client, "_api_key_provider", None)
         assert callable(provider), "sync→async rebuild dropped the key_cmd provider (#109595)"
-        assert provider() == "vk-test-1234"
+        asyncio.run(async_client._refresh_api_key())
+        assert async_client.api_key == "vk-test-1234"

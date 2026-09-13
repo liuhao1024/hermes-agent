@@ -4339,11 +4339,19 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # key_cmd/Entra credentials live in the SDK's per-request provider slot — ``.api_key`` stays
     # "" until the first request refreshes it. Rebuilding AsyncOpenAI from ``.api_key`` alone
     # drops the provider and every async aux call goes out with no Authorization header (#109595).
+    # The sync client's provider is ``Callable[[], str]`` while AsyncOpenAI awaits its provider
+    # (``Callable[[], Awaitable[str]]``) — forward it wrapped via asyncio.to_thread, otherwise the
+    # first async request crashes with "object str can't be used in 'await' expression".
     _key_provider = getattr(sync_client, "_api_key_provider", None)
-    async_kwargs = {
-        "api_key": _key_provider if callable(_key_provider) else sync_client.api_key,
-        "base_url": sync_base_url,
-    }
+    if callable(_key_provider):
+        import asyncio
+
+        def _async_key_provider(_sync_provider=_key_provider):
+            return asyncio.to_thread(_sync_provider)
+
+        async_kwargs = {"api_key": _async_key_provider, "base_url": sync_base_url}
+    else:
+        async_kwargs = {"api_key": sync_client.api_key, "base_url": sync_base_url}
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
         headers = _apply_user_default_headers(build_or_headers())
     elif _is_official_codex_base_url(sync_base_url):
