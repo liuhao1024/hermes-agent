@@ -478,3 +478,54 @@ class TestResolveProviderClientMainRuntimeCustom:
         assert model == "explicit-model"
         assert "explicit.example.com" in str(client.base_url)
         assert client.api_key == "sk-explicit"
+
+
+class TestBareNamedAuxCredentialChain:
+    """#109595: a bare-named custom provider pinned by auxiliary.<task> must keep its
+    credential and extra_headers through the sync→async rebuild that async_call_llm uses."""
+
+    CFG = {
+        "model": {"provider": "hermes-bifrost", "default": "glm-5.3-flash"},
+        "providers": {
+            "hermes-bifrost": {
+                "base_url": "http://127.0.0.1:18088/openai/v1",
+                "api_mode": "chat_completions",
+                "key_cmd": "/bin/echo vk-test-1234",
+                "extra_headers": {"x-bf-eh-x-opencode-session": "hermes-opsman"},
+            },
+        },
+        "auxiliary": {
+            "vision": {"provider": "hermes-bifrost", "model": "qwen-3.8-flash"},
+            "compression": {"provider": "hermes-bifrost", "model": "qwen-3.8-flash"},
+        },
+    }
+
+    def test_async_resolve_keeps_key_cmd_provider(self, tmp_path):
+        """async resolve must carry the key_cmd token provider, not the empty .api_key snapshot."""
+        _write_config(tmp_path, self.CFG)
+        from agent.auxiliary_client import resolve_vision_provider_client
+        _prov, client, model = resolve_vision_provider_client(async_mode=True)
+        assert client is not None
+        provider = getattr(client, "_api_key_provider", None)
+        assert callable(provider), "async client lost the key_cmd token provider (#109595)"
+        assert provider() == "vk-test-1234"
+
+    def test_async_resolve_keeps_extra_headers(self, tmp_path):
+        """The named entry's extra_headers must reach the async client's default headers."""
+        _write_config(tmp_path, self.CFG)
+        from agent.auxiliary_client import resolve_vision_provider_client
+        _prov, client, _model = resolve_vision_provider_client(async_mode=True)
+        assert client is not None
+        headers = {str(k).lower(): str(v) for k, v in (client.default_headers or {}).items()}
+        assert headers.get("x-bf-eh-x-opencode-session") == "hermes-opsman"
+
+    def test_text_task_async_chain_keeps_provider(self, tmp_path):
+        """The generic text-task path (get_text_auxiliary_client) has the same rebuild."""
+        _write_config(tmp_path, self.CFG)
+        from agent.auxiliary_client import get_text_auxiliary_client
+        client, model = get_text_auxiliary_client("compression")
+        from agent.auxiliary_client import _to_async_client
+        async_client, _ = _to_async_client(client, model)
+        provider = getattr(async_client, "_api_key_provider", None)
+        assert callable(provider), "sync→async rebuild dropped the key_cmd provider (#109595)"
+        assert provider() == "vk-test-1234"
