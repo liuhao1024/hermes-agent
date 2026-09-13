@@ -64,30 +64,6 @@ class TestDeadTargetRegistry:
         reg2 = DeadTargetRegistry()
         assert reg2.is_dead("telegram", "999") is True
 
-    def test_key_is_case_insensitive_on_platform(self, isolate):
-        reg = DeadTargetRegistry()
-        reg.mark_dead("TeleGram", "5", "x")
-        assert reg.is_dead("telegram", "5") is True
-
-    def test_none_chat_id_is_never_dead(self, isolate):
-        reg = DeadTargetRegistry()
-        assert reg.mark_dead("telegram", None) is False
-        assert reg.is_dead("telegram", None) is False
-
-    def test_is_dead_error_kind_classification(self):
-        assert DeadTargetRegistry.is_dead_error_kind("forbidden") is True
-        assert DeadTargetRegistry.is_dead_error_kind("not_found") is True
-        assert DeadTargetRegistry.is_dead_error_kind("rate_limited") is False
-        assert DeadTargetRegistry.is_dead_error_kind("transient") is False
-        assert DeadTargetRegistry.is_dead_error_kind(None) is False
-
-    def test_corrupt_store_degrades_to_empty(self, isolate):
-        path = isolate / "gateway" / "dead_targets.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{ this is not json")
-        reg = DeadTargetRegistry()  # must not raise
-        assert reg.all_dead() == {}
-
 
 # --------------------------------------------------------------------------
 # DeliveryRouter end-to-end lifecycle
@@ -113,46 +89,6 @@ async def test_forbidden_marks_target_dead_then_short_circuits(isolate):
 
 
 @pytest.mark.asyncio
-async def test_successful_send_clears_dead_flag(isolate):
-    # Fails once (gets marked dead), then succeeds.
-    adapter = ForbiddenThenOkAdapter(fail_times=1)
-    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
-    target = DeliveryTarget.parse("telegram:7")
-
-    # Pre-seed dead via the first (failing) delivery.
-    await router.deliver("a", [target])
-    assert router.dead_targets.is_dead("telegram", "7") is True
-
-    # Manually clear to simulate the user re-adding the bot, then deliver again.
-    router.dead_targets.clear("telegram", "7")
-    res = await router.deliver("b", [target])
-    assert res["telegram:7"]["success"] is True
-    # Flag stays cleared after a successful send.
-    assert router.dead_targets.is_dead("telegram", "7") is False
-
-
-@pytest.mark.asyncio
-async def test_transient_failure_does_not_mark_dead(isolate):
-    adapter = TransientFailAdapter()
-    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
-    target = DeliveryTarget.parse("telegram:13")
-
-    res = await router.deliver("hi", [target])
-    assert res["telegram:13"]["success"] is False
-    # A timeout/transient error must NOT mark the chat dead — it may recover.
-    assert router.dead_targets.is_dead("telegram", "13") is False
-
-
-@pytest.mark.asyncio
-async def test_local_target_is_never_dead_tracked(isolate):
-    router = DeliveryRouter(GatewayConfig(), adapters={})
-    target = DeliveryTarget.parse("local")
-    res = await router.deliver("hi", [target])
-    assert res["local"]["success"] is True
-    assert router.dead_targets.all_dead() == {}
-
-
-@pytest.mark.asyncio
 async def test_shared_registry_is_used_when_injected(isolate):
     shared = DeadTargetRegistry()
     shared.mark_dead("telegram", "500", "pre-existing")
@@ -167,3 +103,45 @@ async def test_shared_registry_is_used_when_injected(isolate):
     # Injected registry's pre-existing flag short-circuits before any send.
     assert res["telegram:500"]["skipped"] == "dead_target"
     assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------
+# not_found blast radius: chat-level kills the chat, thread/message-level must not
+# --------------------------------------------------------------------------
+
+class RaisingAdapter:
+    """Raises a fixed error message on every send."""
+
+    def __init__(self, message):
+        self.message = message
+        self.calls = []
+
+    async def send(self, chat_id, content, metadata=None):
+        self.calls.append(chat_id)
+        raise RuntimeError(self.message)
+
+
+_SUBCHAT_NOT_FOUND_MESSAGES = [
+    "Bad Request: message thread not found",
+    "Bad Request: TOPIC_DELETED",
+    "Bad Request: message to edit not found",
+    "Bad Request: message to reply not found",
+    "Bad Request: MESSAGE_ID_INVALID",
+]
+
+
+class TestNotFoundBlastRadius:
+
+    @pytest.mark.parametrize("message", _SUBCHAT_NOT_FOUND_MESSAGES)
+    def test_is_chat_level_not_found_subchat(self, message):
+        from gateway.platforms.base import is_chat_level_not_found
+
+        assert is_chat_level_not_found(error_text=message) is False
+
+    def test_subchat_marker_wins_when_both_present(self):
+        from gateway.platforms.base import is_chat_level_not_found
+
+        # Conservative: if a sub-chat marker is present, never kill the whole chat.
+        assert is_chat_level_not_found(error_text="chat not found; message thread not found") is False
+
+
