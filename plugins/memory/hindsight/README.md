@@ -14,7 +14,7 @@ Long-term memory with knowledge graph, entity resolution, and multi-strategy ret
 hermes memory setup    # select "hindsight"
 ```
 
-The setup wizard will install dependencies automatically via `uv` and walk you through configuration.
+The setup wizard installs dependencies automatically via `uv`, walks you through configuration, and offers to seed the bank with a **starter memory template** (a curated set of dispositions/instructions for common agent roles) — you can skip it, and it warns before overwriting an already-configured bank.
 
 Or manually (cloud mode with defaults):
 ```bash
@@ -70,6 +70,7 @@ Config file: `~/.hermes/hindsight/config.json`
 |-----|---------|-------------|
 | `recall_budget` | `mid` | Recall thoroughness: `low` / `mid` / `high` |
 | `recall_prefetch_method` | `recall` | Auto-recall method: `recall` (raw facts) or `reflect` (LLM synthesis) |
+| `prefetch_join_timeout` | `5.0` | Max seconds to wait for prefetch thread. Increase for slow Hindsight backends (typical recall latency: 1.5–4.4s). |
 | `recall_max_tokens` | `4096` | Maximum tokens for recall results |
 | `recall_max_input_chars` | `800` | Maximum input query length for auto-recall |
 | `recall_prompt_preamble` | — | Custom preamble for recalled memories in context |
@@ -77,7 +78,8 @@ Config file: `~/.hermes/hindsight/config.json`
 | `recall_tags_match` | `any` | Tag matching mode: `any` / `all` / `any_strict` / `all_strict` |
 | `recall_types` | `observation` | Fact types surfaced by recall (both auto-recall and the `hindsight_recall` tool). Comma-separated string or JSON list. **Default narrowed to `observation` only** (see "Behavior change" below). Set to `observation,world,experience` to also include raw facts. |
 | `auto_recall` | `true` | Automatically recall memories before each turn |
-| `prefetch_join_timeout` | `5.0` | Max seconds to wait for prefetch thread. Increase for slow Hindsight backends (typical recall latency: 1.5–4.4s). |
+| `recall_sync` | `false` | Recall synchronously against the *current* message each turn (higher relevance, adds recall latency). Default off: recall runs in the background and is injected on the next turn. |
+| `recall_indicator` | `true` | Show a `👁️ Hindsight — recalled N memories` status line when auto-recall injects memory. Turn off for customer-facing agents. |
 
 > **Behavior change — `recall_types` defaults to `observation` only.**
 >
@@ -96,7 +98,8 @@ Config file: `~/.hermes/hindsight/config.json`
 | `retain_every_n_turns` | `1` | Retain every N turns (1 = every turn) |
 | `retain_context` | `conversation between Hermes Agent and the User` | Context label for retained memories |
 | `retain_tags` | — | Default tags applied to retained memories; merged with per-call tool tags |
-| `retain_source` | — | Optional `metadata.source` attached to retained memories |
+| `retain_source` | — | Opt-in `metadata.source` attached to retained memories (identifies the storing client, e.g. `hermes`). Empty by default — no attribution tag ships unless you set it. |
+| `retain_indicator` | `true` | Show a `👁️ Hindsight — saving to memory…` status line when a turn is saved. Turn off for customer-facing agents. |
 | `retain_user_prefix` | `User` | Label used before user turns in auto-retained transcripts |
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
 
@@ -120,6 +123,13 @@ Config file: `~/.hermes/hindsight/config.json`
 | `llm_base_url` | — | Endpoint URL for `openai_compatible` (e.g. `http://192.168.1.10:8080/v1`) |
 
 The LLM API key is stored in `~/.hermes/.env` as `HINDSIGHT_LLM_API_KEY`.
+
+The embedded daemon is a subprocess that cannot see the per-turn secret
+scope, so it reads the key from `~/.hindsight/profiles/<profile>.env`
+(materialized owner-only at setup and on config change). Key resolution
+order is explicit config → secret scope → the on-disk profile env, and the
+rewrite path is fail-closed: a build with no key never clobbers a profile
+file that already holds one.
 
 ## Tools
 
@@ -145,4 +155,4 @@ Available in `hybrid` and `tools` memory modes:
 
 ## Client Version
 
-Requires `hindsight-client >= 0.4.22`. The plugin auto-upgrades on session start if an older version is detected.
+Requires `hindsight-client >= 0.6.1`. The plugin auto-upgrades on session start if an older version is detected.
