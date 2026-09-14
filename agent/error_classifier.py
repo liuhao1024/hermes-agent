@@ -188,6 +188,9 @@ _MULTIMODAL_TOOL_CONTENT_PATTERNS = (
     "tool message must be a string", "expected string, got list", "expected string, got array",
     # Console Go / pydantic-v2 relays behind opencode-go (422, param ``messages.N.tool.content.str``, #104731).
     "tool_call.content must be string", "tool.content.str", "input should be a valid string",
+    # NVIDIA NIM Rust serde (400, #111231): the untagged-enum name is the only token that both
+    # survives lowercasing and names tool-message content specifically.
+    "chatcompletionrequesttoolmessagecontent",
 )
 
 # Local-inference memory/resource-ceiling rejections (oMLX/MLX memory guard,

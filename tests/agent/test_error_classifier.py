@@ -1365,6 +1365,18 @@ class TestMultimodalToolContentUnsupported:
         assert result.reason == FailoverReason.multimodal_tool_content_unsupported
         assert result.retryable is True
 
+    def test_nvidia_nim_serde_untagged_enum_pattern(self):
+        """The actual NVIDIA NIM 400 wording from #111231: the Rust gateway fails
+        to deserialize list-type tool message content and names the untagged enum."""
+        e = MockAPIError(
+            "HTTP 400: Failed to deserialize the JSON body into the target type: data did not match any "
+            "variant of untagged enum ChatCompletionRequestToolMessageContent at line 1 column 1974809",
+            status_code=400,
+        )
+        result = classify_api_error(e, provider="nvidia", model="moonshotai/kimi-k3")
+        assert result.reason == FailoverReason.multimodal_tool_content_unsupported
+        assert result.retryable is True
+
 
 
 
