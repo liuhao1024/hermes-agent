@@ -97,6 +97,28 @@ class TestDetectToolFailureStructured:
         assert _detect_tool_failure("web_search", result) == (False, "")
 
 
+class TestDetectToolFailureDictResults:
+    """Structured tool paths hand back an already-parsed dict, not a JSON string.
+
+    Regression: a dict used to fall through safe_json_loads as None, so a
+    failing terminal result was classified as a success (#111815)."""
+
+    def test_terminal_nonzero_exit_dict_detected(self):
+        assert _detect_tool_failure("terminal", {"exit_code": 2}) == (True, " [exit 2]")
+
+    def test_terminal_dict_success_not_flagged(self):
+        assert _detect_tool_failure("terminal", {"exit_code": 0, "output": "ok"}) == (False, "")
+
+    def test_structured_error_dict_detected(self):
+        is_failure, suffix = _detect_tool_failure(
+            "web_search", {"success": False, "error": "quota exhausted"})
+        assert is_failure is True
+        assert "quota exhausted" in suffix
+
+    def test_multimodal_success_dict_still_success(self):
+        assert _detect_tool_failure("vision", {"type": "image", "data": "..."}) == (False, "")
+
+
 
 class TestGetCuteToolMessageFailureSuffix:
     """End-to-end: failure suffix is appended by get_cute_tool_message."""

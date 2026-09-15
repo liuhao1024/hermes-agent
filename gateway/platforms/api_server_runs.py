@@ -41,11 +41,24 @@ _SUBAGENT_TEXT_KEYS = ("goal", "summary", "output_tail")
 _USAGE_FIELDS = (
     ("input_tokens", "session_prompt_tokens"), ("output_tokens", "session_completion_tokens"),
     ("total_tokens", "session_total_tokens"))
+
+
+def _tool_result_summary(result: Any, max_len: int = 200) -> str:
+    """Short textual preview of a tool result for the run event stream (pre-redaction)."""
+    if not isinstance(result, str):
+        try:
+            result = json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError):
+            result = str(result)
+    return result[:max_len]
+
+
 # Tool-progress event -> SSE payload fields (tool_name, preview, kwargs); key order is wire format.
 _FIXED_EVENT_FIELDS = {
     "tool.started": lambda tool, preview, kw: {"tool": tool, "preview": preview},
     "tool.completed": lambda tool, preview, kw: {
-        "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False)},
+        "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False),
+        "result": kw.get("result")},
     "reasoning.available": lambda tool, preview, kw: {"text": preview or ""}}
 
 
@@ -165,7 +178,14 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
         # lifecycle boundaries must land so clients can observe delegate_task failures.
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
-            _push(_run_event(run_id, event_type, **fields(tool_name, preview, kwargs)))
+            event = _run_event(run_id, event_type, **fields(tool_name, preview, kwargs))
+            if event.get("result") is None:
+                event.pop("result", None)
+            else:
+                # Tool output is free text on the public stream: force secret redaction (as for
+                # subagent text fields) and cap it so a huge result never floods the wire.
+                event["result"] = redact_sensitive_text(_tool_result_summary(event["result"]), force=True)
+            _push(event)
         elif event_type in {"subagent.start", "subagent.complete"}:
             event = _run_event(run_id, event_type)
             if preview is not None:

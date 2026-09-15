@@ -900,11 +900,12 @@ def _trim_error(msg: str) -> str:
     return _tail_trunc(msg, _ERROR_SUFFIX_MAX_LEN)
 
 
-def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
+def _detect_tool_failure(tool_name: str, result: str | dict | None) -> tuple[bool, str]:
     """Return ``(is_failure, suffix)`` for a tool result, e.g. ``(True, " [exit 1]")``."""
     if result is None or file_mutation_result_landed(tool_name, result):
         return False, ""
-    data = safe_json_loads(result)
+    # Structured tool paths hand back an already-parsed dict; text tools return JSON strings.
+    data = result if isinstance(result, dict) else safe_json_loads(result)
 
     # Terminal: non-zero exit code is the canonical failure signal.
     if tool_name == "terminal":
@@ -922,7 +923,8 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         err = data.get("error") or data.get("message")
         if err and (failed or "error" in data):
             return True, f" [{_trim_error(str(err))}]"
-    # Multimodal results (dicts) are successes; failures arrive as JSON-encoded strings.
+    # Multimodal success dicts carry no failure fields and fall through above; the
+    # error-substring heuristic below only reads unparsed string results.
     if isinstance(result, str) and (
         '"error"' in result[:500].lower() or '"failed"' in result[:500].lower() or result.startswith("Error")
     ):

@@ -749,6 +749,54 @@ class TestRunEventCallback:
         for field in ("preview", "goal", "summary", "output_tail"):
             assert secret not in event[field], field
 
+    @pytest.mark.asyncio
+    async def test_tool_completed_carries_redacted_result_summary(self, adapter):
+        """tool.completed must publish the (redacted, capped) tool result so /v1/runs
+        consumers can tell a blocked refusal from an ordinary failure (#111815)."""
+        run_id = "run_tool_completed_result"
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        adapter._run_streams[run_id] = queue
+        adapter._run_statuses.pop(run_id, None)
+
+        callback = adapter._make_run_event_callback(run_id, loop)
+        secret = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+        callback(
+            "tool.completed", "terminal", None, None,
+            duration=0.5, is_error=True,
+            result=f"leaked {secret} " + "x" * 400,
+        )
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["event"] == "tool.completed"
+        assert event["error"] is True
+        assert "result" in event
+        assert secret not in event["result"]
+        assert len(event["result"]) <= 200
+
+    @pytest.mark.asyncio
+    async def test_tool_completed_serializes_dict_result_and_omits_when_absent(self, adapter):
+        """A structured dict result is summarized as JSON text; producers that emit
+        no result (e.g. the codex runtime) must not grow a null field."""
+        run_id = "run_tool_completed_dict"
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        adapter._run_streams[run_id] = queue
+        adapter._run_statuses.pop(run_id, None)
+
+        callback = adapter._make_run_event_callback(run_id, loop)
+        callback("tool.completed", "terminal", None, None, duration=0.1, is_error=True,
+                 result={"exit_code": 2, "output": ""})
+        callback("tool.completed", "web_search", None, None, duration=0.2, is_error=False)
+
+        dict_event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert dict_event["error"] is True
+        assert '"exit_code": 2' in dict_event["result"]
+
+        plain_event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert plain_event["error"] is False
+        assert "result" not in plain_event
+
 
 # ---------------------------------------------------------------------------
 # /health endpoint
