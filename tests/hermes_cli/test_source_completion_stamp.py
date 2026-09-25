@@ -146,3 +146,59 @@ def test_full_checkout_refreshes_release_tags_before_publishing_identity(tmp_pat
     assert stamp is not None
     assert (stamp["baseVersion"], stamp["distance"]) == (versions[1][1], 1)
     assert stamp["commit"] == commit == git(checkout, "rev-parse", "HEAD")
+
+
+def _config_value(root: Path, key: str) -> str:
+    result = subprocess.run(["git", "config", "--get", key], cwd=root, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def test_full_checkout_tag_fetch_does_not_reapply_the_partial_clone_filter(tmp_path):
+    # Passing --filter to git fetch writes remote.origin.promisor/partialclonefilter even when
+    # those keys were removed, converting a repaired full clone back into a tree:0 partial clone
+    # and re-arming the should_include_obj fetch failure. A checkout that is neither shallow nor
+    # partial must be fetched unfiltered.
+    from hermes_cli.gitlock import fetch_full_commit_graph
+
+    server = _repo(tmp_path)
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+
+    def git(root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, env=env, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    git(server, "config", "uploadpack.allowFilter", "true")
+    checkout = tmp_path / "checkout"
+    git(server, "clone", "-q", "--no-tags", server.as_uri(), str(checkout))
+
+    fetch_full_commit_graph(checkout)
+
+    assert git(checkout, "rev-parse", "--is-shallow-repository") == "false"
+    assert _config_value(checkout, "remote.origin.partialclonefilter") == ""
+    assert _config_value(checkout, "remote.origin.promisor") == ""
+    assert git(checkout, "tag", "--list", "v*") == "v0.21.4"
+
+
+def test_partial_checkout_keeps_on_demand_trees_when_refreshing_tags(tmp_path):
+    # A tree:0 partial clone stays on-demand: the tag refresh keeps its filter instead of
+    # silently dragging in every tree, and still lands the tags it fetched for.
+    from hermes_cli.gitlock import fetch_full_commit_graph
+
+    server = _repo(tmp_path)
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+
+    def git(root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, env=env, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    git(server, "config", "uploadpack.allowFilter", "true")
+    checkout = tmp_path / "checkout"
+    git(server, "clone", "-q", "--no-tags", "--filter=tree:0", server.as_uri(), str(checkout))
+
+    fetch_full_commit_graph(checkout)
+
+    assert _config_value(checkout, "remote.origin.partialclonefilter") == "tree:0"
+    assert _config_value(checkout, "remote.origin.promisor") == "true"
+    assert git(checkout, "tag", "--list", "v*") == "v0.21.4"

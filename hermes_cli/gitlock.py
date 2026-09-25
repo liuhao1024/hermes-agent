@@ -395,13 +395,19 @@ def fetch_full_commit_graph(repo_root: Path, **run_kwargs) -> bool:
 
     A full commit graph does not imply current tags, especially after a --no-tags
     clone. Fetch version tags explicitly without fetching every remote branch or
-    replacing existing tags. Trees and blobs stay on demand. Returns whether the
-    checkout was unshallowed; fetch failures raise subprocess errors.
+    replacing existing tags. Trees and blobs stay on demand for checkouts that are
+    already on-demand; a full checkout is fetched unfiltered so the fetch cannot
+    re-write promisor config onto it. Returns whether the checkout was unshallowed;
+    fetch failures raise subprocess errors.
     """
     shallow = _shallow_file_path(repo_root) is not None
+    # Passing --filter to git fetch (re)writes remote.origin.promisor/partialclonefilter even
+    # when those keys were removed, converting a repaired full clone back into a partial one.
+    partial = bool(_git_stdout_lines(repo_root, ["config", "--get", "remote.origin.partialclonefilter"]))
+    fetch_filter = ["--filter=tree:0"] if (shallow or partial) else []
     subprocess.run(
         ["git", "fetch", "--quiet", *(["--unshallow"] if shallow else []),
-         "--filter=tree:0", "--no-tags", "origin", "refs/tags/v*:refs/tags/v*"],
+         *fetch_filter, "--no-tags", "origin", "refs/tags/v*:refs/tags/v*"],
         cwd=str(repo_root), check=True, capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=900, **run_kwargs,
     )
