@@ -535,16 +535,19 @@ def metadata_issued_by_origin(metadata: Any, auth_server_url: str | None, respon
     actually read from (the final request after any followed redirect), so a redirected document never
     matches. Whoever can publish that document already
     controls the origin's well-known tree, so accepting it grants a path-controlling attacker nothing.
-    Strava's MCP connector publishes exactly this pair (#116233). Anything else (another origin, a
-    different path, the root or OIDC fallback documents, a redirect target) still goes through the
-    exact-string check."""
+    Strava's MCP connector publishes exactly this pair (#116233). The root identifier written with a
+    trailing slash is the same shape with an empty path: Google's hosted MCP servers advertise
+    ``https://accounts.google.com/`` and the root document names ``https://accounts.google.com``, the same
+    URI after RFC 3986 §6.2.3 scheme-based normalization (#89412). Anything else (another origin, a
+    different path, the OIDC fallback documents, a redirect target) still goes through the exact-string
+    check."""
     from urllib.parse import urlsplit
     if not auth_server_url:
         return False
     parts = urlsplit(auth_server_url)
     path = parts.path.rstrip("/")
-    if (not path or ".." in path.split("/") or parts.username is not None or parts.query or parts.fragment
-            or response.status_code != 200):
+    if ((not path and parts.path != "/") or ".." in path.split("/") or parts.username is not None
+            or parts.query or parts.fragment or response.status_code != 200):
         return False
     origin = f"{parts.scheme}://{parts.netloc}"
     derived = f"{origin}/.well-known/oauth-authorization-server{path}"

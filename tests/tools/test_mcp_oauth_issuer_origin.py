@@ -21,6 +21,7 @@ RESOURCE = "https://res.example/mcp"
 AS_ORIGIN = "https://as.example"
 ADVERTISED = f"{AS_ORIGIN}/mcp-issuer"
 PATH_DOC = "/.well-known/oauth-authorization-server/mcp-issuer"
+ROOT_DOC = "/.well-known/oauth-authorization-server"
 
 
 @pytest.mark.asyncio
@@ -56,8 +57,8 @@ def _asm(issuer):
 class _StandIn:
     """Resource + authorization server behind one httpx MockTransport; ``issuer_doc`` maps ASM path -> document."""
 
-    def __init__(self, httpx, issuer_doc):
-        self.httpx, self.issuer_doc, self.hits = httpx, issuer_doc, []
+    def __init__(self, httpx, issuer_doc, advertised=ADVERTISED):
+        self.httpx, self.issuer_doc, self.advertised, self.hits = httpx, issuer_doc, advertised, []
 
     def __call__(self, request):
         url = str(request.url)
@@ -69,7 +70,7 @@ class _StandIn:
                 return j(200, {"ok": True})
             return j(401, {}, **{"WWW-Authenticate": 'Bearer resource_metadata="https://res.example/.well-known/oauth-protected-resource"'})
         if url == "https://res.example/.well-known/oauth-protected-resource":
-            return j(200, {"resource": RESOURCE, "authorization_servers": [ADVERTISED]})
+            return j(200, {"resource": RESOURCE, "authorization_servers": [self.advertised]})
         if url.startswith(AS_ORIGIN) and path in self.issuer_doc:
             return j(200, self.issuer_doc[path])
         if url == f"{AS_ORIGIN}/register":
@@ -80,7 +81,7 @@ class _StandIn:
         return j(404, {})
 
 
-async def _run_flow(tmp_path, monkeypatch, issuer_doc):
+async def _run_flow(tmp_path, monkeypatch, issuer_doc, advertised=ADVERTISED):
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyUrl
 
@@ -105,7 +106,7 @@ async def _run_flow(tmp_path, monkeypatch, issuer_doc):
         server_name="srv", server_url=RESOURCE, storage=storage,
         client_metadata=OAuthClientMetadata(redirect_uris=[AnyUrl("http://127.0.0.1:1/cb")], client_name="Hermes Agent"),
         redirect_handler=redirect, callback_handler=callback)
-    standin = _StandIn(httpx, issuer_doc)
+    standin = _StandIn(httpx, issuer_doc, advertised)
     async with httpx.AsyncClient(auth=provider, transport=httpx.MockTransport(standin)) as client:
         response = await client.get(RESOURCE)
     return response, standin, seen, provider
@@ -135,4 +136,33 @@ async def test_other_issuer_shapes_are_still_rejected(tmp_path, monkeypatch, iss
 
     with pytest.raises((OAuthFlowError, OAuthRegistrationError)):
         await _run_flow(tmp_path, monkeypatch, issuer_doc)
+    assert not (tmp_path / "mcp-tokens" / "srv.json").exists()
+
+
+# Google's hosted MCP servers (gmailmcp/calendarmcp.googleapis.com) advertise the root identifier with a
+# trailing slash, ``https://accounts.google.com/``, while the root document names ``https://accounts.google.com``.
+# The same URI after RFC 3986 §6.2.3 scheme-based normalization, so it must complete (#89412).
+@pytest.mark.asyncio
+async def test_root_identifier_with_trailing_slash_completes_the_flow(tmp_path, monkeypatch):
+    response, standin, seen, provider = await _run_flow(
+        tmp_path, monkeypatch, {ROOT_DOC: _asm(AS_ORIGIN)}, advertised=f"{AS_ORIGIN}/")
+
+    assert response.status_code == 200
+    assert seen["authorize_url"].startswith(f"{AS_ORIGIN}/authorize?")
+    assert str(provider.context.oauth_metadata.issuer).rstrip("/") == AS_ORIGIN
+    assert json.loads((tmp_path / "mcp-tokens" / "srv.client.json").read_text())["issuer"] == f"{AS_ORIGIN}/"
+    assert json.loads((tmp_path / "mcp-tokens" / "srv.json").read_text())["access_token"] == "AT-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issuer_doc", [
+    pytest.param({ROOT_DOC: _asm("https://other.example")}, id="different-origin"),
+    pytest.param({ROOT_DOC: _asm(f"{AS_ORIGIN}/other-path")}, id="path-issuer"),
+    pytest.param({"/.well-known/openid-configuration": _asm(AS_ORIGIN)}, id="oidc-document-only"),
+])
+async def test_root_identifier_with_trailing_slash_other_shapes_are_still_rejected(tmp_path, monkeypatch, issuer_doc):
+    from mcp.client.auth.exceptions import OAuthFlowError, OAuthRegistrationError
+
+    with pytest.raises((OAuthFlowError, OAuthRegistrationError)):
+        await _run_flow(tmp_path, monkeypatch, issuer_doc, advertised=f"{AS_ORIGIN}/")
     assert not (tmp_path / "mcp-tokens" / "srv.json").exists()
