@@ -958,6 +958,53 @@ async def test_force_oauth_converts_200_to_401(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_force_oauth_synthetic_401_uses_sdk_httpx_flavour(tmp_path, monkeypatch):
+    """Under mcp 2.0 the transport hands the bridge ``httpx2`` objects. The synthetic 401 must be
+    an ``httpx2.Response`` bound to that request: an unbound ``httpx.Response`` raises RuntimeError
+    on ``.request`` in HermesProviderMixin's ``_asm_discovery_failure`` sniff, the SDK flow is
+    abandoned before it sees the 401, and the login probe ends with no token (#89412)."""
+    import httpx2
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    token_ep = "https://idp.example.com/oauth/token"
+    d = tmp_path / "mcp-tokens"
+    d.mkdir(parents=True)
+    (d / "srv.client.json").write_text('{"client_id": "dead"}')
+
+    forwarded = []
+
+    async def fake_base_flow(self, request):
+        async with self.context.lock:
+            response = yield request
+            forwarded.append(response)
+
+    from mcp.client.auth.oauth2 import OAuthClientProvider
+    monkeypatch.setattr(OAuthClientProvider, "async_auth_flow", fake_base_flow)
+
+    provider = _provider_with_token_endpoint(tmp_path, {}, token_ep, monkeypatch)
+    provider._force_oauth = True
+    provider.context.oauth_metadata = None  # avoid model_dump on SimpleNamespace
+    provider.context.current_tokens = None
+
+    request = httpx2.Request("POST", "https://mcp.example.com/mcp")
+    ok_resp = httpx2.Response(200, request=request, json={"result": {}})
+
+    gen = provider.async_auth_flow(request)
+    assert await gen.__anext__() is request
+    try:
+        await gen.asend(ok_resp)
+    except StopAsyncIteration:
+        pass
+
+    assert len(forwarded) == 1, "the SDK flow never received the synthetic 401"
+    synthetic = forwarded[0]
+    assert isinstance(synthetic, httpx2.Response)
+    assert synthetic.status_code == 401
+    assert synthetic.request is request
+    assert provider._force_oauth is False
+
+
+@pytest.mark.asyncio
 async def test_force_oauth_does_not_override_real_401(tmp_path, monkeypatch):
     """When the server returns a real 401, _force_oauth does not interfere."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

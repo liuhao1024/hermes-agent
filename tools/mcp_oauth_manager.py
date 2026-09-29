@@ -253,13 +253,11 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
                     except Exception:  # pragma: no cover — defensive: context not ready
                         no_valid_token = True
                     if no_valid_token and getattr(incoming, "status_code", None) != 401:
-                        import httpx as _httpx
-                        incoming = _httpx.Response(401)
-                        if isinstance(request, _httpx.Request):
-                            # Bind the request so downstream sniffers that read
-                            # ``response.request`` (e.g. _asm_discovery_failure) work;
-                            # an unbound httpx Response raises on that property.
-                            incoming.request = request
+                        # The SDK's httpx flavour (httpx2 under mcp 2.0), bound to the request:
+                        # downstream sniffers read ``response.request`` (_asm_discovery_failure),
+                        # and an unbound response raises RuntimeError on that property.
+                        from tools.mcp_tool import sdk_httpx
+                        incoming = sdk_httpx().Response(401, request=request)
                     self._force_oauth = False
                 # Another request may have refreshed/authorized while this one was in flight:
                 # retry with that token instead of a duplicate OAuth transition from a stale 401/403.
