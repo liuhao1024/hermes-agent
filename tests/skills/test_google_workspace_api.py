@@ -269,3 +269,46 @@ def test_docs_append_carries_tab_id_and_refuses_ambiguous_writes(api_module, mon
         api_module.docs_append(types.SimpleNamespace(doc_id="doc1", text="more", tab=None))
     err = json.loads(capsys.readouterr().err)
     assert "tabs" in err and len(err["tabs"]) == 3
+
+
+def test_gmail_search_empty_hit_set_is_a_json_array(api_module, monkeypatch, capsys):
+    """Search output is documented as JSON, and the gws backend answers ``[]``
+    for an empty hit set — the Python fallback must not break that contract
+    with plain text."""
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+        "resultSizeEstimate": 0
+    }
+    monkeypatch.setattr(api_module, "build_service", lambda *a: service)
+
+    api_module.gmail_search(types.SimpleNamespace(query="is:unread", max=10))
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_gmail_search_nonempty_hit_set_keeps_row_schema(api_module, monkeypatch, capsys):
+    """A non-empty hit set must keep the documented per-message row schema
+    once the empty-result early return is gone."""
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+
+    service = MagicMock()
+    messages = service.users.return_value.messages.return_value
+    messages.list.return_value.execute.return_value = {
+        "messages": [{"id": "m1", "threadId": "t1"}]
+    }
+    messages.get.return_value.execute.return_value = {
+        "id": "m1", "threadId": "t1", "snippet": "hello", "labelIds": ["INBOX"],
+        "payload": {"headers": [
+            {"name": "From", "value": "a@example.com"},
+            {"name": "Subject", "value": "Hi"},
+        ]},
+    }
+    monkeypatch.setattr(api_module, "build_service", lambda *a: service)
+
+    api_module.gmail_search(types.SimpleNamespace(query="is:unread", max=10))
+    assert json.loads(capsys.readouterr().out) == [{
+        "id": "m1", "threadId": "t1",
+        "from": "a@example.com", "to": "", "subject": "Hi", "date": "",
+        "snippet": "hello", "labels": ["INBOX"],
+    }]
