@@ -1,4 +1,5 @@
 """Independent core/optional dependency and reviewed CVE policies."""
+import re
 import tomllib
 from pathlib import Path
 
@@ -6,6 +7,40 @@ from packaging.requirements import Requirement
 from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pep503(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_exact_pinned_deps_exempt_from_exclude_newer():
+    """Every exact-pinned dependency must appear in [tool.uv.exclude-newer-package].
+
+    uv reads a missing upload-time as "newer than the cutoff" and filters the
+    pinned version out, so an exact pin on a mirror index without upload-time
+    bricks resolution (#131681 pilk shape: "pilk==0.2.4 has no publish time").
+    A pin cannot float without a reviewed bump, so exemption (``false`` or a
+    per-package timestamp) removes that brick risk at zero supply-chain cost.
+    """
+    manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    exempt = {_pep503(name) for name in manifest["tool"]["uv"]["exclude-newer-package"]}
+    requirement_groups = [manifest["project"]["dependencies"]]
+    requirement_groups += manifest["project"]["optional-dependencies"].values()
+    requirement_groups += [manifest.get("build-system", {}).get("requires", [])]
+    requirement_groups += manifest.get("dependency-groups", {}).values()
+    pinned = set()
+    for group in requirement_groups:
+        for requirement in map(Requirement, group):
+            specs = list(requirement.specifier)
+            # `==1.2.*` wildcards can float within the prefix — only bare `==` pins
+            # are frozen to one reviewed version.
+            if (len(specs) == 1 and specs[0].operator == "=="
+                    and not specs[0].version.endswith(".*")):
+                pinned.add(_pep503(requirement.name))
+    assert pinned <= exempt, (
+        "exact-pinned deps missing from [tool.uv.exclude-newer-package]: "
+        f"{sorted(pinned - exempt)}"
+    )
 
 
 def test_test_dependencies_are_group_only_in_manifest_and_lock():
