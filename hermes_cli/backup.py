@@ -1,5 +1,6 @@
 """Backup and import commands for hermes CLI."""
 
+import errno
 import json
 import logging
 import os
@@ -296,6 +297,22 @@ def _is_non_regular_path(path: Path) -> bool:
         return False
 
 
+# Errno values meaning "this filesystem cannot stat/handle this entry at all" — e.g. the running
+# gateway's control socket on a Docker Desktop virtiofs bind mount, where lstat() itself fails
+# with ENOTSUP (#131748). There the entry is non-regular, so the archive writer classifies the
+# failure as a skip, not as a read failure flipping every backup to incomplete.
+_STAT_UNSUPPORTED_ERRNOS = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL})
+
+
+def _is_unsupported_entry_error(path: Path, exc: BaseException) -> bool:
+    """True when *exc* says the filesystem itself cannot archive *path* — an
+    ENOTSUP/EOPNOTSUPP/EINVAL OSError on a non-directory — rather than that the
+    file exists but cannot be read."""
+    return (isinstance(exc, OSError)
+            and exc.errno in _STAT_UNSUPPORTED_ERRNOS
+            and not path.is_dir())
+
+
 def _is_link_path(path: Path) -> bool:
     """True for symlinks and Windows junctions/reparse points — the only
     directory entries a strict walk must never descend (os.walk already
@@ -503,12 +520,14 @@ def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, ou
 
 def _write_zip_entries(
     zf: zipfile.ZipFile, files_to_add: List[Tuple[Path, Path]], out_path: Path,
-    *, on_db_failure, on_error, on_progress, track_bytes: bool) -> int:
+    *, on_db_failure, on_error, on_progress, track_bytes: bool, on_skip=None) -> int:
     """Add every ``(abs_path, rel_path)`` to *zf*, WAL-safe for ``*.db``; return bytes archived.
 
     ``on_db_failure(rel_path)`` runs when a SQLite snapshot fails (may raise to abort);
-    ``on_error(rel_path, exc)`` records a read failure; ``on_progress(i)`` fires every 500 files;
-    ``track_bytes`` stats plain files for the size total.
+    ``on_error(rel_path, exc)`` records a read failure; ``on_skip(rel_path)`` records an entry
+    the filesystem itself cannot archive (ENOTSUP-class errno, e.g. a live socket on a virtiofs
+    mount); ``on_progress(i)`` fires every 500 files; ``track_bytes`` stats plain files for the
+    size total.
     """
     total_bytes = 0
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
@@ -524,7 +543,10 @@ def _write_zip_entries(
                 if track_bytes:
                     total_bytes += abs_path.stat().st_size
         except (PermissionError, OSError, ValueError) as exc:
-            on_error(rel_path, exc)
+            if on_skip is not None and _is_unsupported_entry_error(abs_path, exc):
+                on_skip(rel_path)
+            else:
+                on_error(rel_path, exc)
             continue
         if i % 500 == 0:
             on_progress(i)
@@ -627,6 +649,7 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
     logger.info("backup phase=archive status=started files=%d", file_count)
     print(f"Backing up {file_count} files ...")
     errors = []
+    skipped_unsupported: list[str] = []
     t0 = time.monotonic()
 
     def _progress(i: int) -> None:
@@ -638,7 +661,8 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
         total_bytes = _write_zip_entries(
             zf, files_to_add, out_path, on_progress=_progress, track_bytes=True,
             on_db_failure=lambda rel: errors.append(f"{rel}: SQLite safe copy failed"),
-            on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"))
+            on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"),
+            on_skip=lambda rel: skipped_unsupported.append(str(rel)))
         # External memory-provider state never includes ``.db`` files in practice, so no
         # SQLite snapshot is needed; _write_zip_file still drops a failed partial member.
         for abs_path, arcname in external_to_add:
@@ -646,7 +670,10 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
                 _write_zip_file(zf, abs_path, arcname)
                 total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"{arcname}: {exc}")
+                if _is_unsupported_entry_error(abs_path, exc):
+                    skipped_unsupported.append(arcname)
+                else:
+                    errors.append(f"{arcname}: {exc}")
     elapsed = time.monotonic() - t0
     zip_size = out_path.stat().st_size
     logger.info("backup phase=archive status=complete duration_ms=%.1f files=%d errors=%d bytes=%d",
@@ -663,6 +690,10 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
               "(not portable):\n" + "\n".join(f"    {p}" for p in sorted(skipped_external)[:10]))
     if skipped_dirs:
         print("\n  Excluded directories:\n" + "\n".join(f"    {d}/" for d in sorted(skipped_dirs)))
+    if skipped_unsupported:
+        print(f"\n  Skipped {len(skipped_unsupported)} file(s) the filesystem does not support "
+              "archiving (e.g. a live socket on a virtiofs mount):\n"
+              + "\n".join(f"    {p}" for p in sorted(skipped_unsupported)[:10]))
     if errors:
         _print_capped(f"\n  Archive kept, but {len(errors)} file(s) could not be added:", errors, "  ")
     else:
@@ -2222,6 +2253,8 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
             _write_zip_entries(
                 zf, files_to_add, out_path, on_db_failure=_db_failure, track_bytes=False,
                 on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"),
+                on_skip=lambda rel: logger.debug(
+                    "Full-zip backup skipped non-archivable %s (filesystem does not support it)", rel),
                 on_progress=lambda i: logger.info(
                     "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
     except (OSError, _SQLiteSnapshotError) as exc:

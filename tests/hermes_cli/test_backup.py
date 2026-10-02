@@ -1,5 +1,6 @@
 """Tests for hermes backup and import commands."""
 
+import errno
 import json
 import os
 import socket
@@ -1813,6 +1814,134 @@ def _fail_zip_write_after(monkeypatch, member: str, byte_count: int = 120_000) -
         return real_write(self, filename, arcname, compress_type, compresslevel)
 
     monkeypatch.setattr(zipfile.ZipFile, "write", flaky_write)
+
+
+def _fail_sock_write(monkeypatch, exc: OSError) -> None:
+    """Make ZipFile.write fail for gateway.sock the way a virtiofs bind mount does: the
+    lstat already failed with ENOTSUP (#131748), so _is_non_regular_path() could not
+    classify the live control socket, and the archive write then hits the same errno."""
+    real_write = zipfile.ZipFile.write
+
+    def unsupported_write(self, filename, arcname=None, compress_type=None, compresslevel=None):
+        if Path(str(arcname)).name == "gateway.sock":
+            raise exc
+        return real_write(self, filename, arcname, compress_type, compresslevel)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", unsupported_write)
+
+
+class TestUnsupportedEntrySkips:
+    """ENOTSUP-class archive failures are non-regular entries to skip, not read failures.
+
+    On a Docker Desktop virtiofs HERMES_HOME, lstat() on gateway.sock itself raises
+    OSError(95, ENOTSUP), so the walk's non-regular filter cannot recognize the socket
+    and the archive write fails the same way — previously flipping EVERY backup to
+    "incomplete" (non-zero exit) for as long as the gateway was up (#131748)."""
+
+    def test_enotsup_socket_is_skipped_and_backup_stays_complete(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        # Placeholder regular file: the walk keeps it (lstat succeeds on the test fs);
+        # the patched ZipFile.write reproduces the virtiofs write failure.
+        (hermes_home / "gateway.sock").write_bytes(b"")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _fail_sock_write(monkeypatch, OSError(errno.ENOTSUP, "Operation not supported"))
+
+        from hermes_cli.backup import run_backup
+        out_zip = tmp_path / "backup.zip"
+        assert run_backup(Namespace(output=str(out_zip))) is True
+
+        out = capsys.readouterr().out
+        assert "could not be added" not in out
+        assert "Backup complete" in out
+        assert "gateway.sock" in out  # reported as skipped, not as a failure
+        with zipfile.ZipFile(out_zip) as zf:
+            names = zf.namelist()
+        assert "gateway.sock" not in names
+        assert "config.yaml" in names  # everything else still lands in the archive
+
+    def test_genuinely_unreadable_file_still_fails_the_backup(self, tmp_path, monkeypatch, capsys):
+        """The ENOTSUP carve-out must not weaken the #93347 fail-visible contract: a
+        permission failure on a regular file still flips the run to incomplete."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        (hermes_home / "gateway.sock").write_bytes(b"")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _fail_sock_write(monkeypatch, PermissionError(errno.EACCES, "Permission denied"))
+
+        from hermes_cli.backup import run_backup
+        assert run_backup(Namespace(output=str(tmp_path / "backup.zip"))) is False
+        assert "could not be added" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("code", [errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL])
+    def test_write_zip_entries_routes_unsupported_errno_to_on_skip(self, tmp_path, monkeypatch, code):
+        _fail_sock_write(monkeypatch, OSError(code, "Operation not supported"))
+
+        from hermes_cli.backup import _write_zip_entries
+
+        root = tmp_path / ".hermes"
+        root.mkdir()
+        (root / "config.yaml").write_text("{}")
+        (root / "gateway.sock").write_bytes(b"")
+        files = [(root / "config.yaml", Path("config.yaml")), (root / "gateway.sock", Path("gateway.sock"))]
+
+        skipped, failed = [], []
+        with zipfile.ZipFile(tmp_path / "out.zip", "w") as zf:
+            _write_zip_entries(
+                zf, files, tmp_path / "out.zip",
+                on_db_failure=lambda rel: failed.append((str(rel), "db")),
+                on_error=lambda rel, exc: failed.append((str(rel), exc)),
+                on_skip=lambda rel: skipped.append(str(rel)),
+                on_progress=lambda i: None, track_bytes=False)
+        assert skipped == ["gateway.sock"]
+        assert failed == []
+        with zipfile.ZipFile(tmp_path / "out.zip") as zf:
+            assert zf.namelist() == ["config.yaml"]
+
+    def test_write_zip_entries_without_on_skip_still_reports_the_error(self, tmp_path, monkeypatch):
+        """A caller that passes no on_skip keeps the old behaviour: the entry surfaces
+        through on_error instead of being silently dropped."""
+        _fail_sock_write(monkeypatch, OSError(errno.ENOTSUP, "Operation not supported"))
+
+        from hermes_cli.backup import _write_zip_entries
+
+        root = tmp_path / ".hermes"
+        root.mkdir()
+        (root / "gateway.sock").write_bytes(b"")
+
+        failed = []
+        with zipfile.ZipFile(tmp_path / "out.zip", "w") as zf:
+            _write_zip_entries(
+                zf, [(root / "gateway.sock", Path("gateway.sock"))], tmp_path / "out.zip",
+                on_db_failure=lambda rel: failed.append((str(rel), "db")),
+                on_error=lambda rel, exc: failed.append((str(rel), exc)),
+                on_progress=lambda i: None, track_bytes=False)
+        assert failed and str(failed[0][0]).endswith("gateway.sock")
+
+    def test_pre_update_backup_not_diverted_to_salvage_by_enotsup_socket(self, tmp_path, monkeypatch):
+        """The automatic pre-update backup hits the same ENOTSUP socket; without the
+        carve-out every update run would see its backup salvaged as incomplete."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        (hermes_home / "gateway.sock").write_bytes(b"")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _fail_sock_write(monkeypatch, OSError(errno.ENOTSUP, "Operation not supported"))
+
+        import hermes_cli.backup as backup_mod
+        out_zip = tmp_path / "pre-update.zip"
+        assert backup_mod._write_full_zip_backup(out_zip, hermes_home) == out_zip
+        with zipfile.ZipFile(out_zip) as zf:
+            assert "gateway.sock" not in zf.namelist()
+            assert "config.yaml" in zf.namelist()
 
 
 class TestFailedZipMemberRecovery:
