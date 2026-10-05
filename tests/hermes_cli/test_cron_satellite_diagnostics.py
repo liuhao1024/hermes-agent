@@ -308,3 +308,70 @@ def test_doctor_reports_persisted_dispatch_health(served_root, capsys, dispatch)
         assert persisted["last_dispatch"]["kind"] == "on_time"
         assert cron_doctor() == 0
         assert "This warning clears" not in capsys.readouterr().out
+
+
+def test_doctor_excludes_the_invoking_job_from_findings(served_root, capsys, monkeypatch):
+    """A wrapper job that shells out to `hermes cron doctor` must not be failed by its own
+    nested last_error (#133135): the scheduler stamps HERMES_CRON_JOB_ID on script spawns and
+    the doctor excludes that job, so the watchdog wrapper can go green once every OTHER job is
+    healthy."""
+    from cron import jobs
+    from hermes_cli.cron import cron_doctor
+
+    served_root.joinpath("profiles", "probe", "scripts").mkdir(parents=True, exist_ok=True)
+    wrapper = jobs.create_job(prompt=None, schedule="every 1h", script="watchdog.py", no_agent=True)
+    other = jobs.create_job(prompt="probe", schedule="every 1h")
+    records = {r["id"]: r for r in jobs.load_jobs()}
+    for record, error in ((records[wrapper["id"]], "wrapper-own-failure"),
+                          (records[other["id"]], "other-failure")):
+        record["last_status"] = "error"
+        record["last_error"] = error
+    jobs.save_jobs(list(records.values()))
+
+    monkeypatch.setenv("HERMES_CRON_JOB_ID", wrapper["id"])
+    assert cron_doctor() == 1  # the other job is still reported
+    output = capsys.readouterr().out
+    assert "other-failure" in output
+    assert "wrapper-own-failure" not in output
+    assert f"Excluded job {wrapper['id']}" in output
+    assert "invoked this doctor run" in output
+
+    # The doctor goes green once the OTHER job clears; the count still covers both jobs.
+    records = {r["id"]: r for r in jobs.load_jobs()}
+    records[other["id"]]["last_status"] = "ok"
+    records[other["id"]]["last_error"] = ""
+    jobs.save_jobs(list(records.values()))
+    assert cron_doctor() == 0
+    green = capsys.readouterr().out
+    assert "found no issues" in green
+    assert "Checked 2 active job(s)" in green
+
+    # Without the env stamp (a human running `hermes cron doctor` by hand) every job is
+    # reported, wrapper included.
+    monkeypatch.delenv("HERMES_CRON_JOB_ID")
+    records = {r["id"]: r for r in jobs.load_jobs()}
+    records[wrapper["id"]]["last_status"] = "error"
+    records[wrapper["id"]]["last_error"] = "wrapper-own-failure"
+    jobs.save_jobs(list(records.values()))
+    assert cron_doctor() == 1
+    assert "wrapper-own-failure" in capsys.readouterr().out
+
+
+def test_doctor_bounds_last_run_failed_line(served_root, capsys):
+    """The `last run failed:` line is one collapsed, capped line (#133135): a wrapper job's
+    last_error embeds another command's full stdout, which used to be echoed back unbounded —
+    and stored again as the next run's last_error, nesting daily."""
+    from cron import jobs
+    from hermes_cli.cron import cron_doctor
+
+    jobs.create_job(prompt="probe", schedule="every 1h")
+    records = jobs.load_jobs()
+    records[0]["last_status"] = "error"
+    records[0]["last_error"] = "unreachable " * 30 + "\nsecret second line"
+    jobs.save_jobs(records)
+    assert cron_doctor() == 1
+    output = capsys.readouterr().out
+    assert "last run failed: unreachable" in output
+    assert "secret second line" not in output
+    line = next(l for l in output.splitlines() if "last run failed" in l)
+    assert len(line) < 200

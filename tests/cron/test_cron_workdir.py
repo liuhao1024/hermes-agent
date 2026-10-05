@@ -351,8 +351,9 @@ def test_build_job_prompt_inline_script_receives_configured_workdir(monkeypatch,
     workdir.mkdir()
     observed: dict = {}
 
-    def run_script(script_path, workdir=None, cancel_event=None, interpreter=None):
+    def run_script(script_path, workdir=None, cancel_event=None, interpreter=None, job_id=None):
         observed["script_workdir"] = workdir
+        observed["invoking_job_id"] = job_id
         return True, "collected data"
 
     monkeypatch.setattr(scheduler_script, "_run_job_script", run_script)
@@ -361,4 +362,5 @@ def test_build_job_prompt_inline_script_receives_configured_workdir(monkeypatch,
          "workdir": str(workdir)})
 
     assert observed["script_workdir"] == str(workdir)
+    assert observed["invoking_job_id"] == "inline"  # stamped for the doctor's self-exclusion (#133135)
     assert "collected data" in prompt

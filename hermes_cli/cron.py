@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import os
 import re
 import sys
 from datetime import timezone
@@ -657,7 +658,9 @@ def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
     last_status = str(job.get("last_status") or "").strip().lower()
     # "delivery_failed" = the agent run succeeded; the delivery issue below reports it.
     if last_status and last_status not in {"ok", "delivery_failed", "delivery_queued"}:
-        issues.append(f"last run failed: {str(job.get('last_error') or 'unknown error').strip()}")
+        # Bounded to one collapsed line (#133135): a job whose script captures another command's
+        # full stdout stores that as last_error, which the doctor must not echo back unbounded.
+        issues.append(f"last run failed: {_short_reason(job.get('last_error'))}")
     if delivery_err := str(job.get("last_delivery_error") or "").strip():
         issues.append(f"last run finished but the result was not delivered ({_short_reason(delivery_err)}). "
                       f"{_delivery_fix_hint(job)}")
@@ -693,10 +696,23 @@ def cron_doctor() -> int:
     """Run read-only cron health checks and return a shell-friendly status."""
     from cron.jobs import list_jobs
     jobs = list_jobs(include_disabled=False)
+    # A wrapper job whose script runs `hermes cron doctor` poisons itself otherwise: the failed
+    # run's stdout becomes its own last_error, so the doctor re-reports (and re-fails) the very
+    # job that invoked it, nesting its output one level deeper on every tick (#133135). The
+    # scheduler stamps HERMES_CRON_JOB_ID on script spawns; honour it here.
+    invoking_id = os.environ.get("HERMES_CRON_JOB_ID", "").strip()
+    excluded = None
+    if invoking_id:
+        excluded = next((j for j in jobs if str(j.get("id") or "") == invoking_id), None)
+        jobs = [j for j in jobs if str(j.get("id") or "") != invoking_id]
     findings = [(job, issues) for job in jobs if (issues := _cron_doctor_issues_for_job(job))]
+    if excluded is not None:
+        print(color(f"  Excluded job {excluded.get('id', '?')} ({excluded.get('name', '(unnamed)')}): "
+                    "it invoked this doctor run.", Colors.DIM))
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
-        note = f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured."
+        total = len(jobs) + (1 if excluded is not None else 0)
+        note = f"  Checked {total} active job(s)." if total else "  No active jobs configured."
         print(color(note, Colors.DIM))
         return 0
     issue_count = sum(len(issues) for _, issues in findings)
