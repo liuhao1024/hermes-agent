@@ -304,6 +304,110 @@ class TestDottedLeafKeys:
 
 
 # ---------------------------------------------------------------------------
+# #133459 — first write of a NEW dotted key into a keys-contain-dots map
+# ---------------------------------------------------------------------------
+
+class TestFirstWriteOfDottedKey:
+    """``_greedy_literal_match`` only disambiguates when the literal key already exists, so the
+    first write of a new dotted key (no dotted sibling to match) silently landed as a bogus
+    nested mapping (``glm-5.3-flash`` -> ``glm-5: {3-flash: ...}``) with a success message.
+
+    Registered keys-contain-dots scalar maps (``agent.reasoning_overrides``,
+    ``<platform>.channel_prompts``) join the remaining segments back into the single literal key
+    the runtime looks up."""
+
+    def test_first_write_lands_as_literal_sibling(self, _isolated_hermes_home):
+        """Issue #133459 repro: unrelated sibling only, so neither greedy matching nor the
+        phantom-sibling guard can help the first write."""
+        _write_config(
+            _isolated_hermes_home,
+            {"agent": {"reasoning_overrides": {"gpt-6-luna": "high"}}},
+        )
+        set_config_value("agent.reasoning_overrides.glm-5.3-flash", "high")
+        saved = _read_config(_isolated_hermes_home)
+        overrides = saved["agent"]["reasoning_overrides"]
+        assert overrides == {"gpt-6-luna": "high", "glm-5.3-flash": "high"}
+        assert "glm-5" not in overrides  # no bogus nested segment
+
+    def test_first_write_into_empty_map(self, _isolated_hermes_home):
+        _write_config(
+            _isolated_hermes_home, {"agent": {"reasoning_overrides": {}}}
+        )
+        set_config_value("agent.reasoning_overrides.glm-5.3-flash", "low")
+        saved = _read_config(_isolated_hermes_home)
+        assert saved["agent"]["reasoning_overrides"] == {"glm-5.3-flash": "low"}
+
+    def test_existing_scalar_override_not_replaced_by_nested_dict(
+        self, _isolated_hermes_home
+    ):
+        """A write whose greedy prefix matches an existing SCALAR key used to replace the
+        override with a nested dict (``glm-5.3: high`` -> ``glm-5.3: {flash: ...}``), silently
+        destroying the user's override for ``glm-5.3``. Inside a keys-contain-dots map the write
+        lands as a new literal sibling instead."""
+        _write_config(
+            _isolated_hermes_home,
+            {"agent": {"reasoning_overrides": {"glm-5.3": "high"}}},
+        )
+        set_config_value("agent.reasoning_overrides.glm-5.3.flash", "low")
+        saved = _read_config(_isolated_hermes_home)
+        assert saved["agent"]["reasoning_overrides"] == {
+            "glm-5.3": "high",
+            "glm-5.3.flash": "low",
+        }
+
+    def test_first_write_matrix_room_id_with_dots(self, _isolated_hermes_home):
+        """#80006 first-write residual: a room ID like ``!room:chat.example.cc`` needs no
+        escaping on first write either."""
+        _write_config(
+            _isolated_hermes_home,
+            {"matrix": {"channel_prompts": {"!other:example.org": "old"}}},
+        )
+        set_config_value("matrix.channel_prompts.!room:chat.example.cc", "be brief")
+        saved = _read_config(_isolated_hermes_home)
+        prompts = saved["matrix"]["channel_prompts"]
+        assert prompts == {
+            "!other:example.org": "old",
+            "!room:chat.example.cc": "be brief",
+        }
+
+    def test_written_key_reads_back_and_unsets(self, _isolated_hermes_home, capsys):
+        _write_config(
+            _isolated_hermes_home, {"agent": {"reasoning_overrides": {}}}
+        )
+        set_config_value("agent.reasoning_overrides.glm-5.3-flash", "medium")
+        capsys.readouterr()  # drop the set-command success line
+        args = argparse.Namespace(
+            config_command="get",
+            key="agent.reasoning_overrides.glm-5.3-flash",
+            json=False,
+        )
+        config_command(args)
+        assert capsys.readouterr().out.strip() == "medium"
+        args = argparse.Namespace(
+            config_command="unset",
+            key="agent.reasoning_overrides.glm-5.3-flash",
+        )
+        config_command(args)
+        saved = _read_config(_isolated_hermes_home)
+        # unset prunes emptied parents down to (and including) the empty mapping.
+        overrides = saved.get("agent", {}).get("reasoning_overrides", {})
+        assert "glm-5.3-flash" not in overrides
+
+    def test_unregistered_map_still_splits_for_new_nested_keys(
+        self, _isolated_hermes_home
+    ):
+        """Only registered keys-contain-dots maps join segments: an ordinary namespace whose
+        values happen to be scalars still creates real nested keys on first write."""
+        _write_config(
+            _isolated_hermes_home, {"display": {"personality": "default"}}
+        )
+        set_config_value("display.some.deep.path", "x")
+        saved = _read_config(_isolated_hermes_home)
+        assert saved["display"]["some"]["deep"]["path"] == "x"
+        assert saved["display"]["personality"] == "default"
+
+
+# ---------------------------------------------------------------------------
 # Backward compatibility: plain dotted paths with no dotted-key collision
 # split exactly as before.
 # ---------------------------------------------------------------------------

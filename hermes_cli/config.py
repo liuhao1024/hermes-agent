@@ -696,6 +696,24 @@ def _phantom_sibling(container: dict, part: str) -> Optional[str]:
     return next((k for k in container if isinstance(k, str) and k.startswith(prefix)), None)
 
 
+# Flat config maps whose KEYS are dotted identifiers by design: ``agent.reasoning_overrides`` maps
+# model IDs (``glm-5.3-flash``) to scalar efforts (``resolve_per_model_reasoning_effort`` reads one
+# literal key per model), and every ``<platform>.channel_prompts`` maps channel/room IDs (Matrix
+# ``!room:chat.example.cc``) to scalar prompts. Their VALUES are always scalars — the runtime never
+# nests under them — so an unescaped write joins every remaining path segment back into the single
+# literal key it looks up (#133459 first-write residual of the #84064 family: without this, the first
+# write of a new dotted key silently landed as ``glm-5: {3-flash: ...}`` because no existing literal
+# key let ``_greedy_literal_match`` disambiguate).
+_FLAT_DOTTED_KEY_MAPS = frozenset({"agent.reasoning_overrides"})
+_FLAT_DOTTED_KEY_MAP_SUFFIXES = (".channel_prompts",)
+
+
+def _is_flat_dotted_key_map(path_parts: list) -> bool:
+    """True when the mapping reached at *path_parts* is a known keys-contain-dots scalar map."""
+    joined = ".".join(path_parts)
+    return joined in _FLAT_DOTTED_KEY_MAPS or joined.endswith(_FLAT_DOTTED_KEY_MAP_SUFFIXES)
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at a dotted key path, creating intermediate dicts on demand.
     Numeric segments index lists; the index must already exist (lists are never grown).
@@ -708,6 +726,10 @@ def _set_nested(config, dotted_key: str, value):
     so ``models.grok-4.6.supports_vision`` lands on the real ``grok-4.6`` entry. And when a write WOULD
     create a new intermediate mapping that shadows an existing dotted sibling (``grok-4`` beside
     ``grok-4.5``), it raises ``ValueError`` instead of silently writing a phantom the runtime never reads.
+    Keys-contain-dots maps (#133459): inside a registered flat map (``agent.reasoning_overrides``,
+    ``<platform>.channel_prompts``) the remaining segments join back into ONE literal key — the runtime
+    reads a scalar per identifier, so both a first write of a new dotted key and a write whose greedy
+    prefix would otherwise replace a scalar sibling with a nested dict land correctly.
     """
     parts = _split_key_path(dotted_key)
     current = config
@@ -728,6 +750,9 @@ def _set_nested(config, dotted_key: str, value):
                     f"segment {part!r} is not a numeric index")
             i += 1
         elif isinstance(current, dict):
+            if _is_flat_dotted_key_map(parts[:i]):
+                current[".".join(remaining)] = value
+                return
             match = _greedy_literal_match(current, remaining)
             if match is not None:
                 key, consumed = match
