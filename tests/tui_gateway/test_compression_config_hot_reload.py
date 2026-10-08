@@ -7,6 +7,7 @@ the already-open session kept the computed threshold from agent creation.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from agent.context_compressor import ContextCompressor
@@ -300,11 +301,33 @@ def test_removing_codex_native_compaction_restores_false(monkeypatch):
     assert session["agent"].codex_responses_native_compaction is False
 
 
-def test_removing_codex_native_threshold_restores_default(monkeypatch):
+def test_removing_codex_native_threshold_restores_automatic(monkeypatch):
+    # Absence restores the construction-path default (None = follow the local compression
+    # trigger; 200000 only when no trigger resolves), not the pre-a2af8405d1 hard fallback.
     session, _ = _neutral_session()
     session["agent"].codex_responses_compact_threshold = 120_000
     _sync_with_cfg(monkeypatch, session, {"compression": {}})
-    assert session["agent"].codex_responses_compact_threshold == 200_000
+    assert session["agent"].codex_responses_compact_threshold is None
+
+
+def test_null_codex_native_threshold_is_automatic_not_invalid(monkeypatch, caplog):
+    # #134822: an explicit `codex_responses_compact_threshold: null` — the shipped example
+    # config's own line — is the documented default, not an invalid value: no warning,
+    # automatic mode, matching what agent_init installs at construction time.
+    session, _ = _neutral_session()
+    session["agent"].codex_responses_compact_threshold = 120_000
+    with caplog.at_level(logging.WARNING, logger="tui_gateway.session_compression"):
+        _sync_with_cfg(
+            monkeypatch,
+            session,
+            {"compression": {"codex_responses_compact_threshold": None}},
+        )
+    assert session["agent"].codex_responses_compact_threshold is None
+    assert not [
+        r
+        for r in caplog.records
+        if "codex_responses_compact_threshold" in r.getMessage()
+    ]
 
 
 def test_apply_live_compression_config_is_self_contained():

@@ -101,13 +101,25 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     enabled_raw = compression.get("enabled", True)
     agent.compression_enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in {"true", "1", "yes"}
     agent.codex_responses_native_compaction = is_truthy_value(compression.get("codex_responses_native", False))
-    native_threshold_raw = compression.get("codex_responses_compact_threshold", 200_000)
-    try:
-        if isinstance(native_threshold_raw, bool) or (native_threshold := int(native_threshold_raw)) <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        logger.warning("Invalid compression.codex_responses_compact_threshold=%r; using 200000.", native_threshold_raw)
-        native_threshold = 200_000
+    # null/absent = automatic: follow the local compression trigger. That has been the
+    # construction-path default since a2af8405d1 changed DEFAULT_CONFIG to None; the 200000
+    # literal here predates it and reports the shipped `null` as "Invalid" (#134822).
+    native_threshold_raw = compression.get("codex_responses_compact_threshold")
+    if native_threshold_raw is None:
+        native_threshold = None
+    else:
+        try:
+            if (
+                isinstance(native_threshold_raw, bool)
+                or (native_threshold := int(native_threshold_raw)) <= 0
+            ):
+                raise ValueError
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid compression.codex_responses_compact_threshold=%r; using 200000.",
+                native_threshold_raw,
+            )
+            native_threshold = 200_000
     agent.codex_responses_compact_threshold = native_threshold
     # Absence restores the agent_init/config default (0 = disabled).
     with contextlib.suppress(TypeError, ValueError):
