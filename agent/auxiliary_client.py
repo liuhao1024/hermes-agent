@@ -1665,6 +1665,12 @@ class CodexAuxiliaryClient:
         self.chat = _ChatShim(_CodexCompletionsAdapter(real_client, model))
         self.api_key = real_client.api_key
         self.base_url = real_client.base_url
+        # Entra ID: the SDK parks the rotating bearer in _api_key_provider and leaves .api_key
+        # empty; carry it over so fallback activation (client_lifecycle._swap_fallback_clients)
+        # sees a usable credential source on the wrapper instead of a 401-causing "" (#135474).
+        key_provider = vars(real_client).get("_api_key_provider")
+        if callable(key_provider):
+            self._api_key_provider = key_provider
 
     def close(self):
         self._real_client.close()
