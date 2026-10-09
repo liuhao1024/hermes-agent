@@ -942,6 +942,38 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
     assert child_dir.exists(), "Non-scratch 'dir' child workspace is never deleted"
 
 
+def test_deferred_child_completion_sweeps_grandparent_scratch(kanban_home):
+    """A -> B -> C: B completing while C is active must still release A.
+
+    Regression for the gap where ``_cleanup_workspace`` returned from its
+    deferral branch before running the parent sweep. A (done, only child B)
+    was then never swept: C's completion only sweeps its direct parent B.
+    """
+    with kbc.connect() as conn:
+        a = kb.create_task(conn, title="grandparent")
+        b = kb.create_task(conn, title="parent")
+        c = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, a, b)
+        kb.link_tasks(conn, b, c)
+        workspaces = {}
+        for tid in (a, b):
+            ws = kbw.resolve_workspace(kb.get_task(conn, tid))
+            kbw.set_workspace_path(conn, tid, ws)
+            workspaces[tid] = ws
+
+        kb.complete_task(conn, a, result="handoff to B")
+        assert workspaces[a].exists(), "deferred while B active"
+
+        kb.complete_task(conn, b, result="handoff to C")
+        assert workspaces[b].exists(), "deferred while C active"
+        assert not workspaces[a].exists(), (
+            "B is terminal, so A has no active children and must be swept"
+        )
+
+        kb.complete_task(conn, c, result="done")
+        assert not workspaces[b].exists()
+
+
 
 
 def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
