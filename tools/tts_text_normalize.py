@@ -262,6 +262,22 @@ def strip_nonspoken_blocks(text: str) -> str:
     return text
 
 
+# Provider inline markup is engine control syntax, not prose (#133131): Fish Audio S2
+# emits ``<|speaker:0|>`` switches and a ``<|phoneme_start|>...<|phoneme_end|>`` phonetic
+# payload; Drama 3 emits HTML-like word tags such as ``<whisper>...</whisper>``. The
+# cleanup passes rewrite pipes, expand unit letters ("m" -> "metres") and prune
+# identifier-looking tokens (a closing tag to "< >"), so these spans are held out as
+# plain-word placeholders before the Markdown/symbol/pruning passes and restored
+# afterwards. Held after strip_nonspoken_blocks() so ``<think>`` blocks still vanish
+# with their contents.
+_PROVIDER_MARKUP_RE = re.compile(
+    r"<\|phoneme_start\|>.*?<\|phoneme_end\|>"
+    r"|<\|[^|<>\s]{1,64}\|>"
+    r"|</?[a-zA-Z][a-zA-Z0-9_-]*>",
+    flags=re.DOTALL | re.IGNORECASE)
+_MARKUP_HOLD = "ZZHERMESTTSMARKUP{}ZZ"
+
+
 def flatten_newlines_for_payload(text: str) -> str:
     """Collapse newlines into sentence breaks for single-line TTS payloads: some OpenAI-compatible
     backends (e.g. Kokoro) truncate at the first newline; smoothing already ends each line with
@@ -280,19 +296,38 @@ def flatten_newlines_for_payload(text: str) -> str:
     return text.strip()
 
 
+def _truncate_spoken_text(text: str, max_chars: int | None) -> str:
+    """Apply the payload cap without emitting a partial inline markup tag."""
+    if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
+        return text
+    cut = max_chars
+    for match in _PROVIDER_MARKUP_RE.finditer(text):
+        if match.start() < cut < match.end():
+            cut = match.start()
+            break
+    return text[:cut].rstrip()
+
+
 def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     """Return a TTS-friendly script from assistant text (deterministic cleanup, not a rewrite).
-    Pipeline: non-spoken blocks > Markdown > symbols/units > identifier-dense tokens >
-    line formatting into sentence pauses > single line (for newline-sensitive providers),
-    then ``max_chars``."""
-    spoken = text
-    for step in (strip_nonspoken_blocks, strip_markdown_for_tts, normalize_symbols_for_tts,
+    Pipeline: non-spoken blocks > provider inline markup held aside > Markdown > symbols/units >
+    identifier-dense tokens > line formatting into sentence pauses > single line (for
+    newline-sensitive providers) > markup restored > ``max_chars``."""
+    spoken = strip_nonspoken_blocks(text)
+    held: list[str] = []
+
+    def _hold_markup(match: re.Match) -> str:
+        held.append(match.group(0))
+        return _MARKUP_HOLD.format(len(held) - 1)
+
+    spoken = _PROVIDER_MARKUP_RE.sub(_hold_markup, spoken)
+    for step in (strip_markdown_for_tts, normalize_symbols_for_tts,
                  prune_identifier_tokens_for_tts,
                  smooth_whitespace_for_tts, flatten_newlines_for_payload):
         spoken = step(spoken)
-    if max_chars is not None and max_chars > 0 and len(spoken) > max_chars:
-        spoken = spoken[:max_chars].rstrip()
-    return spoken
+    for index, tag in enumerate(held):
+        spoken = spoken.replace(_MARKUP_HOLD.format(index), tag)
+    return _truncate_spoken_text(spoken, max_chars)
 
 
 def _strip_markdown_for_tts(text: str) -> str:
