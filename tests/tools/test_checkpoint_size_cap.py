@@ -164,3 +164,59 @@ def test_restore_keeps_its_target_alive_while_taking_the_safety_snapshot(history
     result = manager.restore(str(project), target)
     assert result["success"], result
     assert (project / "old.bin").stat().st_size == 1_300_000
+
+
+def test_over_cap_take_reclaims_pending_objects_instead_of_dropping_history(history):
+    """A dropped round leaves its objects on disk until a reclaim, so the size the next take
+    measures cannot move: compact before judging the cap and keep every remaining snapshot
+    once the packed store fits (#138039)."""
+    from tools.checkpoint_pruning import GC_PENDING_NAME
+
+    base, project, manager = history
+    store = checkpoints._store_path(base)
+    manager.max_total_size_mb = 1
+
+    # First over-cap take: drops the one large oldest snapshot, defers the gc.
+    (project / "new.txt").write_text("new snapshot", encoding="utf-8")
+    manager.new_turn()
+    assert manager.ensure_checkpoint(str(project), "newest")
+    assert (store / GC_PENDING_NAME).exists()
+    assert checkpoints._dir_size_bytes(store) > 1024 * 1024  # the drop has not moved the number
+
+    # The reclaim is still pending, so the raw size is unchanged: this take must compact,
+    # not read the same over-cap number and drop the next round of real snapshots.
+    (project / "new2.txt").write_text("newer snapshot", encoding="utf-8")
+    manager.new_turn()
+    assert manager.ensure_checkpoint(str(project), "newest-2")
+    assert not (store / GC_PENDING_NAME).exists()
+    assert [row["reason"] for row in manager.list_checkpoints(str(project))] == \
+        ["newest-2", "newest"] + [f"small-{i}" for i in reversed(range(5))]
+    assert checkpoints._dir_size_bytes(store) <= 1024 * 1024
+
+
+def test_a_pending_marker_from_a_count_trim_never_gcs_on_the_take_path(history):
+    """``trim`` defers its gc too; while the store fits its size cap the take path must stay
+    off the repack regardless of the marker — only an imminent drop compacts (#79334)."""
+    from tools.checkpoint_pruning import GC_PENDING_NAME
+
+    _, project, manager = history
+    manager.max_total_size_mb = 500
+    manager.max_snapshots = 3
+    gc_calls = []
+    original = checkpoints._run_git
+
+    def count_gc(args, *rest, **kwargs):
+        if args[0] == "gc":
+            gc_calls.append(args)
+        return original(args, *rest, **kwargs)
+
+    (project / "new.txt").write_text("new snapshot", encoding="utf-8")
+    manager.new_turn()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(checkpoints, "_run_git", count_gc)
+        assert manager.ensure_checkpoint(str(project), "newest")
+    assert gc_calls == []
+    store = checkpoints._store_path(checkpoints.CHECKPOINT_BASE)
+    assert (store / GC_PENDING_NAME).exists()  # the count trim still defers its gc
+    assert [row["reason"] for row in manager.list_checkpoints(str(project))] == \
+        ["newest", "small-4", "small-3"]

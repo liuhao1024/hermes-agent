@@ -115,6 +115,15 @@ class Pruner:
         against an unchanging pack once flattened every project to a single snapshot."""
         if cap_bytes <= 0 or self.dir_size(self.store) <= cap_bytes:
             return False
+        if self.gc_pending():
+            # Objects an earlier round dropped stay on disk until the periodic prune
+            # reclaims them, so the raw size cannot move and every take would read the
+            # same over-cap number and discard another round of real history. Compact
+            # once here — only when a drop is otherwise imminent — then re-judge the cap
+            # against the packed size; a store that fits keeps all of its snapshots.
+            self.reclaim()
+            if self.dir_size(self.store) <= cap_bytes:
+                return False
         changed = False
         for ref in self._git(["for-each-ref", "--format=%(refname)", self.refs_prefix]).splitlines():
             commits = self._commits(ref)
