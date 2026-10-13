@@ -81,3 +81,34 @@ def test_prepare_spoken_text_closes_colon_on_single_line():
     assert prepare_spoken_text("Here is the list:") == "Here is the list."
     # ...but a digit-preceded colon is a ratio and must stay intact.
     assert prepare_spoken_text("Final score 3:2") == "Final score 3:2"
+
+
+def test_prepare_spoken_text_preserves_provider_inline_markup():
+    # Fish Audio S2 speaker switches survive the table-pipe rewrite verbatim (#133131).
+    assert prepare_spoken_text("<|speaker:0|>Hi there.<|speaker:1|>Hello back!") == \
+        "<|speaker:0|>Hi there.<|speaker:1|>Hello back!"
+    # Colon-less markers and the phonetic payload between the pair are held out of
+    # the unit/symbol passes: "m" must not become "metres", pipes must not pause.
+    assert prepare_spoken_text("Say <|phoneme_start|>t ah0 m ey1 t ow0<|phoneme_end|> tomato.") == \
+        "Say <|phoneme_start|>t ah0 m ey1 t ow0<|phoneme_end|> tomato."
+
+
+def test_prepare_spoken_text_preserves_word_level_html_tags():
+    # Fish Drama-3 word tags: the closing tag used to be pruned down to "< >".
+    assert prepare_spoken_text("I have a <whisper>tiny secret</whisper> for you.", max_chars=None) == \
+        "I have a <whisper>tiny secret</whisper> for you."
+
+
+def test_prepare_spoken_text_markup_protection_keeps_other_rules():
+    # Markdown table pipes still become pauses, and think blocks (markup included)
+    # are still silenced rather than held.
+    assert prepare_spoken_text("a | b | c") == "a; b; c"
+    spoken = prepare_spoken_text("<think>hidden <|speaker:0|>secret</think>aloud")
+    assert spoken == "aloud"
+
+
+def test_prepare_spoken_text_never_truncates_inside_markup():
+    tag = "<|speaker:0|>"
+    assert prepare_spoken_text(tag, max_chars=5) == ""
+    assert prepare_spoken_text(f"hello {tag} world", max_chars=12) == "hello"
+    assert prepare_spoken_text(f"{tag}abc", max_chars=len(tag)) == tag
