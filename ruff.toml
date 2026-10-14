@@ -469,6 +469,11 @@ select = [
 "apps/desktop/electron/fixtures/**" = ["TID251"]
 "pm/**" = ["TID251"]
 "tests/pm/**" = ["TID251"]
+# Skill scripts are stdlib-only and run under whatever interpreter the host
+# resolves for `python3` (macOS path_helper → Apple 3.9), so they stay
+# compatible with Pythons older than the repo's requires-python floor (issue #138239).
+"skills/**" = ["UP017"]
+"optional-skills/**" = ["UP017"]
 
 [lint.mccabe]
 max-complexity = 20
