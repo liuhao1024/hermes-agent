@@ -506,7 +506,7 @@ class PluginContext:
 
     def call_mcp(
         self, server: str, tool: str, arguments: Optional[dict[str, Any]] = None,
-        timeout: float = 30,
+        timeout: float = 30, *, bypass_hooks: bool = False,
     ) -> dict[str, Any]:
         """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
         (same trust gates, breaker, reconnect — never a parallel connection). Servers not in
@@ -516,8 +516,15 @@ class PluginContext:
         This is a per-server grant, deliberately not ambient authority over every configured server.
         TODO(#64228): swap the per-server allowlist for the declared capability model once it lands
         (per-tool grants, expiry, ro/rw).
+
+        Unless ``bypass_hooks=True``, the call runs the same policy chain the model path uses
+        (``pre_tool_call`` hook, then ``tool_execution`` middleware) under its wire name
+        ``mcp__<server>__<tool>``, so policy plugins also see plugin-initiated MCP calls (#138864).
         """
-        if server not in self._mcp_allowlist(self.plugin_id):
+        from hermes_cli.plugins_tool_policy import (
+            mcp_allowlist_for, mcp_result_envelope, policy_gated_tool_call,
+        )
+        if server not in mcp_allowlist_for(self.plugin_id):
             raise PermissionError(
                 f"Plugin {self.manifest.name!r} is not allowed to call MCP "
                 f"server {server!r}. Add it to "
@@ -529,46 +536,23 @@ class PluginContext:
         except (TypeError, ValueError):
             timeout = 30.0
         timeout = max(1.0, min(timeout, 600.0))
-        from tools.mcp_tool_handlers import _make_tool_handler
-        raw = _make_tool_handler(server, tool, timeout)(dict(arguments or {}))
+
+        def _run(next_args: dict[str, Any]) -> str:
+            from tools.mcp_tool_handlers import _make_tool_handler
+            return _make_tool_handler(server, tool, timeout)(next_args)
+
+        call_args = dict(arguments or {})
+        if bypass_hooks:
+            raw: Any = _run(call_args)
+        else:
+            from tools.mcp_tool_schema import mcp_prefixed_tool_name
+            raw, block_message = policy_gated_tool_call(
+                self._manager._cli_ref, mcp_prefixed_tool_name(server, tool), call_args, _run)
+            if block_message is not None:
+                return {"ok": False, "error": block_message}
         logger.debug("Plugin %s called MCP %s/%s (timeout=%ss, %d chars returned)",
                      self.manifest.name, server, tool, timeout, len(raw or ""))
-        return self._mcp_envelope(raw)
-
-    _MCP_RESULT_CHAR_CAP = 65536
-
-    @classmethod
-    def _mcp_envelope(cls, raw: Any) -> dict[str, Any]:
-        """Normalize an MCP handler result string into a stable envelope."""
-        if not isinstance(raw, str):
-            raw = "" if raw is None else str(raw)
-        truncated = len(raw) > cls._MCP_RESULT_CHAR_CAP
-        if truncated:
-            raw = raw[: cls._MCP_RESULT_CHAR_CAP] + "… [truncated]"
-        try:
-            parsed: Any = json.loads(raw)
-        except (ValueError, TypeError):
-            parsed = None
-        if isinstance(parsed, dict) and "error" in parsed:
-            envelope: dict[str, Any] = {"ok": False, "error": parsed["error"]}
-        elif isinstance(parsed, dict) and "result" in parsed:
-            envelope = {"ok": True, "result": parsed["result"]}
-            if "structuredContent" in parsed:
-                envelope["structuredContent"] = parsed["structuredContent"]
-        else:
-            envelope = {"ok": True, "result": parsed if parsed is not None else raw}
-        return {**envelope, "truncated": True} if truncated else envelope
-
-    @staticmethod
-    def _mcp_allowlist(plugin_id: str) -> list[str]:
-        """Operator-granted MCP server allowlist; missing/unreadable -> [] (default-deny)."""
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config() or {}
-        except Exception:
-            return []
-        allowlist = (_plugin_settings_entry(cfg, plugin_id) or {}).get("mcp_allowlist")
-        return [str(item) for item in allowlist] if isinstance(allowlist, list) else []
+        return mcp_result_envelope(raw)
 
     def _tool_override_allowed(self, tool_name: str) -> bool:
         """Whether this plugin may override built-in tools: bundled plugins are trusted (a maintainer
@@ -669,16 +653,32 @@ class PluginContext:
         return self._register_entry("command", clean, self._manager._plugin_commands, entry,
                                     "Plugin %s registered command: /%s", clean)
 
-    def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
+    def dispatch_tool(self, tool_name: str, args: dict, *, bypass_hooks: bool = False, **kwargs) -> str:
         """Dispatch a tool call through the registry with the parent agent (when available)
-        resolved automatically; returns the handler's JSON string. ``kwargs`` forward to dispatch."""
-        from tools.registry import registry
+        resolved automatically; returns the handler's JSON string. ``kwargs`` forward to dispatch.
+
+        Unless ``bypass_hooks=True``, the call runs the same policy chain the model path uses
+        (``pre_tool_call``, then ``tool_execution`` middleware), so policy plugins also see
+        plugin-initiated calls (#138864); a block returns a tool-error JSON string.
+        """
+        from tools.registry import registry, tool_error
         # In gateway mode _cli_ref is None — tools degrade gracefully (no spinner, TERMINAL_CWD).
         if "parent_agent" not in kwargs:
             agent = getattr(self._manager._cli_ref, "agent", None)
             if agent is not None:
                 kwargs["parent_agent"] = agent
-        return registry.dispatch(tool_name, args, scope=self._manager.scope_key, **kwargs)
+
+        def _dispatch(next_args: dict) -> str:
+            return registry.dispatch(tool_name, next_args, scope=self._manager.scope_key, **kwargs)
+
+        if bypass_hooks:
+            return _dispatch(args)
+        from hermes_cli.plugins_tool_policy import policy_gated_tool_call
+        result, block_message = policy_gated_tool_call(
+            self._manager._cli_ref, tool_name, dict(args), _dispatch)
+        if block_message is not None:
+            return tool_error(block_message)
+        return result
 
     @_serialized_replacement
     def register_context_engine(self, engine) -> Optional[PluginRegistration]:

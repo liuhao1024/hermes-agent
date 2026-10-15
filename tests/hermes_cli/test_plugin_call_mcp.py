@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hermes_cli.plugins import PluginContext, PluginManifest
+from hermes_cli.plugins_tool_policy import MCP_RESULT_CHAR_CAP
 
 
 def _make_ctx(plugin_key: str = "my-plugin") -> PluginContext:
@@ -188,12 +189,12 @@ def test_timeout_defaults_and_bounds(monkeypatch):
 
 def test_oversized_result_is_truncated(monkeypatch):
     _patch_config(monkeypatch, {"my-plugin": {"mcp_allowlist": ["big"]}})
-    huge = "x" * (PluginContext._MCP_RESULT_CHAR_CAP + 5000)
+    huge = "x" * (MCP_RESULT_CHAR_CAP + 5000)
     _patch_handler(monkeypatch, huge)
 
     ctx = _make_ctx()
     result = ctx.call_mcp("big", "dump")
     assert result["ok"] is True
     assert result["truncated"] is True
-    assert len(result["result"]) <= PluginContext._MCP_RESULT_CHAR_CAP + 20
+    assert len(result["result"]) <= MCP_RESULT_CHAR_CAP + 20
     assert result["result"].endswith("… [truncated]")
