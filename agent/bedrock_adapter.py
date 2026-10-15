@@ -672,10 +672,22 @@ def is_anthropic_bedrock_model(model_id: str) -> bool:
 
 def convert_tools_to_converse(tools: list[dict]) -> list[dict]:
     """OpenAI ``{"function": {...}}`` tool defs → Converse ``{"toolSpec": {...}}``."""
-    return [{"toolSpec": {
-        "name": fn.get("name", ""), "description": fn.get("description", ""),
-        "inputSchema": {"json": fn.get("parameters", {"type": "object", "properties": {}})},
-    }} for fn in (t.get("function", {}) for t in tools or [])]
+    from tools.schema_sanitizer import _strip_top_level_combinators
+
+    out = []
+    for t in tools or []:
+        fn = t.get("function", {})
+        params = fn.get("parameters")
+        # Converse rejects top-level allOf/anyOf/oneOf in input_schema outright (#139065). Core
+        # defs are sanitized in model_tools, but plugin/MCP schemas reach here unsanitized.
+        if isinstance(params, dict) and any(k in params for k in ("allOf", "anyOf", "oneOf")):
+            fn = {**fn, "parameters": _strip_top_level_combinators(
+                params, path=fn.get("name", "<tool>"))}
+        out.append({"toolSpec": {
+            "name": fn.get("name", ""), "description": fn.get("description", ""),
+            "inputSchema": {"json": fn.get("parameters", {"type": "object", "properties": {}})},
+        }})
+    return out
 
 
 # Converse rejects empty OR whitespace-only text blocks, so the placeholder must be non-whitespace.

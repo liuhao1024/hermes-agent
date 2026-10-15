@@ -226,6 +226,47 @@ class TestConvertToolsToConverse:
         assert convert_tools_to_converse([]) == []
         assert convert_tools_to_converse(None) == []
 
+    def test_strips_top_level_combinators(self):
+        # Converse rejects a top-level allOf/anyOf/oneOf in input_schema for the WHOLE toolset
+        # (#139065); plugin/MCP schemas reach the adapter without model_tools' sanitizer pass.
+        from agent.bedrock_adapter import convert_tools_to_converse
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "conditional_tool",
+                "description": "Pydantic-style conditional-required hints",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "allOf": [{"if": {"properties": {"path": {"minLength": 1}}},
+                               "then": {"required": ["path"]}}],
+                },
+            },
+        }]
+        result = convert_tools_to_converse(tools)
+        schema = result[0]["toolSpec"]["inputSchema"]["json"]
+        assert "allOf" not in schema
+        assert schema["type"] == "object"
+        assert "path" in schema["properties"]
+        # The caller's tool definition is not mutated.
+        assert "allOf" in tools[0]["function"]["parameters"]
+
+    def test_nested_combinators_survive(self):
+        # Only the top level of input_schema is the wall: nested combinators are accepted.
+        from agent.bedrock_adapter import convert_tools_to_converse
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "t",
+                "description": "",
+                "parameters": {"type": "object",
+                               "properties": {"a": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                               "required": []},
+            },
+        }]
+        schema = convert_tools_to_converse(tools)[0]["toolSpec"]["inputSchema"]["json"]
+        assert "anyOf" in schema["properties"]["a"]
+
 
 # ---------------------------------------------------------------------------
 # Message conversion: OpenAI → Converse
