@@ -498,6 +498,13 @@ _PYTHON_EXCEPTION_LINE_RE = re.compile(
 # a closing quote into the mask turns value corruption into SYNTAX corruption
 # (unterminated quote → shell EOF / SyntaxError).
 _AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
+# A credential slot holding ONLY a shell variable reference (``$NAME`` / ``${NAME}``)
+# names where the secret enters at run time — the agent hands the user a working
+# command, and masking it hands back a broken one (#139212). Only the bare forms
+# are spared: anything around the reference (``$AT-tail``, ``${AT:-fallback}``)
+# can carry literal secret material, and assignment values already have their own
+# wider variable carve-out (_PATH_OR_VAR_VALUE_RE).
+_PURE_SHELL_VAR_RE = re.compile(r"^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$")
 
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
@@ -955,7 +962,9 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _redact_assignments(text, mask_nonreusable=file_read)
 
     if "uthorization" in text or "UTHORIZATION" in text:  # cheapest gate over every casing
-        text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
+        text = _AUTH_HEADER_RE.sub(
+            lambda m: m.group(1) + (m.group(2) or "")
+            + (m.group(3) if _PURE_SHELL_VAR_RE.fullmatch(m.group(3)) else _mask_token(m.group(3))), text)
 
     if ":" in text:
         text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)

@@ -511,6 +511,21 @@ class TestAuthHeaders:
         assert result.count('"') == 2, result  # both quotes survive
         assert result.endswith('"'), result
 
+    def test_shell_variable_credential_preserved(self):
+        # Regression for #139212: a credential slot holding ONLY a shell variable
+        # reference names where the secret enters at run time — masking hands back
+        # a command that no longer works.
+        for var in ("$AT", "${AT}"):
+            text = f'curl -H "Authorization: Bearer {var}" https://api.example.com'
+            assert redact_sensitive_text(text) == text, var
+        bare = 'curl -H "Authorization: $AT" https://api.example.com'
+        assert redact_sensitive_text(bare) == bare
+        # Fail-closed: anything around the reference can carry literal secret
+        # material, so only the bare forms are spared.
+        for tail in ("$AT-sk-abcdef1234567890", "${AT:-sk-abcdef1234567890}", "sk-$AT"):
+            text = f'curl -H "Authorization: Bearer {tail}"'
+            assert "sk-abcdef1234567890" not in redact_sensitive_text(text), tail
+
 
 
 class TestApiKeyHeaders:
