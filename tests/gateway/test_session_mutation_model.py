@@ -386,3 +386,82 @@ async def test_large_context_guard_reads_the_persisted_anchor_with_no_resident_a
     finally:
         await owner.close()
         store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_a_pick_resolves_named_providers_added_after_session_creation(tmp_path):
+    """A session that does not follow the profile carries the creation-time config snapshot, so
+    the named custom provider added to config.yaml after it was created must still resolve for a
+    mid-session pick — the same pick works from a fresh CLI read (#141063)."""
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from gateway.session_mutation_model import prepare_model
+    from gateway.session_policy import build_policy, restore_policy
+    from hermes_state import SessionDB
+    (tmp_path / 'config.yaml').write_text(
+        'providers:\n'
+        '  foo:\n'
+        '    name: Local-Ollama\n'
+        '    base_url: http://127.0.0.1:9/v1\n'
+        '    models:\n'
+        '      qwen3:4b:\n'
+        '        context_length: 64000\n')
+    with SessionDB(tmp_path / 'state.db') as db:
+        authority = SimpleNamespace(instance_id='i', epoch=1, profile_id='p', db=db, runner=SimpleNamespace(
+            _resolve_session_agent_runtime=lambda **k: (None, {'provider': 'nous'})))
+        policy = build_policy({'cwd': str(tmp_path), 'model': 'a'}, {'model': {'default': 'a'}})
+        prepared = {'snapshot': {'receipt': {'session_id': 'sid', 'policy': asdict(policy)}}}
+        switched = restore_policy((await prepare_model(authority, SimpleNamespace(source=None, route='r'),
+                                                       {'model': 'qwen3:4b', 'provider': 'foo'}, prepared))['policy'])
+        assert switched.model == 'qwen3:4b', 'a named provider added after creation stayed unresolvable'
+
+
+@pytest.mark.asyncio
+async def test_a_bypass_session_keeps_its_code_default_provider_snapshot(tmp_path):
+    """``--safe-mode``/``--ignore-user-config`` sessions never read config.yaml: a named provider
+    on disk must NOT become resolvable for their picks through the live read (#141063)."""
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from gateway.session_mutation_model import prepare_model
+    from gateway.session_policy import build_policy
+    from hermes_state import SessionDB
+    from hermes_state_runtime import RuntimeStoreError
+    (tmp_path / 'config.yaml').write_text(
+        'providers:\n'
+        '  foo:\n'
+        '    base_url: http://127.0.0.1:9/v1\n')
+    with SessionDB(tmp_path / 'state.db') as db:
+        authority = SimpleNamespace(instance_id='i', epoch=1, profile_id='p', db=db, runner=SimpleNamespace(
+            _resolve_session_agent_runtime=lambda **k: (None, {'provider': 'nous'})))
+        policy = build_policy({'cwd': str(tmp_path), 'model': 'a', 'ignore_user_config': True},
+                              {'model': {'default': 'a'}})
+        prepared = {'snapshot': {'receipt': {'session_id': 'sid', 'policy': asdict(policy)}}}
+        with pytest.raises(RuntimeStoreError) as exc:
+            await prepare_model(authority, SimpleNamespace(source=None, route='r'),
+                                {'model': 'qwen3:4b', 'provider': 'foo'}, prepared)
+        assert exc.value.reason == 'model_resolution_failed'
+
+
+@pytest.mark.asyncio
+async def test_model_resolution_failure_carries_the_switch_error_detail(tmp_path):
+    """The bounded ``model_resolution_failed`` code alone reads like a client-side fault; the
+    refusal must carry switch_model's actionable message in its detail (#141063)."""
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from gateway.session_mutation_model import prepare_model
+    from gateway.session_policy import build_policy
+    from hermes_state import SessionDB
+    from hermes_state_runtime import RuntimeStoreError
+    with SessionDB(tmp_path / 'state.db') as db:
+        authority = SimpleNamespace(instance_id='i', epoch=1, profile_id='p', db=db, runner=SimpleNamespace(
+            _resolve_session_agent_runtime=lambda **k: (None, {'provider': 'nous'})))
+        policy = build_policy({'cwd': str(tmp_path), 'model': 'a'}, {'model': {'default': 'a'}})
+        prepared = {'snapshot': {'receipt': {'session_id': 'sid', 'policy': asdict(policy)}}}
+        with pytest.raises(RuntimeStoreError) as exc:
+            await prepare_model(authority, SimpleNamespace(source=None, route='r'),
+                                {'model': 'm', 'provider': 'never-configured'}, prepared)
+        assert exc.value.reason == 'model_resolution_failed'
+        assert 'never-configured' in (exc.value.detail or ''), exc.value.detail

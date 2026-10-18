@@ -49,6 +49,19 @@ async def prepare_model(authority, live, payload, prepared):
     from hermes_cli.config import get_compatible_custom_providers
     old = restore_policy(prepared['snapshot']['receipt']['policy'])
     config, current = _current_route(authority, live, old)
+    # A pick resolves its target against the owning profile's CURRENT providers, not the frozen
+    # snapshot: a session that does not follow the profile carries the creation-time config
+    # (CREATE_FIELDS has no providers override), so a named entry added after that session was
+    # created stayed unresolvable forever — the same pick works from a fresh CLI read (#141063).
+    # Bypass sessions keep their code-default snapshot (their contract is never reading
+    # config.yaml), and an unreadable file falls back to the frozen read.
+    providers_cfg = config
+    if not old.ignore_user_config:
+        from pathlib import Path
+        from gateway.run import _load_gateway_config
+        providers_cfg = await asyncio.to_thread(
+            lambda: _load_gateway_config(Path(authority.db.db_path).resolve().parent / 'config.yaml')
+        ) or config
 
     def switch(**kwargs):
         result = switch_model(**kwargs)
@@ -56,10 +69,13 @@ async def prepare_model(authority, live, payload, prepared):
     result, alias_credential = await asyncio.to_thread(switch, raw_input=payload['model'],
         current_provider=current.provider, current_model=current.model, current_base_url=current.base_url,
         current_api_key=current.api_key, explicit_provider=payload.get('provider', ''),
-        is_global=False, user_providers=config.get('providers'),
-        custom_providers=get_compatible_custom_providers(config))
+        is_global=False, user_providers=providers_cfg.get('providers'),
+        custom_providers=get_compatible_custom_providers(providers_cfg))
     if not result.success:
-        raise RuntimeStoreError('model_resolution_failed')
+        # The reason stays the bounded wire code; the detail carries switch_model's actionable
+        # message (unknown provider, unconfigured endpoint, …) to the client and the log instead
+        # of the bare code that reads like a client-side fault (#141063).
+        raise RuntimeStoreError('model_resolution_failed', detail=result.error_message or None)
     refusal = await _selection_guard_refusal(authority, live, payload, prepared['snapshot'], current, result)
     if refusal is not None:
         return refusal
