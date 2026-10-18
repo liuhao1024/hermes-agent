@@ -302,3 +302,40 @@ def test_dashboard_run_now_isolates_a_sibling_profile_fire_like_the_ticker(tmp_p
     assert web_server_cron._fire_cron_job_for_profile("default", launch_job) is True
     assert (probe / "launch").read_text().strip() == "<unset>|launch-secret"
     assert "ROUTED_ONLY_SECRET" not in os.environ
+
+
+def test_tick_scope_resolves_profile_env_refs_without_false_missing_warning(tmp_path, monkeypatch, caplog):
+    """A tick is not only fires: its heartbeat/recovery/config reads run inside
+    ``_profile_cron_scope`` too, and those call ``load_config()`` under the profile's
+    HERMES_HOME. The home override alone leaves ``_env_ref_lookup`` reading the launch
+    process's ``os.environ``, so every ref the profile keeps in its own ``.env`` warned
+    "is not set" once a minute and kept its literal placeholder (#141266). The tick scope
+    must install the profile's secret scope for its whole span — the same scope the fire
+    path installs — and leave no scope bound behind."""
+    import logging
+
+    from agent import secret_scope
+    from cron.scheduler_provider import _profile_cron_scope
+    from hermes_cli.config import load_config
+
+    launch, routed = tmp_path / "launch", tmp_path / "launch" / "profiles" / "ops"
+    routed.mkdir(parents=True)
+    (routed / "cron").mkdir()
+    (routed / "config.yaml").write_text(
+        "model: probe-model\ncustom_probe: ${env:ROUTED_TOKEN}\n", encoding="utf-8"
+    )
+    (routed / ".env").write_text("ROUTED_TOKEN=routed-token\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(launch))
+    monkeypatch.delenv("ROUTED_TOKEN", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.config"):
+        with _profile_cron_scope(routed):
+            assert secret_scope.get_secret("ROUTED_TOKEN") == "routed-token"
+            cfg = load_config()
+
+    assert cfg["custom_probe"] == "routed-token"
+    assert not [
+        r for r in caplog.records
+        if "is not set" in r.getMessage() and "ROUTED_TOKEN" in r.getMessage()
+    ]
+    assert secret_scope.current_secret_scope() is None

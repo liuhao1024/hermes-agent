@@ -118,18 +118,33 @@ def routed_profile_fire(home=None) -> bool:
 @contextlib.contextmanager
 def _profile_cron_scope(home):
     """Scope the calling thread to one profile's home + cron store for the block."""
+    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from cron.jobs import use_cron_store
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from hermes_cli.env_loader import hydrate_profile_secret_sources
 
     # Record per-profile heartbeat after each tick cycle. Distinguish a COMPLETED cycle (``_tick_error``
     # unset) — where each profile's beat reflects its own outcome, so a yielding profile does not darken
     # healthy siblings — from an aborted one (exception), where no profile completed and all beats are
     # unsuccessful (#32612).
     home_token = set_hermes_home_override(str(home))
+    scope_token = None
     try:
+        # The home override alone leaves a tick's config reads (heartbeat/recovery paths that call
+        # ``load_config()``) expanding THIS profile's ``${env:}`` refs against the launch process's
+        # ``os.environ`` — every ref the profile keeps in its own ``.env`` then warns "is not set"
+        # once a minute and keeps its literal placeholder (#141266). Install the profile's secret
+        # scope for the whole tick, same build and order the fire path uses
+        # (``cron.scheduler._install_fire_secret_scope``: hydrate before freeze; cached per home).
+        hydrate_profile_secret_sources(home)
+        scope_token = set_secret_scope(
+            build_profile_secret_scope(home), profile_home=str(home)
+        )
         with use_cron_store(home):
             yield
     finally:
+        if scope_token is not None:
+            reset_secret_scope(scope_token)
         reset_hermes_home_override(home_token)
 
 
