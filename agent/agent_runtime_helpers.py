@@ -1560,6 +1560,13 @@ def dump_api_request_debug(
 ) -> Optional[Path]:
     """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
     try:
+        # logging.request_dumps: false — the deployment keeps prompts only under its state.db
+        # retention policy, so leave no request_dump_*.json copy beside the session store (#141277).
+        from hermes_logging import request_dumps_enabled
+
+        if not request_dumps_enabled():
+            _ra().logger.debug("Request debug dump skipped: logging.request_dumps is false")
+            return None
         body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
         api_key = None
         # anthropic_messages keeps its SDK client on ``_anthropic_client`` (``client`` is None):

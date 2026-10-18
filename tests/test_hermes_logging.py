@@ -737,6 +737,35 @@ class TestReadLoggingConfig:
 
 
 
+class TestRequestDumpsEnabled:
+    """request_dumps_enabled() reads ``logging.request_dumps``; default keeps dumps on (#141277)."""
+
+    def test_defaults_to_true_without_config(self, hermes_home):
+        assert hermes_logging.request_dumps_enabled() is True
+
+    def test_defaults_to_true_when_logging_section_lacks_the_key(self, hermes_home):
+        import hermes_yaml as yaml
+        config = {"logging": {"level": "WARNING", "max_size_mb": 10}}
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        assert hermes_logging.request_dumps_enabled() is True
+
+    def test_explicit_false_disables(self, hermes_home):
+        import hermes_yaml as yaml
+        config = {"logging": {"request_dumps": False}}
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        assert hermes_logging.request_dumps_enabled() is False
+
+    def test_explicit_true_stays_on(self, hermes_home):
+        import hermes_yaml as yaml
+        config = {"logging": {"request_dumps": True}}
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        assert hermes_logging.request_dumps_enabled() is True
+
+
+
 class TestExternalRotationRecovery:
     """_ManagedRotatingFileHandler recovers from external rotation.
 

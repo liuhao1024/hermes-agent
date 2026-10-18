@@ -1020,8 +1020,8 @@ def _add_rotating_handler(
     _register_queued_handler(handler)
 
 
-def _read_logging_config():
-    """Best-effort read of ``logging.*`` from config.yaml."""
+def _load_logging_section() -> dict:
+    """Best-effort load of the ``logging`` section of config.yaml (empty when unreadable)."""
     try:
         # Prefer the shared effective-config cache (managed overlay included, so an administrator
         # can pin logging.*) so this reuses hermes_cli.main's early parse (one config.yaml parse
@@ -1036,11 +1036,24 @@ def _read_logging_config():
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8-sig") as f:
                     cfg = fast_safe_load(f) or {}
-        if not cfg:
-            return (None, None, None)
-        log_cfg = cfg.get("logging", {})
-        if isinstance(log_cfg, dict):
-            return (log_cfg.get("level"), log_cfg.get("max_size_mb"), log_cfg.get("backup_count"))
+        log_cfg = cfg.get("logging", {}) if cfg else {}
+        return log_cfg if isinstance(log_cfg, dict) else {}
     except Exception:
-        pass
-    return (None, None, None)
+        return {}
+
+
+def _read_logging_config():
+    """Best-effort read of ``logging.*`` from config.yaml."""
+    log_cfg = _load_logging_section()
+    return (log_cfg.get("level"), log_cfg.get("max_size_mb"), log_cfg.get("backup_count"))
+
+
+def request_dumps_enabled() -> bool:
+    """Whether provider-error request dumps may write ``sessions/request_dump_*.json``.
+
+    ``logging.request_dumps: false`` turns the dumps off for deployments whose prompt
+    retention policy lives in ``state.db`` only, so no full-prompt copy lands next to the
+    session store (#141277). Default — and any config-read failure — keeps the dumps,
+    matching the behavior before the switch existed.
+    """
+    return bool(_load_logging_section().get("request_dumps", True))
