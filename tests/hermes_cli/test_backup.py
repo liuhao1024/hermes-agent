@@ -1242,6 +1242,58 @@ class TestImportAtomicWrites:
         assert target.read_text() == "model: restored\n"
         assert (target.stat().st_mode & 0o777) == 0o644
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+    def test_restore_applies_archived_mode_to_created_file(self, tmp_path, monkeypatch):
+        """A file the restore creates takes its mode from the archive.
+
+        ``hermes backup`` stores each entry's Unix mode in
+        ``external_attr``; a restore that ignored it handed scripts and
+        staged binaries back as plain 0644 data while loosening 0600
+        configs (issue #141088). setuid must not ride along, and an entry
+        without a Unix mode falls back to the umask-derived default.
+        """
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        (staged / "config.yaml").write_text("model: test\n")
+        (staged / "run.sh").write_text("#!/bin/sh\n")
+        os.chmod(staged / "run.sh", 0o755)
+        (staged / "private.txt").write_text("token\n")
+        os.chmod(staged / "private.txt", 0o600)
+
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            # The shape ``hermes backup`` produces: ``zf.write`` copies the
+            # on-disk mode into ``external_attr``'s high word.
+            zf.write(staged / "config.yaml", "config.yaml")
+            zf.write(staged / "run.sh", "scripts/run.sh")
+            zf.write(staged / "private.txt", "docs/private.txt")
+            setuid_entry = zipfile.ZipInfo("scripts/setuid.sh")
+            setuid_entry.external_attr = 0o104755 << 16
+            zf.writestr(setuid_entry, "#!/bin/sh\n")
+            no_mode = zipfile.ZipInfo("docs/no-mode.txt")
+            zf.writestr(no_mode, "fallback\n")
+            # writestr stamps a 0600 default onto a modeless entry; reset it
+            # after the write (the central directory serializes at close) to
+            # model an archive that carries no Unix mode at all.
+            no_mode.external_attr = 0
+
+        from hermes_cli.backup import run_import
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert stat.S_IMODE((hermes_home / "scripts/run.sh").stat().st_mode) == 0o755
+        assert stat.S_IMODE((hermes_home / "docs/private.txt").stat().st_mode) == 0o600
+        # The 0o777 mask keeps an untrusted archive from smuggling setuid in.
+        assert stat.S_IMODE((hermes_home / "scripts/setuid.sh").stat().st_mode) == 0o755
+        # No Unix mode recorded: the umask default applies, as before.
+        current = os.umask(0o022)
+        os.umask(current)
+        assert stat.S_IMODE((hermes_home / "docs/no-mode.txt").stat().st_mode) == 0o666 & ~current
+
     @pytest.mark.platforms("posix")
     def test_restore_preserves_existing_file_owner(self, tmp_path, monkeypatch):
         """A root-run import must not re-own the user's files to root.
