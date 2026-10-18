@@ -1282,6 +1282,35 @@ def _is_model_switch_marker(entry: Any) -> bool:
     return isinstance(content, str) and content.startswith(_MODEL_SWITCH_MARKER_PREFIX)
 
 
+# The sanitize pass welds a plain user prompt into a preceding marker row (#94486 keeps the pair
+# addressable but the merged content still opens with the marker paragraph). The marker paragraph
+# itself contains no "]" (model/provider names cannot carry one), so the first "]"+blank line is
+# its end: a stale-marker strip must give up only that paragraph and keep the welded prompt —
+# dropping the whole row would delete the user's turn (#141240).
+_ABSORBED_MODEL_SWITCH_MARKER_RE = re.compile(
+    r"(?s)^\[System: The active model for this chat has changed to .*?\]\n\n(.+)$"
+)
+
+
+def _strip_stale_model_switch_markers(history: list[Any]) -> list[Any]:
+    """Drop stale model-switch markers, keeping any user prompt a marker row absorbed."""
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+
+    kept: list[Any] = []
+    for entry in history:
+        if not _is_model_switch_marker(entry):
+            kept.append(entry)
+            continue
+        match = _ABSORBED_MODEL_SWITCH_MARKER_RE.match(str(entry.get("content")))
+        if match is None:
+            continue  # bare marker: its paragraph is the whole row, nothing was welded after it
+        stripped = dict(entry)
+        stripped.pop(_DB_PERSISTED_MARKER, None)  # rewritten content no longer mirrors the persisted row
+        stripped["content"] = match.group(1)
+        kept.append(stripped)
+    return kept
+
+
 def _is_pivot_marker(entry: Any) -> bool:
     """A ``role=user`` pivot the gateway splices in mid-turn (model switch or personality change) — either can
     be the sole reason turn-start and current history differ. Only the model-switch marker is self-replacing."""
@@ -1307,7 +1336,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
     entry: dict[str, Any] = {"role": "user", "content": marker, "display_kind": "model_switch"}
     with session.get("history_lock") or contextlib.nullcontext():
         history = session.setdefault("history", [])
-        history[:] = [h for h in history if not _is_model_switch_marker(h)]
+        history[:] = _strip_stale_model_switch_markers(history)
         history.append(entry)
         session["history_version"] = int(session.get("history_version", 0)) + 1
     try:
