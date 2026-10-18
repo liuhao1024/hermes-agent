@@ -47,7 +47,7 @@ import { createCanonicalChat } from './canonical-chat'
 import { groupCreationSource, groupExecutionMode } from './canonical-group-capabilities'
 import { registerCanonicalGroup } from './canonical-group-registry'
 import type { CanonicalGroupOrigin } from './canonical-group-registry'
-import { canonicalGroupRequest, captureCanonicalGroupRoute, createCanonicalGroup } from './canonical-groups'
+import { canonicalGroupRequest, captureCanonicalGroupRoute, createCanonicalGroup, groupMemberOutsideAuthority } from './canonical-groups'
 import { $botMeta, botHandle, botRosterKey, filterBots, ROSTER_KEY, saveBotMeta } from './data'
 import { labeled, ResizableFrame } from './dialog-parts'
 import { GROUP_CHAT_MAX_MEMBERS, mintGroupRoomId, uniqueGroupChatName, updateGroupChat } from './group-chat'
@@ -1239,7 +1239,11 @@ export function CreateGroupChatDialog({ open, roster, onClose, onCreated }: Crea
       throw new Error(b.canonical.driverUnavailable)
     }
 
-    if (mode === 'canonical') {
+    // A gateway room must seat every member on one authority connection. A
+    // roster that spans connections (#101543 selectable set) would be refused
+    // by createCanonicalGroup, so it takes the desktop-orchestrated path —
+    // the documented cross-machine surface — instead of erroring (#141178).
+    if (mode === 'canonical' && selected.every(bot => !groupMemberOutsideAuthority(bot, route.connectionId))) {
       const created = await createCanonicalGroup(route, base, durableGroupChatMembers(selected))
 
       // Creation already succeeded; leave it on its owner without adopting a stale result.

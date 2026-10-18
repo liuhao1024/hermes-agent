@@ -13,6 +13,7 @@ import type * as GroupChatModule from './group-chat'
 import type * as GroupChatParts from './group-chat-parts'
 import { GroupChatWorkspace } from './group-chat-view'
 import { translateBots } from './i18n-test-helper'
+import type { RosterRow } from './types'
 
 const { request, notify, openWorkspace, activation } = vi.hoisted(() => ({ request: vi.fn(), notify: vi.fn(), openWorkspace: vi.fn(), activation: { epoch: 1 } }))
 vi.mock('@hermes/plugin-sdk', async importOriginal => {
@@ -59,6 +60,14 @@ const state = {
 }
 
 const roster = [{ name: 'alpha', connectionId: 'local' }, { name: 'beta', connectionId: 'local' }]
+
+// The #101543 selectable set: one local bot plus a bot seated on another
+// registered connection (#141178).
+const mixedRoster: RosterRow[] = [
+  { name: 'alpha', connectionId: 'local' },
+  { name: 'gamma', connectionId: 'source-b', connectionLabel: 'Linux box', remoteSource: true }
+]
+
 const unavailable = CANONICAL_GROUP_LOCALES.en.driverUnavailable
 
 // Decision-relevant fields emitted by the actual canonical capabilities producer.
@@ -114,10 +123,10 @@ function answer(capabilities: unknown) {
   })
 }
 
-async function submitDialog() {
+async function submitDialog(seat: RosterRow[] = roster) {
   const onCreated = vi.fn()
   const onClose = vi.fn()
-  render(<CreateGroupChatDialog onClose={onClose} onCreated={onCreated} open roster={roster} />)
+  render(<CreateGroupChatDialog onClose={onClose} onCreated={onCreated} open roster={seat} />)
 
   for (const checkbox of screen.getAllByRole('checkbox')) {fireEvent.click(checkbox)}
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create Group (2)' })) })
@@ -179,6 +188,23 @@ it('keeps positive classifications working: legacy renders and creates locally, 
   expect(Object.values($canonicalGroupBindings.get())).toHaveLength(1)
   expect(updateGroupChat).toHaveBeenCalledOnce()
   expect(request.mock.calls.filter(call => call[1] === 'groups.create')).toHaveLength(1)
+})
+
+it('a driver gateway keeps cross-connection rosters on the desktop-orchestrated path instead of refusing them', async () => {
+  answer({ driver: true, persistent_process: true })
+  const { onCreated } = await submitDialog(mixedRoster)
+  expect(onCreated).toHaveBeenCalledOnce()
+  expect(onCreated).toHaveBeenCalledWith(expect.any(String), 'name')
+  expect(request.mock.calls.filter(call => call[1] === 'groups.create')).toHaveLength(0)
+  expect(updateGroupChat).toHaveBeenCalledOnce()
+  expect(notify).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'error' }))
+  expect(Object.values($canonicalGroupBindings.get())).toHaveLength(0)
+  cleanup()
+
+  await act(async () => { render(<GroupChatWorkspace group="Mixed" members={mixedRoster} />) })
+  expect(screen.getByRole('textbox')).toBeTruthy()
+  expect(screen.queryByText(unavailable)).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Start gateway group' })).toBeNull()
 })
 
 function moveSource(kind: 'profile' | 'gateway' | 'same-route-activation') {

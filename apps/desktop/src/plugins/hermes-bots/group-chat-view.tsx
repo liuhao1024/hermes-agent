@@ -658,7 +658,23 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
     return () => { cancelled = true }
   }, [connectionId, profile, gateway, source])
 
-  if (mode === 'legacy') {return <LegacyGroupChatWorkspace {...props} />}
+  // A room whose members span connections cannot live on any single
+  // authority's gateway: the canonical path refuses such a roster at
+  // creation, and a lookup miss would only offer a "Start gateway group"
+  // retry that fails the same way. The desktop-orchestrated workspace stays
+  // the surface for it (#141178). A single-connection roster keeps the
+  // canonical gate, whatever the active connection is.
+  const seatedConnections = mode === 'canonical'
+    ? new Set(props.members.map(bot => {
+      const seated = bot.route?.connectionId ?? bot.connectionId
+
+      return seated ?? (bot.remoteSource ? '__unrouted__' : connectionId ?? '')
+    }))
+    : null
+
+  const spansConnections = seatedConnections !== null && seatedConnections.size > 1
+
+  if (mode === 'legacy' || spansConnections) {return <LegacyGroupChatWorkspace {...props} />}
 
   // A `canonical:` key names an existing room; it never seeds a new one.
   const canCreate = mode === 'canonical' && lookupStatus === 'missing' && canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null

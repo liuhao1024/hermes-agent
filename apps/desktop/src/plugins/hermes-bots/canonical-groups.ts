@@ -41,6 +41,22 @@ function requireRoute(route: CanonicalGroupRoute): void {
   }
 }
 
+/** True when the member cannot sit in a room whose authority connection is
+ *  `connectionId`: it routes to a different connection, or is a remote row
+ *  with no connection of its own. Callers use this to route a cross-connection
+ *  roster away from the canonical path before submission instead of failing
+ *  there (#141178). */
+export function groupMemberOutsideAuthority(
+  member: Pick<GroupMember, 'connectionId' | 'remoteSource' | 'route'>,
+  connectionId: string
+): boolean {
+  const memberConnectionId = member.route?.connectionId ?? member.connectionId
+
+  return (memberConnectionId !== undefined && memberConnectionId !== connectionId) ||
+    (member.connectionId !== undefined && member.connectionId !== connectionId) ||
+    (memberConnectionId === undefined && member.remoteSource === true)
+}
+
 export function captureCanonicalGroupRoute(): CanonicalGroupRoute {
   const connectionId = host.state.connectionId.get()
 
@@ -112,11 +128,7 @@ export async function createCanonicalGroup(
   const handles = new Set(['all', 'everyone'])
 
   const roster = members.map(member => {
-    const connectionId = member.route?.connectionId ?? member.connectionId
-
-    if ((connectionId !== undefined && connectionId !== route.connectionId) ||
-      (member.connectionId !== undefined && member.connectionId !== route.connectionId) ||
-      (connectionId === undefined && member.remoteSource)) {
+    if (groupMemberOutsideAuthority(member, route.connectionId)) {
       throw new Error('Group members must belong to the same authority connection')
     }
 
