@@ -801,9 +801,13 @@ def _profile_cache_roots() -> list[Path]:
     downloads dir (the static safe roots cover only the launch HERMES_HOME). Enumerated at check
     time so profiles created after startup count, and allowlisted BEFORE the ``/root`` denylist,
     which otherwise wins when HERMES_HOME is symlinked under a denied prefix (#31733).
-    """
-    return [*(p / "cache" / subdir for p in _profile_dirs() for subdir in _MEDIA_DELIVERY_CACHE_SUBDIRS),
-            *(p / CONNECTOR_DOWNLOADS_SUBDIR for p in (get_hermes_home(), *_profile_dirs()))]
+    Strict mode trusts only the ACTIVE home's own roots — a routed profile must not deliver out of
+    another profile's cache (#141273); setups that need the wider set add the other caches to
+    ``gateway.media_delivery_allow_dirs``."""
+    from gateway.media_policy import media_delivery_strict
+    homes = (get_hermes_home(),) if media_delivery_strict() else (get_hermes_home(), *_profile_dirs())
+    return [*(p / "cache" / subdir for p in homes for subdir in _MEDIA_DELIVERY_CACHE_SUBDIRS),
+            *(p / CONNECTOR_DOWNLOADS_SUBDIR for p in homes)]
 
 
 def _profile_dirs() -> list[Path]:

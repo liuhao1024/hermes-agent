@@ -591,6 +591,43 @@ class TestMediaDeliveryPathValidation:
 
         assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
 
+    def test_strict_mode_trusts_only_the_active_profiles_cache(self, tmp_path, monkeypatch):
+        """#141273: strict mode must trust only the ACTIVE home's cache roots. A routed
+        profile's turn may deliver its own cache artifacts but not a sibling profile's —
+        the per-profile cache allowlist enumerates every ``<root>/profiles/*`` otherwise.
+        Non-strict mode keeps the wider set so #31733's profile-scoped delivery stays fixed."""
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        self._patch_roots(monkeypatch)  # strict on, empty static safe roots, recency off
+        fake_home = tmp_path / "home"
+        hermes_root = fake_home / ".hermes"
+        profile_a = hermes_root / "profiles" / "alpha"
+        profile_b = hermes_root / "profiles" / "beta"
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr("gateway.platforms.base._HERMES_HOME", hermes_root)
+        monkeypatch.setattr("gateway.platforms.base._HERMES_ROOT", hermes_root)
+        for profile in (profile_a, profile_b):
+            cache = profile / "cache" / "images"
+            cache.mkdir(parents=True)
+            (cache / "gen.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        # The routed profile's own config turns strict on for its turns (under a HERMES_HOME
+        # override the env bridge is skipped and readers load that profile's config.yaml).
+        (profile_a / "config.yaml").write_text(
+            "gateway:\n  strict: true\n  trust_recent_files: false\n", encoding="utf-8")
+        own = profile_a / "cache" / "images" / "gen.png"
+        other = profile_b / "cache" / "images" / "gen.png"
+
+        token = set_hermes_home_override(profile_a)  # alpha's routed turn
+        try:
+            assert BasePlatformAdapter.validate_media_delivery_path(str(own)) == str(own.resolve())
+            assert BasePlatformAdapter.validate_media_delivery_path(str(other)) is None
+        finally:
+            reset_hermes_home_override(token)
+
+        # Non-strict keeps #31733's wider trust: every profile's cache stays deliverable.
+        monkeypatch.delenv("HERMES_MEDIA_DELIVERY_STRICT", raising=False)
+        assert BasePlatformAdapter.validate_media_delivery_path(str(other)) == str(other.resolve())
+
 
 class TestMediaDeliveryDefaultMode:
     """Default (non-strict) mode — denylist gates delivery, nothing else.
