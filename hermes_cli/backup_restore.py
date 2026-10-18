@@ -466,7 +466,11 @@ def _extract_member_atomically(
 
     Permission bits *and* ownership are carried across the replace so routing
     through mkstemp does not change the file the caller would otherwise have
-    produced.  ``os.replace`` swaps in a temp file owned by the *writing* user,
+    produced.  A file the restore *creates* instead takes its mode from the
+    archive: ``hermes backup`` records each entry's Unix mode in
+    ``external_attr``, and a restore that ignored it handed scripts and staged
+    binaries back as plain 0644 data while loosening 0600 configs (issue
+    #141088).  ``os.replace`` swaps in a temp file owned by the *writing* user,
     so without the chown a ``sudo hermes import`` would silently re-own every
     restored file to root — on the disaster-recovery path, and on exactly the
     Docker/NAS installs ``utils._restore_file_owner`` documents.  Both concerns
@@ -484,12 +488,22 @@ def _extract_member_atomically(
     target.
     """
     # ``_preserve_file_mode`` returns None when the target does not exist (or
-    # cannot be stat'd), in which case the umask-derived create-mode applies —
-    # the same shape as ``atomic_yaml_write``'s ``create_mode`` fallback.
+    # cannot be stat'd), in which case the member's archived mode applies, with
+    # the umask-derived create-mode as the fallback for archives that carry no
+    # Unix mode — the same shape as ``atomic_yaml_write``'s ``create_mode``
+    # fallback.
     mode = _preserve_file_mode(target)
     owner = _preserve_file_owner(target)
     if mode is None:
-        mode = new_file_mode
+        # ``hermes backup`` records each entry's Unix mode in
+        # ``external_attr``; ignoring it restored executables as 0644 data and
+        # loosened a 0600 config to the umask default (issue #141088). The
+        # 0o777 mask keeps setuid/setgid/sticky out of a *created* file too —
+        # the elevation the branch below refuses for an existing one — and a
+        # zero high word (no Unix mode, e.g. plain DOS attributes) falls back
+        # to the umask-derived create mode.
+        archived_mode = (zf.getinfo(member).external_attr >> 16) & 0o777
+        mode = archived_mode or new_file_mode
     else:
         # Deliberately NOT a faithful mode copy: setuid/setgid are dropped.
         # ``_preserve_file_mode`` returns ``stat.S_IMODE``, i.e. all twelve
