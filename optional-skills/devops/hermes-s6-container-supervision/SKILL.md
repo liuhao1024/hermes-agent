@@ -46,7 +46,7 @@ If you're just running the Hermes Agent and want to use Docker, see `website/doc
 │   ├── main-hermes/run                ← exec sleep infinity (no-op slot)
 │   └── dashboard/run                  ← if HERMES_DASHBOARD=1, runs `hermes dashboard`
 │
-├── /run/service (s6-svscan watches; tmpfs)
+├── /run/service (s6-svscan watches; fs type is deployment-dependent — see "Service slot exists…")
 │   ├── gateway-coder/                 ← runtime-registered per-profile
 │   │   ├── type        ("longrun")
 │   │   ├── run         ("#!/command/with-contenv sh ... exec s6-setuidgid hermes hermes -p coder gateway run")
@@ -159,7 +159,10 @@ The cont-init reconciler runs as hermes (`s6-setuidgid hermes` in `02-reconcile-
 
 ### Service slot exists but s6-svstat says "s6-supervise not running"
 
-The service directory is on tmpfs and was wiped on container restart. Either the cont-init reconciler hasn't run yet (give it a moment after `docker restart`) or it failed. Check `docker logs <c> | grep '02-reconcile'`.
+Measure what filesystem `/run/service` is actually on before reasoning about the slot's durability (`stat -f -c %T /run/service`, or `df -hT /run`) — it is tmpfs on some deployments and a directory in the container's writable layer (overlay, …) on others:
+
+- **tmpfs** — the slot is ephemeral and was wiped on container restart. Either the cont-init reconciler hasn't run yet (give it a moment after `docker restart`) or it failed. Check `docker logs <c> | grep '02-reconcile'`.
+- **overlay / anything else** — the slot lives in the writable layer: it survives `docker restart` and is lost only on container **recreation**, so "wiped on container restart" is not a possible cause here. Force a rescan with `/command/s6-svscanctl -a` and check the slot's contents (`type`, `run`) instead.
 
 ### Gateway starts then immediately exits (`down (exitcode 1)` in svstat)
 
