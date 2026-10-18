@@ -254,10 +254,18 @@ export async function detectPluginComponents(pluginRoot: string): Promise<Plugin
   }
 }
 
-function noninteractiveGitEnv(): NodeJS.ProcessEnv {
+export function noninteractiveGitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',
+    // GIT_TERMINAL_PROMPT only covers git's own terminal prompt. Git Credential
+    // Manager is a credential helper that draws its own OS dialog ("Select a
+    // credential helper", browser sign-in), so a private-repo probe on Windows
+    // opened a window outside the app that the user had no context for
+    // (#140981). GCM_INTERACTIVE=Never makes GCM fail fast like the prompt
+    // above — it still returns an already-stored credential, it just never
+    // asks. Same value the backend's noninteractive_git_env() pins.
+    GCM_INTERACTIVE: 'Never',
     GIT_ASKPASS: 'echo',
     SSH_ASKPASS: 'echo'
   }
@@ -299,11 +307,31 @@ function runGit(gitBin: string, args: string[], cwd?: string): Promise<{ code: n
   })
 }
 
+// git stderr that means the remote demanded a credential git could not supply
+// (the prompt this module disables, or a rejected one) — mirrors
+// `_CREDENTIAL_REQUIRED_RE` in hermes_cli/git_credentials.py.
+const CREDENTIAL_REQUIRED_RE =
+  /could not read (?:username|password)|terminal prompts disabled|authentication failed|(?:error|status|http)[: ]+40[13]\b/i
+
+export function gitFailureMessage(verb: string, stderr: string): string {
+  const detail = stderr.trim()
+
+  if (CREDENTIAL_REQUIRED_RE.test(detail)) {
+    return (
+      `Git ${verb} failed: this repository needs credentials the app could not supply. ` +
+      'Sign in with `gh auth login` (or set GITHUB_TOKEN), then retry.\n' +
+      `Details: ${detail}`
+    )
+  }
+
+  return `Git ${verb} failed:\n${detail}`
+}
+
 async function runGitOrThrow(gitBin: string, args: string[], cwd?: string): Promise<void> {
   const { code, stderr } = await runGit(gitBin, args, cwd)
 
   if (code !== 0) {
-    throw new Error(`Git ${args[0]} failed:\n${stderr.trim()}`)
+    throw new Error(gitFailureMessage(args[0], stderr))
   }
 }
 

@@ -10,7 +10,9 @@ import {
   desktopPluginFolderName,
   detectPluginComponents,
   findDesktopEntry,
+  gitFailureMessage,
   installDesktopPluginFromGit,
+  noninteractiveGitEnv,
   probePluginRepo,
   resolvePluginGitUrl,
   resolveSubdirWithin
@@ -121,6 +123,42 @@ describe('detectPluginComponents', () => {
       agentName: 'dual',
       desktopName: 'desktop'
     })
+  })
+})
+
+describe('noninteractiveGitEnv', () => {
+  it('disables the Git Credential Manager dialog alongside the terminal prompt', () => {
+    const env = noninteractiveGitEnv()
+
+    // GIT_TERMINAL_PROMPT cannot reach GCM's own OS dialog on Windows (#140981);
+    // GCM_INTERACTIVE=Never makes the helper fail fast instead of asking.
+    expect(env.GIT_TERMINAL_PROMPT).toBe('0')
+    expect(env.GCM_INTERACTIVE).toBe('Never')
+  })
+})
+
+describe('gitFailureMessage', () => {
+  it('names the credential problem when git could not supply one', () => {
+    const message = gitFailureMessage(
+      'clone',
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+    )
+
+    expect(message).toContain('needs credentials')
+    expect(message).toContain('gh auth login')
+    expect(message).toContain('terminal prompts disabled')
+  })
+
+  it('flags a rejected credential the same way as a missing one', () => {
+    const message = gitFailureMessage('clone', 'remote: Invalid username or token.\nfatal: Authentication failed')
+
+    expect(message).toContain('needs credentials')
+  })
+
+  it('keeps unrelated failures as plain git output', () => {
+    const message = gitFailureMessage('clone', "fatal: destination path 'x' already exists and is not an empty directory.")
+
+    expect(message).toBe("Git clone failed:\nfatal: destination path 'x' already exists and is not an empty directory.")
   })
 })
 
