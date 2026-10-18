@@ -525,6 +525,42 @@ class TestMemoryToolDispatcher:
         assert "the real one" in store.memory_entries
         assert "ignored" not in store.memory_entries
 
+    def test_list_content_is_rejected_as_a_tool_error(self, store):
+        # A model saving several facts at once sends content as a list. Inline tools
+        # dispatch with error_result=None, so the store's .strip() crash escaped as
+        # "Error during API call" and failed every call in the batch (#141188).
+        result = json.loads(
+            memory_tool(action="add", target="memory",
+                        content=["Prefers Python", "Lives in Berlin"], store=store)
+        )
+        assert result["success"] is False
+        assert "content must be a string, not list" in result["error"]
+        assert store.memory_entries == []
+
+    def test_list_new_text_alias_is_rejected(self, store):
+        result = json.loads(memory_tool(action="add", content="", new_text=["A", "B"], store=store))
+        assert result["success"] is False
+        assert "new_text must be a string, not list" in result["error"]
+
+    def test_list_old_text_is_rejected(self, store):
+        for action in ("patch", "remove"):
+            result = json.loads(memory_tool(action=action, old_text=["A"], content="X", store=store))
+            assert result["success"] is False, action
+            assert "old_text must be a string, not list" in result["error"], action
+
+    def test_batch_entry_list_content_is_rejected(self, store):
+        result = json.loads(
+            memory_tool(target="memory", operations=[{"action": "add", "content": ["A", "B"]}], store=store)
+        )
+        assert result["success"] is False
+        assert "must be a string, not list" in result["error"]
+        assert store.memory_entries == []
+
+    def test_valid_string_calls_still_work_after_type_guards(self, store):
+        result = json.loads(memory_tool(action="add", target="memory", content="Project uses uv", store=store))
+        assert result["success"] is True
+        assert store.memory_entries == ["Project uses uv"]
+
 
 class TestMemoryBatch:
     """The 'operations' batch shape: atomic, all-or-nothing, final-budget."""

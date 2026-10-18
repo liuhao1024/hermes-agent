@@ -247,8 +247,21 @@ def _invalid(message: str) -> tuple[str, str]:
     return "rejected", tool_error(message, success=False)
 
 
+def _string_arg_error(**values: Any) -> Optional[str]:
+    """First string-typed argument that arrived as a non-string (e.g. a list of facts).
+    The store calls ``.strip()`` on these, and inline tools dispatch with
+    ``error_result=None``, so an uncaught bad type escapes as a failed API call (#141188)."""
+    for name, value in values.items():
+        if value is not None and not isinstance(value, str):
+            return f"{name} must be a string, not {type(value).__name__}."
+    return None
+
+
 def _memory_tool(action, target, content, old_text, new_text, operations, store) -> tuple[str, str]:
     """``(outcome, result_json)``: ``rejected`` when refused or held before touching the store."""
+    type_error = _string_arg_error(content=content, new_text=new_text, old_text=old_text)
+    if type_error is not None:
+        return _invalid(type_error)
     # An omitted optional string can arrive as "" (#90468): let the new_text alias fill it.
     if not content and new_text:
         content = new_text
@@ -258,6 +271,13 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if operations:
         if not isinstance(operations, list):
             return _invalid("operations must be a list of {action, content?, old_text?} objects.")
+        for op in operations:
+            if not isinstance(op, dict):
+                continue
+            op_error = _string_arg_error(**{f"operations entry '{key}'": op.get(key)
+                                            for key in ("content", "old_text", "new_text")})
+            if op_error is not None:
+                return _invalid(op_error)
         if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
         denied = _background_delete_gate(store, action, operations, target)
