@@ -77,6 +77,13 @@ async def _normalize_room_dispatch(
     """Validate and normalize a scoped RoomLink dispatch request."""
     _openai_error, room_token = _api_server._openai_error, self._room_grant_token(request)
     if not room_token:
+        # Without a grant token no dispatch can pass verify_room_grant(), so the fields would
+        # reach _handle_runs unverified and replace the configured toolsets/approval policy
+        # with a client-computed digest (#141276). Fail closed instead of passing them through.
+        if isinstance(body, dict) and {"hosted_room_dispatch", "_room_execution_policy"} & set(body):
+            return body, _json_error(
+                _openai_error, "hosted_room_dispatch requires a room grant token.",
+                code="invalid_room_dispatch", status=400)
         return body, None
     if not isinstance(body, dict) or set(body) - {"input", "hosted_room_dispatch"}:
         return body, _json_error(
