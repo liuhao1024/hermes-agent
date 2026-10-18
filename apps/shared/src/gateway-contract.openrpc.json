@@ -36964,6 +36964,11 @@
             "default": null,
             "title": "Resolved Id"
           },
+          "live": {
+            "default": false,
+            "title": "Live",
+            "type": "boolean"
+          },
           "title": {
             "default": "",
             "title": "Title",

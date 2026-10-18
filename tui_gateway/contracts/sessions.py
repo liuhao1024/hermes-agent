@@ -230,6 +230,11 @@ class SessionListRow(Result):
 
     id: str
     resolved_id: str | None = None
+    # True when this process holds a live (attachable, not finalized) runtime for the stored id.
+    # The listing is a stored browse, not the live roster; status surfaces count `live` rows
+    # instead of the listing length (#140959). Stored ids repeat across profiles' stores, so the
+    # stamp is profile-scoped server-side.
+    live: bool = False
     title: str = ""
     preview: str = ""
     started_at: float = 0

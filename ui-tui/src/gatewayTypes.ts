@@ -234,6 +234,9 @@ export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working'
 
 export interface SessionActiveItem {
   current?: boolean
+  /** Canonical `session.list` rows only: the gateway stamped this stored row as having a live
+   * runtime binding. The sidecar's `session.active_list` rows are live by construction. */
+  live?: boolean
   id: string
   last_active?: number
   message_count?: number

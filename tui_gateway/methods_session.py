@@ -560,7 +560,7 @@ def _(rid, params: dict, db) -> dict:
         # No live_message_count here on purpose: the bulk listing serves rows whose open
         # paths never demand history (expectHistory defaults false); the count is a
         # per-session scan and would turn one listing call into hundreds of them.
-        return _ok(rid, {"sessions": [_session_row_summary(s) for s in rows]})
+        return _ok(rid, {"sessions": _live_stamped([_session_row_summary(s) for s in rows], params)})
     except Exception as e:
         return _err(rid, 5006, str(e))
 

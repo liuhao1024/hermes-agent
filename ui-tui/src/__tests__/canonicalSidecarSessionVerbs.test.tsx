@@ -151,3 +151,17 @@ const SITES: [string, () => Promise<void>][] = [
 it.each(SITES)('%s never reaches a sidecar session verb on the shared gateway', async (_site, run) => {
   await run()
 })
+
+it('the status bar counts live-stamped rows on canonical, every roster row on sidecar (#140959)', async () => {
+  const { countLiveSessions } = await import('../app/liveSessions.js')
+  const rows = [
+    { id: 'a', status: 'working' as const, live: true },
+    { id: 'b', status: 'idle' as const },
+    { id: 'c', status: 'idle' as const, live: true }
+  ]
+  // Canonical rows are a stored listing: only gateway-stamped live rows count, never the
+  // listing length.
+  expect(countLiveSessions(rows, true)).toBe(2)
+  // The sidecar's active_list is the live roster itself; every row counts.
+  expect(countLiveSessions(rows, false)).toBe(3)
+})

@@ -3245,6 +3245,7 @@ export interface SessionListResult {
 export interface SessionListRow {
   id: string
   resolved_id?: string | null
+  live?: boolean
   title?: string
   preview?: string
   started_at?: number

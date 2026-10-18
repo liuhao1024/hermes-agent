@@ -690,6 +690,26 @@ def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
     return str(getattr(session.get("agent"), "session_id", None) or session.get("session_key") or fallback or "")
 
 
+def _live_stamped(rows: list[dict], params: dict) -> list[dict]:
+    """``session.list`` rows with ``live: True`` on the stored ids this process holds a live
+    (attachable, not finalized) runtime for. Canonical status surfaces count live sessions off
+    the listing (#140959); stored ids repeat across profiles' stores, so the match is
+    profile-scoped (#100029)."""
+    try:
+        home = _profile_home((params.get("profile") or "").strip() or None)
+    except (OSError, ValueError):
+        return rows  # ProfileUnavailableError is a ValueError; _with_db already refused it
+    live_keys: set[str] = set()
+    with _sessions_lock:
+        for sid, session in _sessions.items():
+            if not session.get("_finalized") and _live_profile_matches(session, home):
+                live_keys.add(_session_lookup_key(session, fallback=sid))
+    for row in rows:
+        if row.get("id") in live_keys:
+            row["live"] = True
+    return rows
+
+
 def _find_live_session_by_key(session_key: str, profile_home=_ANY_PROFILE) -> tuple[str, dict] | None:
     # Timestamp-based stored ids can exist in several profiles' stores; a bare-id match would hand
     # profile B's resume profile A's runtime, so profile-aware callers match on (profile_home, key).
