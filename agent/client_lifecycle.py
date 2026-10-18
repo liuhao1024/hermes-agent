@@ -905,6 +905,22 @@ class ClientLifecycleMixin:
         new_token = new_token.strip() if isinstance(new_token, str) else ""
         if not new_token or new_token == self._anthropic_api_key:
             return False
+        # A session the pool bound to an OAuth entry must not have the ambient env priority undo
+        # that selection on every request: ANTHROPIC_API_KEY outranks OAuth in resolve_anthropic_token,
+        # so adopting it here re-spends a key the pool already benched and the rotation never takes
+        # effect (#140998). The env key is itself a pool entry — only the pool decides when it goes
+        # live. A rotated grant is still OAuth-shaped, so token refresh keeps working.
+        if (
+            getattr(self, "_credential_pool", None) is not None
+            and getattr(self, "_credential_pool_entry_id", None)
+            and getattr(self, "_is_anthropic_oauth", False)
+            and not self._anthropic_oauth_flag(new_token)
+        ):
+            logger.debug(
+                "Env ANTHROPIC_API_KEY would override pool entry %s; keeping the pool-selected credential",
+                self._credential_pool_entry_id,
+            )
+            return False
         with suppress(Exception):
             self._anthropic_client.close()
         try:
