@@ -366,6 +366,8 @@ _SNAPSHOT_IGNORES = (
     "OnDeviceHeadSuggestModel", "segmentation_platform", "Sync Data", "Shared Dictionary",
     "History*",         # large; not needed for auth
     "Favicons*",
+    "Preferences",      # not auth data; Brave deletes every mirrored cookie at copy startup when
+                        # one rides along into a launch env without a desktop session (#141241)
     "Singleton*",       # live-instance symlinks; never valid in a copy
     "RunningChromeVersion", "SingletonSocket", "*.tmp",
     "*-journal",         # SQLite rollback journals — sidecars of the auth DBs,
@@ -378,8 +380,11 @@ _SNAPSHOT_IGNORES = (
 # tree is copied only when the snapshot doesn't exist yet). RELATIVE TO A PROFILE DIR; the
 # caller mirrors them into the copy's ``Default``. No ``-journal``/``-wal`` sidecars: the
 # DBs come via sqlite online-backup (committed state folded in); a stale journal corrupts.
+# ``Preferences`` is deliberately absent: it is not credential data, and on Linux a copy
+# browser launched from an env without a desktop session (e.g. a gateway service) follows
+# its Brave web-discovery cleanup into deleting every mirrored cookie at startup (#141241).
 _AUTH_REFRESH_PROFILE_FILES = (
-    "Cookies", "Network/Cookies", "Login Data", "Login Data For Account", "Web Data", "Preferences")
+    "Cookies", "Network/Cookies", "Login Data", "Login Data For Account", "Web Data")
 
 
 def real_profile_copy_dir(browser: str) -> str:
@@ -750,6 +755,11 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         for leftover in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
             with contextlib.suppress(OSError):
                 os.unlink(os.path.join(dst, leftover))
+        # Nor a ``Preferences`` an older build copied in (see _AUTH_REFRESH_PROFILE_FILES): the
+        # copy must stay without one or the launch wipes the mirrored cookies. Every pass, so
+        # old snapshots heal.
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(dst, "Default", "Preferences"))
         # Mark complete only after everything above succeeded.
         try:
             with open(marker, "w", encoding="utf-8") as fh:

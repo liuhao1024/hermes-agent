@@ -158,6 +158,41 @@ class TestSnapshotRealProfile:
         assert err2 is None and dst2 == dst
         assert stat.S_IMODE(os.stat(cookies).st_mode) == 0o600
 
+    def test_snapshot_carries_no_preferences(self, tmp_path, monkeypatch):
+        """A live ``Preferences`` must not reach the copy on either path (#141241).
+
+        It is not credential data, and a copy browser launched from an env without a
+        desktop session follows its Brave web-discovery cleanup into deleting every
+        mirrored cookie at startup when one rides along.
+        """
+        import hermes_cli.browser_connect as bc
+        src = self._make_profile(tmp_path / "real")
+        home = tmp_path / "hermes-home"
+        monkeypatch.setattr(bc, "get_hermes_home", lambda: home)
+
+        dst, err = bc.snapshot_real_profile("chrome", src=str(src))
+        assert err is None and dst
+        assert not (home / "browser-profile" / "chrome" / "Default" / "Preferences").exists()
+        # The signed-in state it must not cost us is still there.
+        assert _auth_db(home / "browser-profile" / "chrome" / "Default" / "Cookies") == "sqlite-cookies"
+        assert (home / "browser-profile" / "chrome" / "Local State").exists()
+
+    def test_refresh_heals_a_legacy_preferences(self, tmp_path, monkeypatch):
+        """A ``Preferences`` left by an older build's snapshot is dropped on the next pass."""
+        import hermes_cli.browser_connect as bc
+        src = self._make_profile(tmp_path / "real")
+        home = tmp_path / "hermes-home"
+        monkeypatch.setattr(bc, "get_hermes_home", lambda: home)
+        dst, err = bc.snapshot_real_profile("chrome", src=str(src))
+        assert err is None and dst
+        legacy = home / "browser-profile" / "chrome" / "Default" / "Preferences"
+        legacy.write_text("{}", encoding="utf-8")  # simulate the pre-fix on-disk state
+
+        dst2, err2 = bc.snapshot_real_profile("chrome", src=str(src))
+        assert err2 is None and dst2 == dst
+        assert not legacy.exists()
+        assert _auth_db(home / "browser-profile" / "chrome" / "Default" / "Cookies") == "sqlite-cookies"
+
 
 class TestRealProfileCdpLaunch:
     """The agent-browser-based launcher in browser_tool_real_profile._real_profile_cdp."""
