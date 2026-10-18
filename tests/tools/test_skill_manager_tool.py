@@ -159,6 +159,60 @@ class TestValidateFilePath:
 # ---------------------------------------------------------------------------
 
 
+class TestSymlinkedSkillDir:
+    """A profile's skills/<name> may be a directory symlink into a project
+    checkout (#141050). The scan must see through it exactly like skills_list
+    and skill_view do, so edits stop failing "not found" and a create steered
+    by that error can no longer nest a duplicate SKILL.md inside the real skill."""
+
+    def _linked_skill(self, tmp_path):
+        checkout = tmp_path.parent / "project-checkout" / "heal"
+        checkout.mkdir(parents=True)
+        (checkout / "SKILL.md").write_text(VALID_SKILL_CONTENT)
+        (tmp_path / "heal").symlink_to(checkout, target_is_directory=True)
+        return checkout
+
+    @pytest.mark.require_symlinks
+    def test_find_skill_sees_symlinked_dir(self, tmp_path):
+        self._linked_skill(tmp_path)
+        try:
+            with _skill_dir(tmp_path):
+                found = _find_skill("heal")
+            assert found is not None
+            assert found["path"] == tmp_path / "heal"
+        finally:
+            import shutil as _sh
+            _sh.rmtree(tmp_path.parent / "project-checkout", ignore_errors=True)
+
+    @pytest.mark.require_symlinks
+    def test_edit_symlinked_skill_writes_target(self, tmp_path):
+        checkout = self._linked_skill(tmp_path)
+        try:
+            with _skill_dir(tmp_path):
+                result = _edit_skill("heal", VALID_SKILL_CONTENT_2)
+            assert result["success"] is True, result
+            assert "Updated description" in (checkout / "SKILL.md").read_text()
+            assert (tmp_path / "heal").is_symlink()  # still a link, not a copy
+        finally:
+            import shutil as _sh
+            _sh.rmtree(tmp_path.parent / "project-checkout", ignore_errors=True)
+
+    @pytest.mark.require_symlinks
+    def test_create_same_name_refused_no_nested_duplicate(self, tmp_path):
+        checkout = self._linked_skill(tmp_path)
+        try:
+            with _skill_dir(tmp_path):
+                # name + category reproduces the issue's nesting shape: the
+                # collision check used the same symlink-blind resolver.
+                result = _create_skill("heal", VALID_SKILL_CONTENT_2, category="heal")
+            assert result["success"] is False
+            assert "already exists" in result["error"]
+            assert not (checkout / "heal" / "SKILL.md").exists()
+        finally:
+            import shutil as _sh
+            _sh.rmtree(tmp_path.parent / "project-checkout", ignore_errors=True)
+
+
 def _can_make_unreadable_dir() -> bool:
     # chmod 0 is ignored for root and has no directory-listing effect on Windows.
     return sys.platform != "win32" and hasattr(os, "geteuid") and os.geteuid() != 0

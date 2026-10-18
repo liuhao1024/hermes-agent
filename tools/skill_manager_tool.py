@@ -209,8 +209,11 @@ def _resolve_skill_dir(name: str, category: str | None = None) -> Path:
 
 
 def _iter_skill_dirs(root: Path):
-    from agent.skill_utils import is_excluded_skill_path
-    for skill_md in root.rglob("SKILL.md"):
+    from agent.skill_utils import is_excluded_skill_path, iter_skill_index_files
+    # iter_skill_index_files is the walk skills_list/skill_view share: unlike a bare
+    # ``rglob("SKILL.md")`` it follows directory symlinks, so a profile whose
+    # skills/<name> is a symlink into a project checkout stays manageable here too.
+    for skill_md in iter_skill_index_files(root, "SKILL.md"):
         if not is_excluded_skill_path(skill_md):
             yield skill_md.parent
 
