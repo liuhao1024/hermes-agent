@@ -1030,7 +1030,10 @@ _LEAN_ANCHOR_HEADING = "## Anchor Index (mechanically extracted, exact)"
 _LEAN_ANCHOR_BUDGET_CHARS = 7_000
 _ANCHOR_PATTERNS: list[tuple[str, re.Pattern[str], int]] = [
     ("PRs/issues", re.compile(r"#\d{3,6}\b"), 120),
-    ("commits", re.compile(r"\b[0-9a-f]{9,40}\b"), 40),
+    # A commit needs one a-f letter (a bare digit run like a Windows build
+    # number is not a SHA) and "-" counts as a boundary on both sides, so a
+    # UUID's hyphen-cut tail segment cannot pose as a commit (#141267).
+    ("commits", re.compile(r"(?<![\w-])(?=[0-9a-f]{9,40}(?![\w-]))[0-9]*[a-f][0-9a-f]*"), 40),
     ("branches", re.compile(r"\b(?:fix|feat|docs|refactor|chore|salvage|ent)/[A-Za-z0-9._/-]{3,60}"), 40),
     ("files", re.compile(r"\b[\w./-]+/[\w.-]+\.(?:py|ts|tsx|js|rs|md|yaml|yml|json|toml|sh)\b"), 80),
     ("errors", re.compile(r"\b(?:[A-Z][a-zA-Z]*Error|Exception|ENOSPC|EACCES|SIGKILL|Traceback)\b[^\n]{0,90}"), 40),

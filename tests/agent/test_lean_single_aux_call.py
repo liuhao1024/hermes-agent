@@ -17,6 +17,7 @@ import pytest
 
 from agent.context_compressor import (
     ContextCompressor,
+    _build_anchor_index,
     _LEAN_ANCHOR_HEADING,
     _LEAN_RECOVERY_HEADING,
     _LEAN_SESSION_LOG_HEADING,
@@ -161,6 +162,40 @@ class TestSampledSummaryInput:
         assert mock_call.call_count == 1
         prompt = mock_call.call_args.kwargs["messages"][0]["content"]
         assert "summary input truncated" in prompt
+
+
+class TestAnchorCommitHarvest:
+    """The commits: line must harvest real SHAs only (#141267): no hyphen-cut
+    UUID tail segments, no bare digit runs (Windows build numbers, ticket ids)."""
+
+    @staticmethod
+    def _commits_line(text):
+        idx = _build_anchor_index([{"role": "user", "content": text}])
+        for line in idx.splitlines():
+            if line.startswith("commits:"):
+                return line
+        return ""
+
+    def test_uuid_tail_segments_are_not_commits(self):
+        line = self._commits_line(
+            "memory d4e74cab-c16c-4e5b-a434-5aad31e0988f and "
+            "d3a24c89-3983-4943-96ec-ccc8db9e44c1 saved"
+        )
+        assert "5aad31e0988f" not in line
+        assert "ccc8db9e44c1" not in line
+
+    def test_bare_digit_runs_are_not_commits(self):
+        line = self._commits_line("forum thread 262209022 and ticket 123456789")
+        assert line == ""
+
+    def test_real_shas_are_still_harvested(self):
+        line = self._commits_line("landed in 3752497cc4 then reverted by aa74e184ea0")
+        assert "3752497cc4" in line
+        assert "aa74e184ea0" in line
+
+    def test_hex_glued_into_a_longer_word_stays_out(self):
+        line = self._commits_line("prefixzz3752497cc4")
+        assert "3752497cc4" not in line
 
 
 if __name__ == "__main__":
