@@ -132,15 +132,48 @@ def test_force_restart_keeps_parked_profile_gateway_ownership(homes, monkeypatch
     monkeypatch.setenv('HERMES_HOME', str(secondary))
     monkeypatch.setattr(gw, '_current_profile_name', lambda: 'worker')
 
-    def host_restart(*args, **kwargs):
-        raise AssertionError('forced gateway restart was routed through the host')
-
     monkeypatch.setattr(gw, '_served_by_another_host_gateway', lambda *args: None)
     monkeypatch.setattr(gw, 'named_profile_served_by_running_multiplexer', lambda: False)
-    monkeypatch.setattr(gw, '_host_multiplexer_for_all_verb', host_restart)
+    # No live host: every pid the scan sees is the profile's own (--force) gateway.
+    monkeypatch.setattr(gw, '_host_multiplexer_for_all_verb', lambda: None)
     monkeypatch.setattr(gw, 'find_gateway_pids', lambda **kwargs: [4242])
     from hermes_cli.gateway_profile_lifecycle import profile_lifecycle
     assert profile_lifecycle('restart', SimpleNamespace()) is False
+
+
+def test_stop_parks_when_the_host_holds_the_served_profiles_lock(homes, monkeypatch, capsys):
+    """The host multiplexer holds each served profile's gateway.lock itself, so the profile's pid
+    scan returns the HOST pid; that must not read as a separate --force gateway whose fall-through
+    stop terminates the host and takes every served profile offline (#141133)."""
+    from hermes_cli import gateway as gw
+    from gateway import control_socket
+    root, secondary = homes
+    marker = secondary / 'gateway.parked'
+    owner = SimpleNamespace(home=root, profile_label='default', pid=4242, describe=lambda: 'test host')
+    monkeypatch.setenv('HERMES_HOME', str(secondary))
+    monkeypatch.setattr(gw, '_current_profile_name', lambda: 'worker')
+    monkeypatch.setattr(gw, '_refuse_from_inside_gateway', lambda *a: None)
+    monkeypatch.setattr(gw, 'find_gateway_pids', lambda **kw: [4242])
+    monkeypatch.setattr(gw, '_host_multiplexer_for_all_verb', lambda: owner)
+    monkeypatch.setattr(gw, '_served_by_another_host_gateway', lambda *a: owner)
+    monkeypatch.setattr(gw, 'named_profile_served_by_running_multiplexer', lambda *a: True)
+    calls = []
+
+    def unserve(home, name):
+        assert home == root and name == 'worker'
+        calls.append('unserve')
+        return {'unserved': name, 'served_profiles': ['default']}
+
+    def terminate(*args, **kwargs):
+        raise AssertionError('stop fell through to terminating a gateway process')
+
+    monkeypatch.setattr(control_socket, 'request_unserve_profile', unserve, raising=False)
+    monkeypatch.setattr(gw, 'stop_profile_gateway', terminate)
+    monkeypatch.setattr(gw, 'kill_gateway_processes', terminate)
+    gw._cmd_stop(SimpleNamespace())
+    assert calls == ['unserve']
+    assert marker.exists()
+    assert "Profile 'worker' parked; its bots and cron are stopped." in capsys.readouterr().out
 
 
 def test_parked_status_and_topology_keep_roster(homes, monkeypatch, capsys):

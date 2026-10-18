@@ -27,6 +27,19 @@ def host_scope_for_all_verb(owner):
     return _home_env(owner.home if owner is not None else get_default_hermes_root())
 
 
+def gateway_pids_beside_host() -> list:
+    """Running gateway pids excluding the live host multiplexer's own.
+
+    The host multiplexer holds each served profile's runtime lock itself, so a served profile's pid
+    scan returns the HOST pid; only a genuinely separate (``--force``) gateway counts for keeping a
+    profile's own process lifecycle (#141133: reading the host pid as one stopped every served
+    profile instead of parking the named one).
+    """
+    from hermes_cli import gateway as gw
+    host_pid = getattr(gw._host_multiplexer_for_all_verb(), "pid", None)
+    return [pid for pid in gw.find_gateway_pids() if pid != host_pid]
+
+
 def profile_lifecycle(command: str, args) -> bool:
     """True when a named-profile command was handled (including an unconfirmed request)."""
     from hermes_cli import gateway as gw
@@ -64,8 +77,9 @@ def profile_lifecycle(command: str, args) -> bool:
             print("The host retries on its next rescan (within 30s). Check gateway status.")
         return True
 
-    # A separate --force gateway still owns its normal process/service lifecycle.
-    if gw.find_gateway_pids():
+    # A separate --force gateway still owns its normal process/service lifecycle; the host's own pid
+    # (it holds each served profile's lock) is not one (#141133).
+    if gateway_pids_beside_host():
         return False
     owner = gw._served_by_another_host_gateway()
     if owner is None and not gw.named_profile_served_by_running_multiplexer():
