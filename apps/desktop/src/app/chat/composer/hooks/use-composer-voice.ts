@@ -25,7 +25,7 @@ import { resumeWakeAfterVoice } from '@/store/wake-word'
 
 import { pinFloatingComposerCapture } from '../floating-target'
 import type { ComposerTarget } from '../focus'
-import { onComposerDictationRequest, onComposerVoiceToggleRequest } from '../focus'
+import { getActiveComposer, markActiveComposer, onComposerDictationRequest, onComposerVoiceToggleRequest } from '../focus'
 import { useComposerScope, useComposerSurfaceId } from '../scope'
 import type { ChatBarProps } from '../types'
 
@@ -33,6 +33,10 @@ import { useAutoSpeakReplies } from './use-auto-speak-replies'
 import { useVoiceConversation } from './use-voice-conversation'
 import { useVoiceLiveConversation } from './use-voice-live-conversation'
 import { useVoiceRecorder } from './use-voice-recorder'
+
+/** How often an active voice conversation re-checks that its composer still
+ *  holds the focus-bus claim (module state with no atom to subscribe to). */
+const VOICE_TARGET_POLL_MS = 500
 
 interface UseComposerVoiceArgs {
   busy: boolean
@@ -92,6 +96,12 @@ export function useComposerVoice({
 
   useStore($pendingVoiceReplyId)
   const [voiceConversationActive, setVoiceConversationActive] = useState(false)
+  // A conversation only listens while its composer is the one voice is aimed
+  // at. Tab stacks keep N composers mounted (#140954), so without this gate a
+  // backgrounded conversation keeps transcribing and submitting speech meant
+  // for the surfaced one. Feeding `enabled` lets the conversation hooks' own
+  // start/end edges release the mic on losing the claim and re-arm on return.
+  const [voiceTargetHeld, setVoiceTargetHeld] = useState(true)
   // Engine selection is latched at conversation START (a Settings change
   // applies to the next conversation, never mid-call).
   const [liveEngineActive, setLiveEngineActive] = useState(false)
@@ -218,7 +228,7 @@ export function useComposerVoice({
   const chainedConversation = useVoiceConversation({
     busy,
     consumePendingResponse,
-    enabled: voiceConversationActive && !liveEngineActive,
+    enabled: voiceConversationActive && !liveEngineActive && voiceTargetHeld,
     onFatalError: () => setVoiceConversationActive(false),
     // Speaking over the model mid-generation interrupts the in-flight turn —
     // the same seam as the Stop button — so the interjection becomes the next
@@ -242,7 +252,7 @@ export function useComposerVoice({
     beforeMicOpen: () => wakePauseBarrierRef.current ?? undefined,
     busy,
     consumePendingResponse,
-    enabled: voiceConversationActive && liveEngineActive,
+    enabled: voiceConversationActive && liveEngineActive && voiceTargetHeld,
     onFatalError: () => setVoiceConversationActive(false),
     onInterrupt,
     onStopWord: () => setVoiceConversationActive(false),
@@ -258,6 +268,11 @@ export function useComposerVoice({
    *  `enabled`. gpt-live selected but not startable (no OpenAI key on the
    *  gateway) falls back to chained with a notice rather than a dead button. */
   const activateConversation = useCallback(() => {
+    // Starting voice HERE is itself the claim — in a split view the bus may
+    // still point at another pane, and the conversation must not gate itself
+    // off the moment it starts.
+    markActiveComposer(target)
+
     const status = $voiceLiveStatus.get()
     let live = false
 
@@ -276,7 +291,7 @@ export function useComposerVoice({
     setLiveEngineActive(live)
     setVoiceConversationActive(true)
     recordFeatureUse('voice_conversation')
-  }, [t])
+  }, [t, target])
 
   useEffect(() => {
     if (!voiceConversationActive) {
@@ -284,6 +299,23 @@ export function useComposerVoice({
       void refreshVoiceLiveStatus().catch(() => undefined)
     }
   }, [voiceConversationActive])
+
+  // Re-check the focus claim while the conversation runs. The bus has no
+  // change event (tab switches heal `resolveActive` lazily from pane
+  // visibility), so poll it — losing the claim ends the conversation's audio
+  // via `enabled`, regaining it starts it again.
+  useEffect(() => {
+    if (!voiceConversationActive) {
+      return
+    }
+
+    const check = () => setVoiceTargetHeld(getActiveComposer() === target)
+
+    check()
+    const timer = window.setInterval(check, VOICE_TARGET_POLL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [target, voiceConversationActive])
 
   // eslint-disable-next-line no-restricted-syntax -- ownership token used only by unmount cleanup
   useEffect(() => {
