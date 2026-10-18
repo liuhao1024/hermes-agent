@@ -466,8 +466,9 @@ _server_scope_keys: dict[Any, Optional[str]] = {}
 _server_tool_scopes: dict[Any, set] = {}
 _server_connecting: set = set()
 _server_connect_errors: dict[Any, str] = {}
-# adopter scope -> server names whose shared connection an owner's scoped shutdown tore down;
-# drained by the next discovery pass so the adopter is re-registered (see mcp_tool_lifecycle).
+# adopter scope -> server names whose shared connection an owner's scoped shutdown tore down or
+# a park stripped; drained by the next discovery pass, or the revive, so the adopter is
+# re-registered (see mcp_tool_lifecycle).
 _orphaned_adopters: dict[str, set] = {}
 # Lazy startup: servers registered from the schema cache without connecting; popped on
 # first real connection.

@@ -200,6 +200,7 @@ class MCPServerRunMixin:
         # immediately.
         self._was_parked = True
         self._park_reason = revival_reason
+        _registration._orphan_adopters_of(self)
         self._deregister_tools()
         self._reconnect_event.clear()
         paused = False

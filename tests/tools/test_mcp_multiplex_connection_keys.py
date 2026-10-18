@@ -425,3 +425,69 @@ def test_adopter_scope_setup_failure_leaks_no_override_and_continues(two_profile
     assert get_hermes_home_override() is None
     assert ss.current_secret_scope() is None
     assert registered == [{"x": {"url": "https://mcp.example/x"}}]
+
+
+def test_parked_connection_revive_returns_tools_to_profiles_that_adopted_it(two_profiles):
+    """A park strips a shared connection's tools from every scope, but the revive republished
+    only the owner's; the adopters sat tool-less behind a connected status until a restart or
+    ``reload.mcp`` (#141223). The revive must hand them theirs back, off the MCP loop."""
+    import asyncio
+    import threading
+    import time
+    from unittest.mock import AsyncMock
+
+    import tools.mcp_tool as core
+    from tools import mcp_tool_discovery as disc
+    from tools import mcp_tool_registration as reg
+    from tools.mcp_tool import MCPServerTask
+    from tools.registry import registry
+
+    cfg = {"url": "https://mcp.example/x", "headers": {"Authorization": "Bearer shared"}}
+    two_profiles("a")
+    task = MCPServerTask("x")
+    task._config, task._tools, task.session, task.tool_timeout = cfg, [_tool()], object(), 30
+    task.initialize_result = None
+    task._resolved_identity = reg._adopter_identity_digest("x", cfg)
+    disc._adopt_server("x", task)
+    task._registered_tool_names = reg._register_server_tools("x", task, cfg)
+
+    scope_b = two_profiles("b")
+    assert reg.register_connected_into_current_scope({"x": cfg}) == 1
+    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
+
+    # The outage: reconnects exhausted, the owner's task parks; its first self-probe wake revives.
+    two_profiles("a")
+    with patch.object(MCPServerTask, "_wait_for_reconnect_or_shutdown", AsyncMock(return_value="self-probe")), \
+            patch("tools.mcp_tool_config._load_mcp_config", lambda: {"x": cfg}):
+        assert asyncio.run(task._park("reconnects exhausted")) is False
+    assert registry.get_tool_names_for_toolset("mcp-x") == []
+    two_profiles("b")
+    assert registry.get_tool_names_for_toolset("mcp-x") == []
+    with core._lock:
+        assert core._orphaned_adopters == {scope_b: {"x"}}  # the owner is not its own adopter
+
+    # The revive: a fresh session and rediscovery publish the owner's tools from the MCP loop's task.
+    two_profiles("a")
+    task.session = object()
+    with patch("tools.mcp_tool_config._load_mcp_config", lambda: {"x": cfg}):
+        task._register_discovered_tools_if_needed()
+        assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
+        for worker in [t for t in threading.enumerate() if t.name == "mcp-readopt"]:
+            worker.join(timeout=10)
+    with core._lock:
+        assert core._orphaned_adopters == {}
+
+    # B never reloaded, yet has its tools back on the owner's revived connection.
+    two_profiles("b")
+    assert registry.get_tool_names_for_toolset("mcp-x") == ["mcp__x__t"]
+    assert disc.get_mcp_status({"x": cfg})[0]["status"] == "connected"
+
+
+def test_reregister_orphaned_adopters_off_loop_spawns_nothing_without_orphans(two_profiles):
+    """A first discovery (and a revive nobody adopted) must not pay for a thread."""
+    import tools.mcp_tool as core
+    from tools import mcp_tool_lifecycle as lifecycle
+
+    with core._lock:
+        assert core._orphaned_adopters == {}
+    assert lifecycle._reregister_orphaned_adopters_off_loop() is None

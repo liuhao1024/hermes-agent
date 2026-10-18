@@ -693,3 +693,8 @@ class MCPServerTransportMixin:
             for key in owned:
                 if _core._servers.get(key) is self:
                     _core._server_connect_errors.pop(key, None)
+        if self._registered_tool_names and self._was_parked:
+            # A park stripped this connection's tools from every profile that had adopted it;
+            # the registration above only restored the owner's scope, so hand the adopters
+            # theirs back (#141223).
+            _lifecycle._reregister_orphaned_adopters_off_loop()

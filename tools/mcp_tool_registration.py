@@ -117,6 +117,20 @@ def _deregister_mcp_tool_all_scopes(server, tool_name: str) -> None:
     _restore_server_toolset_alias(key)
 
 
+def _orphan_adopters_of(server) -> None:
+    """Remember the profiles that adopted *server*'s shared connection before a park strips its
+    tools from every scope: the revive republishes them into the owner's scope only, and nothing
+    re-runs the adopters' discovery (their status still reads connected), so they stayed
+    tool-less until a restart or ``reload.mcp`` (#141223). Drained like an owner's scoped reload
+    (``_reregister_orphaned_adopters``) once the revived connection has its tools back."""
+    key = _server_key_for_task(server)
+    with _core._lock:
+        owner = _core._server_registry_scope(key)
+        for adopter in _core._server_tool_scopes.get(key, ()):
+            if adopter != owner:
+                _core._orphaned_adopters.setdefault(adopter, set()).add(_key_name(key))
+
+
 def _restore_server_toolset_alias(key) -> None:
     """Keep the process-global alias while any profile still owns tools of a server with this
     name — including another profile's same-named connection (the alias is per NAME; the

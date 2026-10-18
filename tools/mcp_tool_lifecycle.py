@@ -4,6 +4,7 @@ server shutdown and draining of the background MCP loop."""
 import logging
 import asyncio
 import os
+import threading
 import time
 from typing import Dict, Optional
 from tools.mcp_tool_common import _core
@@ -150,6 +151,23 @@ def _reregister_orphaned_adopters() -> None:
                 reset_secret_scope(secret_token)
             if home_token is not None:
                 reset_hermes_home_override(home_token)
+
+
+def _reregister_orphaned_adopters_off_loop() -> Optional[threading.Thread]:
+    """``_reregister_orphaned_adopters`` for a parked server's revive (#141223). The revive
+    publishes the owner's tools from the server task on the MCP loop, and an adopter's
+    re-registration blocks on that very loop (``register_mcp_servers`` → ``_run_on_mcp_loop``)
+    whenever it must open a connection of its own, so it runs on a thread. Returns it, or None
+    when nothing was orphaned."""
+    with _core._lock:
+        if not _core._orphaned_adopters:
+            return None
+    # A bare thread on purpose: each adopter is re-registered under ITS OWN home and secret
+    # scope (set inside the target), not the owner's that the server task carries.
+    worker = threading.Thread(  # health: allow HX012 -- the target binds a scope per adopter
+        target=_reregister_orphaned_adopters, name="mcp-readopt", daemon=True)
+    worker.start()
+    return worker
 
 
 def shutdown_mcp_servers(*, scope: Optional[str] = None, names: Optional[set] = None,
