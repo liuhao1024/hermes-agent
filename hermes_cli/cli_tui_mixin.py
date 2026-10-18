@@ -841,6 +841,21 @@ class CLITuiMixin:
         except Exception:
             return []
 
+    def _tui_cut_live_tts(self) -> None:
+        """Stop live TTS playback: the streaming pipeline's stop event plus the file player
+        subprocess (stop_playback just terminates a subprocess; the stop event drains the
+        pipeline if one is live).
+
+        Idempotent — callers gate on ``_voice_tts_done`` and log their own trigger line.
+        """
+        from tools.tts_streaming import mark_speech_interrupted
+        mark_speech_interrupted()
+        if self._voice_tts_stop is not None:
+            self._voice_tts_stop.set()
+        from tools.voice_mode import stop_playback
+        stop_playback()
+        self._voice_tts_done.set()
+
     def _tui_handle_voice_record(self, event):
         """Toggle voice recording when voice mode is active.
 
@@ -858,6 +873,16 @@ class CLITuiMixin:
             event.app.invalidate()
             threading.Thread(target=self._voice_stop_and_transcribe, daemon=True).start()
             return
+        # Cut TTS so the user can start talking. This must run BEFORE the agent-running
+        # branch below: a spoken reply drains in the settle phase with _agent_running still
+        # True, and that branch's early return used to leave it uninterruptible by the
+        # record key (#141237).
+        if not self._voice_tts_done.is_set():
+            try:
+                logger.info("TTS CUT: record key handler cutting TTS")
+                self._tui_cut_live_tts()
+            except Exception:
+                pass
         # Allow disarming continuous mode while the agent runs or transcribes — otherwise the
         # user is stuck in an auto-restart loop until /voice off.
         if self._agent_running or self._voice_processing:
@@ -869,20 +894,6 @@ class CLITuiMixin:
         if (self._clarify_state or self._sudo_state or self._approval_state
                 or self._slash_confirm_state or self._connection_state):
             return
-        # Cut TTS so the user can start talking: stop_playback() just terminates a subprocess;
-        # the stop event drains the streaming pipeline if one is live.
-        if not self._voice_tts_done.is_set():
-            try:
-                logger.info("TTS CUT: record key handler cutting TTS")
-                from tools.tts_streaming import mark_speech_interrupted
-                mark_speech_interrupted()
-                if self._voice_tts_stop is not None:
-                    self._voice_tts_stop.set()
-                from tools.voice_mode import stop_playback
-                stop_playback()
-                self._voice_tts_done.set()
-            except Exception:
-                pass
         with self._voice_lock:
             self._voice_continuous = True
 
@@ -973,6 +984,16 @@ class CLITuiMixin:
                 return
             self._last_ctrl_c_time = now
             print("\n" + t("cli.tui.interrupting_again_hint"))
+            # Voice mode: an interrupt must also cut live TTS — during the settle-phase
+            # drain the agent thread is already gone and request_hard_interrupt alone
+            # leaves the spoken reply running (#141237).
+            if getattr(self, "_voice_mode", False) and not self._voice_tts_done.is_set():
+                from cli import logger
+                try:
+                    logger.info("TTS CUT: ctrl-c handler cutting TTS")
+                    self._tui_cut_live_tts()
+                except Exception:
+                    pass
             request_hard_interrupt(self.agent)
         else:
             self._tui_clear_or_exit(event)

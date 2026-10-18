@@ -682,3 +682,77 @@ class TestFallbackSpeakArmsBargeMonitor:
         assert not cli._monitor_armed.wait(0.05)
         assert cli._monitor_calls == []
 
+
+# ============================================================================
+# Record key / Ctrl+C must cut TTS while the agent runs (#141237)
+# ============================================================================
+class TestInterruptKeysCutTtsDuringPlayback:
+    """A spoken reply drains in the settle phase (chat() joins the TTS thread)
+    with _agent_running still True, so the record key's disarm branch and
+    Ctrl+C's agent-interrupt branch must both cut live TTS BEFORE their early
+    returns — otherwise the keys can never interrupt a spoken reply (#141237)."""
+
+    def _event(self):
+        return SimpleNamespace(
+            app=SimpleNamespace(
+                invalidate=MagicMock(),
+                current_buffer=SimpleNamespace(text="", reset=MagicMock()),
+            )
+        )
+
+    def _cli(self, **overrides):
+        overrides.setdefault("_agent_running", True)
+        cli = _make_voice_cli(**overrides)
+        for attr in (
+            "_clarify_state", "_sudo_state", "_secret_state", "_approval_state",
+            "_slash_confirm_state", "_connection_state", "_model_picker_state",
+            "_command_palette_state", "_plugin_command_wait",
+        ):
+            setattr(cli, attr, None)
+        cli._last_ctrl_c_time = 0.0
+        return cli
+
+    @patch("tools.voice_mode.stop_playback")
+    @patch("tools.tts_streaming.mark_speech_interrupted")
+    def test_record_key_cuts_tts_while_agent_running(self, _msi, stop_playback, caplog):
+        import logging
+        pipe_stop = threading.Event()
+        cli = self._cli(_voice_mode=True, _voice_continuous=True, _voice_tts_stop=pipe_stop)
+        cli._voice_tts_done.clear()
+
+        with caplog.at_level(logging.INFO, logger="cli"):
+            cli._tui_handle_voice_record(self._event())
+
+        assert any("TTS CUT: record key handler cutting TTS" in r.message for r in caplog.records)
+        stop_playback.assert_called_once()
+        assert pipe_stop.is_set()
+        assert cli._voice_tts_done.is_set()
+        # Disarm semantics for an agent-running press are unchanged.
+        assert cli._voice_continuous is False
+
+    @patch("tools.voice_mode.stop_playback")
+    @patch("tools.tts_streaming.mark_speech_interrupted")
+    def test_ctrl_c_cuts_tts_when_playback_outlives_agent_thread(self, _msi, stop_playback):
+        pipe_stop = threading.Event()
+        cli = self._cli(_voice_mode=True, _voice_tts_stop=pipe_stop)
+        cli._voice_tts_done.clear()
+        cli.agent = SimpleNamespace(interrupt=MagicMock())
+        hard_interrupts = []
+        with patch("hermes_cli.cli_tui_mixin.request_hard_interrupt",
+                   side_effect=lambda agent: hard_interrupts.append(agent)):
+            cli._tui_handle_ctrl_c(self._event())
+
+        stop_playback.assert_called_once()
+        assert pipe_stop.is_set()
+        assert cli._voice_tts_done.is_set()
+        assert hard_interrupts == [cli.agent]
+
+    @patch("tools.voice_mode.stop_playback")
+    @patch("tools.tts_streaming.mark_speech_interrupted")
+    def test_record_key_without_live_tts_disarms_without_cut(self, _msi, stop_playback):
+        cli = self._cli(_voice_mode=True, _voice_continuous=True)
+
+        cli._tui_handle_voice_record(self._event())
+
+        stop_playback.assert_not_called()
+        assert cli._voice_continuous is False
