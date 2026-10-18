@@ -273,7 +273,8 @@ def _refresh_dashboard_after_update(*, already_restarted_units: set[str] | None 
     stopped and could not bring back, so the receipt records them ``failed`` (#109290).
 
     *already_restarted_units*: systemd unit names (no ``.service``) the fleet-restart loop
-    already restarted, so a Serve-only install isn't restarted a second time here.
+    already settled — restarted, or declined for missing privilege — so a unit is never
+    restarted a second time here (a declined one would only re-fail, #141021).
 
     See #83595.
     """

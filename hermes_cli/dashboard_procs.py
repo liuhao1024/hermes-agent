@@ -604,19 +604,24 @@ def _kill_stale_dashboard_processes(
 
     Manually-started dashboards are not auto-restarted because we don't know the original launch args
     (--host, --port, --insecure, --tui, --no-open). See #68934.
-    *already_restarted_units* names units (no ``.service`` suffix) the caller already restarted directly —
-    e.g. ``hermes update``'s systemd fleet-restart loop, which restarts ``hermes-serve*`` units before this
-    function runs. Without excluding them, a Serve-only install's freshly restarted process is found again
-    here and restarted a second time for no benefit (review on #83595).
+    *already_restarted_units* names units (no ``.service`` suffix) the caller already settled — restarted
+    directly, or declined for missing privilege — e.g. ``hermes update``'s systemd fleet-restart loop,
+    which restarts ``hermes-serve*`` units before this function runs. Without excluding them, a
+    Serve-only install's freshly restarted process is found again here and restarted a second time for
+    no benefit (review on #83595), and a declined unit re-fails through polkit (#141021).
     """
     from hermes_cli import main_dashboard as _dash
 
-    if restart_managed and _dash._restart_managed_dashboard_service(reason):
-        # The dashboard unit is handled but other backends (e.g. hermes-serve.service) are not:
-        # mark the unit handled so the filter below drops its PIDs, and keep going.
-        _dash_unit = getattr(_dash, "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
-        already_restarted_units = set(already_restarted_units or ()) | {
-            str(_dash_unit).removesuffix(".service")}
+    _dash_unit = str(getattr(_dash, "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
+                     ).removesuffix(".service")
+    # A unit the caller already settled — restarted, or declined for missing privilege —
+    # must not be retried here: a declined system unit only re-fails through polkit and
+    # prints a duplicate "restart manually" block (#141021).
+    if restart_managed and _dash_unit not in set(already_restarted_units or ()):
+        if _dash._restart_managed_dashboard_service(reason):
+            # The dashboard unit is handled but other backends (e.g. hermes-serve.service) are not:
+            # mark the unit handled so the filter below drops its PIDs, and keep going.
+            already_restarted_units = set(already_restarted_units or ()) | {_dash_unit}
     exclude = _exclude_pids_from_env()
     if restart_managed:
         # An SSH-owned backend belongs to an attached Desktop client; killing it strands that

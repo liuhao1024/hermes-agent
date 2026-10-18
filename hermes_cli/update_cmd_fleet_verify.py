@@ -200,9 +200,12 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
 
     # Restart a managed dashboard via systemd or stop stale manual ones (raw-killing
     # a systemd-owned PID reads as clean stop and leaves the Cloudflare origin dead).
-    # Already-restarted units aren't redone.
+    # Units the fleet loop settled — restarted, or declined for missing privilege —
+    # aren't retried here: a declined system unit would only re-fail through polkit
+    # and print a second "restart manually" block (#141021).
     # A dashboard it stopped and could not bring back is a promised restart that did not happen.
-    _dashboards_down = _refresh_dashboard_after_update(already_restarted_units=set(restart.restarted_services))
+    _settled_units = set(restart.restarted_services) | set(restart.failed_or_stale_units)
+    _dashboards_down = _refresh_dashboard_after_update(already_restarted_units=_settled_units)
     if _dashboards_down:
         restart.incomplete = True
 
