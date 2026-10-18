@@ -314,6 +314,31 @@ class TestUnifiedCronjobTool:
         assert resumed["success"] is True
         assert resumed["job"]["state"] == "scheduled"
 
+    def test_pause_persists_schema_advertised_paused_reason(self):
+        # Regression for #141009: the schema advertises only ``paused_reason`` while the
+        # pause handler read ``reason`` — a schema-following caller's reason was dropped.
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
+        job_id = created["job_id"]
+
+        paused = json.loads(
+            cronjob(action="pause", job_id=job_id, paused_reason="disk maintenance window")
+        )
+        assert paused["success"] is True
+
+        from cron.jobs import get_job
+        assert get_job(job_id)["paused_reason"] == "disk maintenance window"
+
+    def test_pause_still_accepts_reason_parameter(self):
+        # The programmatic ``reason`` parameter keeps working alongside the schema field.
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
+        job_id = created["job_id"]
+
+        paused = json.loads(cronjob(action="pause", job_id=job_id, reason="legacy name"))
+        assert paused["success"] is True
+
+        from cron.jobs import get_job
+        assert get_job(job_id)["paused_reason"] == "legacy name"
+
 
     @staticmethod
     def _patch_named_legit(monkeypatch):
