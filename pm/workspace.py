@@ -65,7 +65,14 @@ def members_stamp(plugin_dirs) -> str:
 def _copy_core_inputs(source: Path, destination: Path) -> None:
     """Build from a writable snapshot, never from signed/read-only source."""
     import fnmatch
+    import stat
     import tomllib
+
+    def copy_writable(src, dst):
+        # copy2 keeps the source's mode, so a sealed install (files 0444) would seal the
+        # snapshot and _generate_pyproject's rewrite of pyproject.toml would fail (#141278).
+        shutil.copy2(src, dst)
+        os.chmod(dst, stat.S_IMODE(os.stat(dst).st_mode) | stat.S_IWRITE)
 
     metadata = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8-sig"))
     project = metadata.get("project", {})
@@ -97,7 +104,7 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
                 and not entry.name.startswith(".") and entry.resolve() != destination.resolve()
                 and any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in package_roots)):
             target = destination / entry.name
-            shutil.copytree(entry, target, ignore=ignore)
+            shutil.copytree(entry, target, ignore=ignore, copy_function=copy_writable)
     for name in files:
         entry = source / name
         if not entry.is_file() or entry.is_symlink():
@@ -106,7 +113,7 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
             raise InstallError("venv", f"build input escapes the core project: {name}")
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(entry, target)
+        copy_writable(entry, target)
 
 
 def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path) -> None:

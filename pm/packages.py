@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from pm.filesystem import long_root, native
+from pm.filesystem import long_root, native, remove_tree
 from pm.package import (
     DebPackage,
     InstallError,
@@ -487,7 +487,12 @@ class Venv(StatePackage):
                 validate_environment(venv_command(project, candidate, ("-I",)),
                                      env=dict(environment.env), cwd=resolved_lock.parent)
         except BaseException:
-            shutil.rmtree(generation, ignore_errors=True)
+            # The generation may hold trees a plain ignore_errors rmtree cannot unlink
+            # (Windows read-only attributes; #141278); the original failure still wins.
+            try:
+                remove_tree(generation)
+            except OSError:
+                pass
             raise
         (generation / ".lease-managed").touch()
         return {"environment": candidate, "resolved_lock": resolved_lock}

@@ -52,3 +52,39 @@ def test_cold_runtime_refusal_names_the_extra(monkeypatch, tmp_path):
                         project_root=tmp_path)
     assert install_hint("bedrock") in info.value.remedy
     assert "bedrock" in info.value.cause
+
+
+def test_failed_generation_is_removed_not_left_as_ghost(monkeypatch, tmp_path):
+    """`pm install --extra` on a failing resolution must surface the error and clean its
+    generation: a sealed-source snapshot used to leave one ghost environments/<uuid>
+    per attempt (#141278)."""
+    from pm.environment import ResolutionConflict
+    from pm.packages import Venv
+
+    class StubEnvironment:
+        def create(self):
+            pass
+
+        def check(self):
+            pass
+
+    monkeypatch.setattr("pm.environment.managed_environment", lambda *args, **kwargs: StubEnvironment())
+    monkeypatch.setattr("pm.plugins_state.enabled_plugins_ordered", lambda **kwargs: [])
+
+    def explode(*args, **kwargs):
+        raise ResolutionConflict("lock", "no solution found")
+
+    monkeypatch.setattr("pm.workspace.lock_and_sync", explode)
+
+    source = tmp_path / "core"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\nrequires-python=">=3.11"\n', encoding="utf-8")
+
+    from pm.environments import install_state_dir
+    environments = install_state_dir(source) / "environments"
+
+    with pytest.raises(ResolutionConflict):
+        Venv(source).apply(["anthropic"], plugin_dirs=[], explicit=True)
+    assert not environments.exists() or not any(environments.iterdir()), \
+        "a failed attempt must not leave a ghost generation behind"

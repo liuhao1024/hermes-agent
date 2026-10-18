@@ -282,3 +282,49 @@ def test_nested_dist_travels_but_root_dist_stays_out(tmp_path):
 
     assert (destination / "plugins/kanban/dashboard/dist/index.js").read_text(encoding="utf-8") == "ENTRY\n"
     assert not (destination / "dist").exists(), "root build output never enters the snapshot"
+
+
+def _sealed_core(tmp_path):
+    core = tmp_path / "core"
+    package = core / "pm"
+    package.mkdir(parents=True)
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[tool.setuptools.packages.find]\ninclude=["pm"]\n',
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for path in (core, package, *(p for p in package.iterdir())):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    (core / "pyproject.toml").chmod(0o444)
+    return core
+
+
+def test_sealed_source_snapshot_stays_writable(tmp_path):
+    """An immutable deployment (dirs 0555, files 0444) must not seal the snapshot:
+    copy2 preserves modes, and the generation rewrites files in place (#141278)."""
+    import os
+    import stat
+
+    core = _sealed_core(tmp_path)
+
+    destination = tmp_path / "stage"
+    workspace._copy_core_inputs(core, destination)
+
+    for copied in (destination / "pyproject.toml", destination / "pm/__init__.py",
+                   destination / "pm/runtime.py"):
+        assert os.stat(copied).st_mode & stat.S_IWRITE
+    assert (destination / "pm/runtime.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_generate_pyproject_rewrites_the_sealed_source_snapshot(tmp_path):
+    """The reported failure: writing the merged pyproject.toml hits EACCES because the
+    copy kept the sealed source's read-only mode (#141278)."""
+    core = _sealed_core(tmp_path)
+
+    root = tmp_path / "workspace"
+    workspace._generate_pyproject([], root, source=core)
+
+    generated = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name="core"' in generated and "exclude-newer" not in generated
