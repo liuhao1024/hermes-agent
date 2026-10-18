@@ -288,6 +288,56 @@ def test_receipt_wait_polls_the_local_receipt_and_outlives_an_unreachable_owner(
     assert dials == []
 
 
+def test_authority_rpc_dials_from_inside_a_running_event_loop(tmp_path, monkeypatch):
+    """message_agent called from a CLI one-shot Bot turn runs inside the agent's own event loop
+    (#141087): the authority dial must still admit instead of raising "asyncio.run() cannot be
+    called from a running event loop" and stranding the pinned intent as a permanent ambiguous."""
+    import asyncio
+
+    import websockets.asyncio.client as ws_client
+    from hermes_cli import gateway_client, gateway_runtime
+
+    class _Discovery:
+        state, endpoint = "ready", object()
+
+    monkeypatch.setattr(gateway_runtime, "discover_gateway_endpoint",
+                        lambda home, timeout=5: _Discovery())
+    monkeypatch.setattr(gateway_client, "_session_ticket", lambda home, endpoint: "ticket")
+    monkeypatch.setattr(gateway_client, "gateway_ws_target",
+                        lambda endpoint, ticket: ("ws://authority", ["hermes"]))
+
+    class _FakeWS:
+        subprotocol = gateway_client.GATEWAY_WS_PROTOCOL
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeGatewayClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def rpc(self, method, **params):
+            return {"status": "queued", "method": method, **params}
+
+    monkeypatch.setattr(ws_client, "connect", lambda *args, **kwargs: _FakeWS())
+    monkeypatch.setattr(gateway_client, "GatewayClient", lambda ws: _FakeGatewayClient())
+    params = {"id": "b" * 32, "message": "hi"}
+
+    async def call_from_the_agent_loop():
+        return mailbox._authority_rpc(tmp_path, "bot_relay.deliver", params)
+
+    record = asyncio.run(call_from_the_agent_loop())
+    assert record["status"] == "queued" and record["method"] == "bot_relay.deliver"
+    # Without a loop of its own the direct asyncio.run path still dials the same way.
+    assert mailbox._authority_rpc(tmp_path, "bot_relay.settle", params)["method"] == "bot_relay.settle"
+
+
 @pytest.mark.platforms("linux", "macos")
 def test_mailbox_lock_refuses_a_dir_another_uid_owns_when_chmod_is_denied(tmp_path, monkeypatch):
     """On POSIX chmod fails only for a dir this uid doesn't own: that mailbox is refused, not used."""

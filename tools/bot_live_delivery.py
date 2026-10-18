@@ -95,7 +95,17 @@ def _authority_rpc(home, method, params):
             async with GatewayClient(ws) as client:
                 return await client.rpc(method, **params)
 
-    return asyncio.run(request())
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(request())
+    # message_agent can call from inside the agent turn's own loop (a CLI one-shot Bot turn,
+    # #141087): a nested asyncio.run raises there and the pinned intent strands as a permanent
+    # "ambiguous", so dial on a private loop in a worker thread instead.
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, request()).result()
 
 
 def _owner(home: Path | str, owner: dict[str, Any]) -> dict[str, str]:
