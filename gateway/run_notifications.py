@@ -1180,7 +1180,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             return None  # Suppressed noise is terminal, not a consumed process result.
         identity = self._completion_delivery_identity(evt)
         claim = self._CompletionClaim()
-        accepted = identity_claimed = refused = False
+        accepted = identity_claimed = refused = spent_refusal = False
         try:
             claim = await self._preflight_completion_delivery(evt)
             if not claim.proceed:
@@ -1210,14 +1210,24 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
             return True
-        except WakeNotAccepted:
+        except WakeNotAccepted as exc:
             refused = True
+            # An admission_conflict is a durable verdict (another admitted automation owns the
+            # session); every other refusal (storage_unavailable, stale_epoch, wake races) stays
+            # refundable so a transient condition never burns the delivery budget (#141153).
+            spent_refusal = str(exc) == "admission_conflict"
             return False
         finally:
             if identity_claimed and not accepted:
                 with self._completion_delivery_lock:
                     self._completion_deliveries_inflight.discard(identity)
-            operation = "complete" if accepted else "defer" if refused or claim.defer else "release"
+            # A durable admission conflict spends its claim's attempt: the cap then converges a
+            # persistently refused row to dropped instead of refunding the attempt to zero and
+            # requeueing it on every 2 s watcher tick forever, replayed after each restart
+            # (#141153). Transient refusals and the pre-flight's uncertain verdict keep the refund.
+            operation = ("complete" if accepted
+                         else "defer" if claim.defer or (refused and not spent_refusal)
+                         else "release")
             if claim.claim_id:
                 self._settle_durable_claim(operation, claim.delegation_id, claim.claim_id)
             for sibling, claim_id in sibling_claims:

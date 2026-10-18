@@ -211,6 +211,72 @@ def _persist_pending_completion(event):
     })
 
 
+def test_persistently_refused_admission_converges_to_dropped(monkeypatch, isolated_registry):
+    """Regression for #141153: a durable admission_conflict spends the claim's delivery attempt,
+    so the attempt cap converges a permanently refused row to dropped instead of refunding the
+    attempt to zero and requeueing it on every 2 s watcher tick forever (60k retries over 39 h,
+    replayed after every restart because only pending rows replay)."""
+    from gateway import run_notifications
+    from gateway.wake import WakeNotAccepted
+
+    isolated = queue.Queue()
+    monkeypatch.setattr(isolated_registry, "completion_queue", isolated)
+    event = _async_event("deleg_admission_conflict")
+    _persist_pending_completion(event)
+    isolated.put(event)
+
+    refusals = []
+
+    async def _refused(self, synth_text, evt, **kwargs):
+        refusals.append(evt.get("delegation_id"))
+        raise WakeNotAccepted("admission_conflict")
+
+    monkeypatch.setattr(
+        run_notifications.GatewayNotificationsMixin, "_inject_watch_notification", _refused)
+
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    _stop_after_sleeps(monkeypatch, runner, count=16)
+
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+
+    assert len(refusals) == 8  # the delivery cap, not one injection per 2 s tick
+    from tools.async_delegation import get_durable_delegation
+    row = get_durable_delegation("deleg_admission_conflict")
+    assert row["delivery_state"] == "dropped"
+    assert row["delivery_attempts"] == 8
+
+
+def test_transient_refusal_still_refunds_its_delivery_attempt(monkeypatch, isolated_registry):
+    """Transient refusals (storage_unavailable, stale_epoch, wake races) keep the defer refund —
+    only a durable admission_conflict spends the delivery budget (#141153)."""
+    from gateway import run_notifications
+    from gateway.wake import WakeNotAccepted
+
+    isolated = queue.Queue()
+    monkeypatch.setattr(isolated_registry, "completion_queue", isolated)
+    event = _async_event("deleg_transient_refusal")
+    _persist_pending_completion(event)
+    isolated.put(event)
+
+    async def _transient(self, synth_text, evt, **kwargs):
+        raise WakeNotAccepted("storage_unavailable")
+
+    monkeypatch.setattr(
+        run_notifications.GatewayNotificationsMixin, "_inject_watch_notification", _transient)
+
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    _stop_after_sleeps(monkeypatch, runner, count=6)
+
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+
+    from tools.async_delegation import get_durable_delegation
+    row = get_durable_delegation("deleg_transient_refusal")
+    assert row["delivery_state"] == "pending"
+    assert row["delivery_attempts"] == 0
+
+
 def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch):
     import tools.process_registry as pr_module
 
