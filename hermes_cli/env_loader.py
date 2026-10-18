@@ -76,6 +76,29 @@ _DOTENV_PUBLISHED: dict[str, tuple[str | None, str, int]] = {}
 _DOTENV_PASSES = itertools.count()
 _DOTENV_LOCK = threading.RLock()
 
+# Whether a full dotenv pass (user / .op.env / project layers) has completed in this process.
+# hermes_cli.config expands ${env:...} refs at import time — before any of those layers load — so a
+# pre-pass miss usually means the variable is about to resolve, not that it is missing (#141265).
+# hermes_cli.config routes its unresolved-ref report through log_env_ref_missing() so those early
+# misses stay out of the warning stream.
+_DOTENV_LOAD_COMPLETED = False
+
+
+def dotenv_load_completed() -> bool:
+    """True once load_hermes_dotenv() finished a pass — import-time config expansion runs before it."""
+    return _DOTENV_LOAD_COMPLETED
+
+
+def log_env_ref_missing(raw: str, name: str) -> None:
+    """Report an unresolved ``${env:NAME}`` config ref — warning only after a dotenv pass completed.
+
+    hermes_cli.config expands refs at import time, before this module loads ``~/.hermes/.env``, so a
+    pre-pass miss usually means the variable is about to resolve on the next pass; warning there made
+    every CLI invocation log a false "is not set" for every ref (#141265). A miss once the
+    environment has loaded is real and still warns."""
+    message = "Config ref %r: %s is not set (check ~/.hermes/.env); keeping the literal placeholder"
+    (logger.warning if _DOTENV_LOAD_COMPLETED else logger.debug)(message, raw, name)
+
 # Per-process credentials a parent mints and injects into the child's environment (the Desktop shell /
 # a link-style launcher spawns `hermes dashboard` with a fresh HERMES_DASHBOARD_SESSION_TOKEN and keeps
 # the same token for its own /api probes). They are never .env configuration, so a persisted value in
@@ -463,6 +486,7 @@ def load_hermes_dotenv(
 ) -> list[Path]:
     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
+    global _DOTENV_LOAD_COMPLETED
     from agent.safe_worker_policy import worker_config_snapshot
 
     # The private bootstrap supplies credentials explicitly; do not rehydrate
@@ -565,6 +589,7 @@ def load_hermes_dotenv(
     # to the stale .env value mid-session (#29186, #67323).
     _reapply_terminal_config_bridge(home_path)
 
+    _DOTENV_LOAD_COMPLETED = True
     return loaded
 
 

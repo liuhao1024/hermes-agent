@@ -1559,9 +1559,8 @@ def _env_expand_match(m: re.Match) -> str:
     if val is not None:
         return val
     if inner.startswith("env:"):
-        logger.warning(
-            "Config ref %r: %s is not set (check ~/.hermes/.env); "
-            "keeping the literal placeholder", raw, name)
+        from hermes_cli.env_loader import log_env_ref_missing
+        log_env_ref_missing(raw, name)  # warns only after a dotenv pass completed (#141265)
     return raw
 
 

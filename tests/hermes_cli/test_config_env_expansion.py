@@ -141,3 +141,63 @@ class TestExpansionUnderProfileScope:
             ss.set_multiplex_active(was_active)
         # Unscoped (default profile / single-profile CLI): legacy environ read.
         assert _expand_env_vars("${MATRIX_ACCESS_TOKEN}") == "default-token"
+
+
+class TestEnvRefMissingWarningGate:
+    """An unresolved ``${env:NAME}`` warns only after a dotenv pass completed (#141265):
+    ``hermes_cli.config`` expands refs at import time, before ``env_loader`` loads
+    ``~/.hermes/.env``, so pre-pass misses would otherwise be a false alarm logged on
+    every CLI invocation for every ref."""
+
+    def test_miss_before_dotenv_pass_logs_debug_not_warning(self, monkeypatch, caplog):
+        from hermes_cli import env_loader
+
+        monkeypatch.delenv("HERMES_ENV_REF_GATE_TEST_VAR", raising=False)
+        monkeypatch.setattr(env_loader, "_DOTENV_LOAD_COMPLETED", False)
+        with caplog.at_level("DEBUG", logger="hermes_cli.env_loader"):
+            kept = _expand_env_vars("${env:HERMES_ENV_REF_GATE_TEST_VAR}")
+        assert kept == "${env:HERMES_ENV_REF_GATE_TEST_VAR}"
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "is not set" in r.getMessage()]
+        assert any(r.levelname == "DEBUG" and "is not set" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_miss_after_dotenv_pass_still_warns(self, monkeypatch, caplog):
+        from hermes_cli import env_loader
+
+        monkeypatch.delenv("HERMES_ENV_REF_GATE_TEST_VAR", raising=False)
+        monkeypatch.setattr(env_loader, "_DOTENV_LOAD_COMPLETED", True)
+        with caplog.at_level("DEBUG", logger="hermes_cli.env_loader"):
+            kept = _expand_env_vars("${env:HERMES_ENV_REF_GATE_TEST_VAR}")
+        assert kept == "${env:HERMES_ENV_REF_GATE_TEST_VAR}"
+        assert any(r.levelname == "WARNING" and "is not set" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_import_time_expansion_of_dotenv_var_is_silent(self, tmp_path):
+        """The issue's repro, end to end: a variable present in ``<home>/.env`` must not log a
+        WARNING-level "is not set" while ``hermes_cli.config`` is merely being imported."""
+        import os
+        import subprocess
+        import sys
+
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".env").write_text("HERMES_IMPORT_GATE_VAR=not-a-secret-dummy\n")
+        (home / "config.yaml").write_text(
+            "_config_version: 51\n"
+            "mcp_servers:\n"
+            "  repro:\n"
+            "    enabled: false\n"
+            "    command: 'true'\n"
+            "    env:\n"
+            "      HERMES_IMPORT_GATE_VAR: ${env:HERMES_IMPORT_GATE_VAR}\n"
+        )
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        code = ("import logging, sys; logging.basicConfig(level=logging.DEBUG, stream=sys.stderr); "
+                "import hermes_cli.config")
+        env = {**os.environ, "HERMES_HOME": str(home), "PYTHONPATH": repo_root}
+        env.pop("HERMES_IMPORT_GATE_VAR", None)
+        result = subprocess.run([sys.executable, "-c", code], env=env, check=False,
+                                capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert "WARNING:hermes_cli.config:Config ref" not in result.stderr
