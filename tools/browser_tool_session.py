@@ -647,6 +647,13 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
                 return {"success": True, "data": {"path": recovered_path, "raw": raw}}
         return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}", "returncode": returncode}
 
+    # A literal ``null`` (``back`` with no history to go back to) parses to ``None``; every
+    # consumer down the chain calls ``result.get(...)`` on it (#141209), so report it like
+    # empty output instead of leaking the bare ``None`` out of the spawn.
+    if parsed is None:
+        _bt.logger.warning("browser '%s' returned null output (rc=%s)", command, returncode)
+        return {"success": False, "error": f"Browser command '{command}' returned no output", "returncode": returncode}
+
     # Empty snapshot content is a common sign of daemon/CDP issues.
     if command == "snapshot" and parsed.get("success"):
         snap_data = parsed.get("data", {})
