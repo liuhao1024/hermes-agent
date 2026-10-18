@@ -23,6 +23,10 @@ _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
 # every profile this process hosts, so another profile's ``local_runtime.backend`` must not resize it.
 _SERVING_ENGINE = None
 _EXIT_HOOKED = False
+# Set while an adopted-router sweeper loop lives in this process: repeated session starts must not
+# stack loops, and clearing it on retirement lets a later adopt (after this process's own
+# supervisor came and went) start a fresh one.
+_ADOPTED_SWEEPING = False
 
 
 def _stop_at_exit() -> None:
@@ -443,6 +447,7 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
         if state is not None:
             if not _presets_stale():
                 logger.info("managed llama-server already running (another process)")
+                _start_adopted_idle_sweeper()
                 return None
             logger.info("running server's presets predate the staged models; "
                         "replacing it so every model launches with a policy")
@@ -531,3 +536,70 @@ def _start_idle_sweeper(sup) -> None:
                 logger.debug("launch window re-plan skipped: %s", exc)
 
     threading.Thread(target=_loop, daemon=True, name="local-runtime-idle-sweep").start()
+
+
+def _adopted_sweep_shell(state: dict, idle_since: dict | None = None):
+    """A supervisor skeleton for sweeping a router this process does NOT own. The sweep path is
+    pure router HTTP — port, api key and the idle clocks — so ``__new__`` with those three set
+    reuses ``sweep_idle`` verbatim. Constructing the supervisor properly is wrong here:
+    ``__init__`` picks its port with a bind probe, and the router being adopted is sitting on
+    that port, so the probe would hand back an ephemeral port nobody listens on."""
+    from urllib.parse import urlparse
+
+    from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
+
+    sup = LlamaServerSupervisor.__new__(LlamaServerSupervisor)
+    sup.port = urlparse(state.get("base_url", "")).port or 80
+    sup.api_key = state.get("api_key", "")
+    sup._idle_since = dict(idle_since or {})
+    return sup
+
+
+def _start_adopted_idle_sweeper() -> None:
+    """The adopt path's half of the idle-unload contract.
+
+    ``_start_idle_sweeper`` runs only for the process that booted the router, and its daemon
+    thread dies with that process — while the detached router keeps serving and holds every idle
+    model resident indefinitely. A process that adopts the running server now sweeps it too:
+    each interval it re-reads the ownership-guarded state endpoint (a dead or replaced router
+    drops out of it) and calls the supervisor's own ``sweep_idle`` on a shell. The server is
+    never adopted as ``_SUPERVISOR``: adopters must not stop another's server at exit. Several
+    adopting processes sweeping one router is harmless — the sweep is idempotent — and this
+    process booting its own supervisor retires the loop for the spawn-path sweeper."""
+    global _ADOPTED_SWEEPING
+    import threading
+
+    if _ADOPTED_SWEEPING:
+        return
+    _ADOPTED_SWEEPING = True
+
+    def _loop():
+        global _ADOPTED_SWEEPING
+        shell = None
+        state_key = None
+        try:
+            while _SUPERVISOR is None:
+                time.sleep(_SWEEP_EVERY_S)
+                if _SUPERVISOR is not None:
+                    return
+                from hermes_cli.local_runtime.endpoint import _state_endpoint
+
+                state = _state_endpoint()
+                if state is None:
+                    return
+                key = (state.get("base_url"), state.get("api_key"))
+                if key != state_key:
+                    # A new port/key means a restarted router: re-target the shell but carry the
+                    # idle clocks over, so a model that stayed resident keeps ageing instead of
+                    # getting another full idle window.
+                    shell = _adopted_sweep_shell(state, shell._idle_since if shell else None)
+                    state_key = key
+                try:
+                    shell.sweep_idle()
+                except Exception as exc:
+                    logger.debug("adopted idle sweep skipped: %s", exc)
+        finally:
+            _ADOPTED_SWEEPING = False
+
+    threading.Thread(target=_loop, daemon=True,
+                     name="local-runtime-adopted-idle-sweep").start()
