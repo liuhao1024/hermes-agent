@@ -12,11 +12,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from tools.mcp_tool_common import _core, _parse_boolish, mcp_server_enabled
+from tools import mcp_connect_state as _connect_state
 from tools import mcp_tool_config as _config
 from tools import mcp_tool_errors as _errors
 from tools import mcp_tool_lifecycle as _lifecycle
 from tools import mcp_tool_loop as _loop
 from tools import mcp_tool_registration as _registration
+
 from tools.mcp_tool_schema import MCP_TOOL_NAME_PREFIX
 from tools.mcp_tool_scope import _key_name, _key_scope, _key_visible_in_scope, _resolve_server_key, _server_key
 
@@ -44,12 +46,18 @@ def _discovery_connect_concurrency() -> int:
 
 
 def _record_connect_failure(server_name: str) -> None:
-    """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``)."""
+    """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``).
+
+    The count and deadline are mirrored to disk (wall clock) so the next short-lived process —
+    a cron worker, a one-shot CLI run — inherits the backoff instead of re-spawning the broken
+    server from failure count 0 (#141030)."""
     key = _server_key(server_name)
-    n = _core._server_connect_failures.get(key, 0) + 1
+    n = max(_core._server_connect_failures.get(key, 0),
+            _connect_state.entry_failures(key)) + 1
     _core._server_connect_failures[key] = n
     backoff = min(_core._CONNECT_RETRY_BASE_BACKOFF_SEC * (2 ** (n - 1)), _core._CONNECT_RETRY_MAX_BACKOFF_SEC)
     _core._server_connect_retry_after[key] = time.monotonic() + backoff
+    _connect_state.stamp(key, n, time.time() + backoff)
 
 
 def _clear_connect_failure(server_name: str) -> None:
@@ -57,13 +65,18 @@ def _clear_connect_failure(server_name: str) -> None:
     key = _server_key(server_name)
     _core._server_connect_failures.pop(key, None)
     _core._server_connect_retry_after.pop(key, None)
+    _connect_state.discard(key)
 
 
 def _connect_cooldown_active(server_name: str) -> bool:
     """True if ``server_name`` is still within its retry cooldown (this scope's connection: one
-    profile's failing ``x`` must not shadow another profile's healthy ``x``)."""
+    profile's failing ``x`` must not shadow another profile's healthy ``x``). A deadline another
+    process stamped counts too (#141030)."""
     deadline = _core._server_connect_retry_after.get(_server_key(server_name))
-    return deadline is not None and time.monotonic() < deadline
+    if deadline is not None and time.monotonic() < deadline:
+        return True
+    wall = _connect_state.deadline(_server_key(server_name))
+    return wall is not None and time.time() < wall
 
 
 def _owner_scope_home() -> Optional[Path]:

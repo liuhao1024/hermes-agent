@@ -12,11 +12,13 @@ per-server exponential backoff so a chronically failing server is retried
 on a schedule, isolated from the rest of the bridge.
 """
 
+import time
 from unittest.mock import patch
 
 import pytest
 
 import tools.mcp_tool as mcp_mod
+from tools import mcp_connect_state as _connect_state
 from tools import mcp_tool_discovery as _mcp_discovery
 from tools import mcp_tool_lifecycle as _mcp_lifecycle
 
@@ -108,6 +110,7 @@ class TestRegisterMcpServersIsolation:
             assert _mcp_discovery._connect_cooldown_active("bad") is True
 
             mcp_mod._server_connect_retry_after["bad"] = mcp_mod.time.monotonic() - 1
+            _connect_state.stamp("bad", 1, time.time() - 1)  # the wall-clock mirror lapsed too (#141030)
             attempts.clear()
             _mcp_discovery.register_mcp_servers(cfg)
             assert "bad" in attempts, "elapsed cooldown should permit a retry"

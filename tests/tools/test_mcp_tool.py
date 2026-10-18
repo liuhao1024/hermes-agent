@@ -1304,8 +1304,8 @@ class TestToolsetInjection:
             # (#50394: prevents a tight re-spawn storm across the frequent
             # per-worker-session discovery passes). Expire that cooldown to
             # simulate the retry window having elapsed.
-            import tools.mcp_tool as _mcp_mod
-            _mcp_mod._server_connect_retry_after.pop("broken", None)
+            from tools.mcp_tool_discovery import _clear_connect_failure
+            _clear_connect_failure("broken")  # expire the cooldown everywhere (#141030)
 
             # Next call after the cooldown: should retry broken, skip good
             result2 = discover_mcp_tools()

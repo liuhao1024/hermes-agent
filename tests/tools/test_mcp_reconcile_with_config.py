@@ -109,6 +109,8 @@ def test_reconcile_retries_failed_first_connect_only_after_cooldown(monkeypatch,
             "inside the cooldown nothing is attempted"
         with mcp_tool._lock:
             mcp_tool._server_connect_retry_after.clear()
+        from tools import mcp_connect_state as _connect_state
+        _connect_state.discard("ghost")  # the disk mirror lapsed too (#141030)
         assert disc.reconcile_mcp_servers_with_config()["added"] == ["ghost"]
         assert discovered == [1], "cooldown lapsed: the never-connected server goes through discovery"
 
