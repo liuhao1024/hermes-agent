@@ -16,6 +16,7 @@ Full reference: https://hermes-agent.nousresearch.com/docs/user-guide/configurat
 | `stt` | `enabled`, `provider` (local/groq/openai/mistral/elevenlabs/deepinfra) |
 | `tts` | `provider` (edge/elevenlabs/openai/minimax/mistral/neutts/gemini/piper/kittentts/deepinfra/xai) |
 | `memory` | `memory_enabled`, `user_profile_enabled`, `provider`, `write_approval` |
+| `skills` | `create_dir`, `external_dirs` |
 | `security` | `redact_secrets`, `website_blocklist` |
 | `delegation` | `model`, `provider`, `max_concurrent_children`, `max_iterations` (50), `max_spawn_depth` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
@@ -57,6 +58,20 @@ Full enumeration: `TOOLSETS` dict in `toolsets.py` (`_HERMES_CORE_TOOLS` is the 
 | `discord`, `discord_admin`, `feishu_doc`, `feishu_drive`, `yuanbao` | Service integrations (gated on their credentials). `homeassistant` (`ha_*` tools) and `spotify` (`spotify_*` tools) are not built in: they come from the `homeassistant` / `spotify` catalog plugins (`hermes plugins install <name>`) |
 
 Tool changes take effect on `/reset` (new session) — never mid-conversation, to preserve prompt caching.
+
+### Skills — sharing via `external_dirs`
+
+`skills.external_dirs` lists extra directories to scan for skills — the supported way to share skills across profiles (or with other AI tools): point each profile's config at the same directory. **Not symlinks** — `Path.rglob` does not follow symlinked directories and the loader's `resolve()` dedup shadows a symlinked `SKILL.md`, so a symlinked skill silently never loads.
+
+```yaml
+skills:
+  external_dirs:
+    - ~/.agents/skills    # ~ and ${VAR} expand; missing paths are skipped silently
+```
+
+- Same-named skills resolve by precedence `project > local (~/.hermes/skills/) > skills.create_dir > external_dirs`; lower copies are logged as shadowed. Two different same-named skills inside one tier stay ambiguous — the call is refused, never guessed.
+- External skills are fully integrated: prompt index, `skills_list`, `skill_view`, `/skill-name` slash commands, `-s` preload, and cron all see them, no different from local skills.
+- External dirs are **not** a write-protection boundary: when the directory is writable, `skill_manage` edits a skill in place where it was found, external dirs included. Use filesystem permissions for read-only sharing.
 
 ## Voice
 
