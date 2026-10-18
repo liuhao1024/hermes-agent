@@ -30,6 +30,16 @@ if TYPE_CHECKING:
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import get_version_info
+from hermes_cli.models_catalog_disk import (
+    _openrouter_catalog_disk_path,
+    _openrouter_catalog_disk_ttl,
+    _openrouter_model_is_free,
+    _openrouter_model_supports_tools,
+    _read_json_cache,
+    _read_openrouter_catalog_disk,
+    _write_json_cache,
+    _write_openrouter_catalog_disk,
+    _zero_priced)
 from hermes_cli.models_catalog_static import (
     CuratedFallbackModels,
     CANONICAL_PROVIDERS,
@@ -96,26 +106,6 @@ def _get_json(
 
 
 
-def _read_json_cache(path: Path, *, errors=Exception) -> Optional[dict]:
-    """Load a JSON-object cache file; None when missing, unreadable, or not a dict."""
-    try:
-        with open(path, encoding="utf-8-sig") as fh:
-            data = json.load(fh)
-    except errors:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _write_json_cache(path: Path, data: Any, **dump_kwargs: Any) -> None:
-    """Atomically persist a cache file (creating parents). Raises on failure — callers decide
-    whether a failed cache write is worth logging."""
-    from utils import atomic_json_write
-    from hermes_constants import mkdir_under_hermes_home
-
-    mkdir_under_hermes_home(path.parent)
-    atomic_json_write(path, data, **dump_kwargs)
-
-
 def _merge_unique(primary: list[str], secondary: list[str], key=lambda m: str(m).lower()) -> list[str]:
     """``primary`` verbatim, then ``secondary`` entries whose ``key`` is new (deduped as it goes)."""
     merged, seen = list(primary), {key(m) for m in primary}
@@ -150,48 +140,7 @@ _openrouter_catalog_cache: list[tuple[str, str]] | None = None
 # The in-memory ``_openrouter_catalog_cache`` is per-process, so without a disk cache every cold
 # picker open re-downloads the full ~686KB /api/v1/models catalog. The *curated* result
 # (post-filter) is persisted under the same TTL the catalog manifest uses, so both layers go
-# stale together.
-
-
-def _openrouter_catalog_disk_ttl() -> float:
-    """Same TTL as the catalog manifest this list is filtered from (honours ``model_catalog.ttl_minutes``)."""
-    from hermes_cli.model_catalog import refresh_interval_seconds
-
-    return refresh_interval_seconds()
-
-
-def _openrouter_catalog_disk_path() -> Path:
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "cache" / "openrouter_curated_catalog.json"
-
-
-def _read_openrouter_catalog_disk(*, allow_stale: bool = False) -> list[tuple[str, str]] | None:
-    """Fresh curated catalog from disk, or None (missing, corrupt, expired, or empty).
-
-    ``allow_stale`` ignores the TTL — the cache-only read path prefers a stale copy over a live GET."""
-    obj = _read_json_cache(_openrouter_catalog_disk_path())
-    if obj is None:
-        return None
-    try:
-        if not allow_stale and time.time() - float(obj.get("fetched_at", 0)) > _openrouter_catalog_disk_ttl():
-            return None
-    except (TypeError, ValueError):
-        return None
-    items = obj.get("curated")
-    if not isinstance(items, list):
-        return None
-    out = [(str(it[0]), str(it[1])) for it in items if isinstance(it, (list, tuple)) and len(it) == 2]
-    return out or None
-
-
-def _write_openrouter_catalog_disk(curated: list[tuple[str, str]]) -> None:
-    try:
-        _write_json_cache(
-            _openrouter_catalog_disk_path(),
-            {"fetched_at": time.time(), "curated": [list(c) for c in curated]})
-    except Exception as exc:
-        logger.debug("openrouter curated catalog disk write failed: %s", exc)
+# stale together. (That disk layer now lives in models_catalog_disk.)
 _ai_gateway_catalog_cache: list[tuple[str, str]] | None = None
 
 
@@ -199,16 +148,6 @@ _ai_gateway_catalog_cache: list[tuple[str, str]] | None = None
 # Nous Portal free-model helpers — the Portal models endpoint is the source of truth for what is
 # offered (free or paid); we surface it as-is, no local allowlist filtering.
 # ---------------------------------------------------------------------------
-
-
-def _zero_priced(pricing: Any, keys: tuple[str, str], default: str) -> bool:
-    """True when both pricing fields parse to 0 (missing fields read as ``default``)."""
-    if not isinstance(pricing, dict):
-        return False
-    try:
-        return all(float(pricing.get(k, default)) == 0 for k in keys)
-    except (TypeError, ValueError):
-        return False
 
 
 def _is_subscription_billed(entry: Any) -> bool:
@@ -584,21 +523,6 @@ def get_default_model_for_provider(provider: str) -> str:
         if preferred and (preferred in models or not models):
             return preferred
     return models[0] if models else ""
-
-
-def _openrouter_model_is_free(pricing: Any) -> bool:
-    return _zero_priced(pricing, ("prompt", "completion"), "0")
-
-
-def _openrouter_model_supports_tools(item: Any) -> bool:
-    """True when ``supported_parameters`` advertises ``tools`` (hermes-agent is tool-calling-first).
-    Permissive when the field is absent/malformed: some OpenRouter-compatible gateways (Nous Portal,
-    private mirrors) don't populate it, and the picker must not silently empty for them.
-
-    Ported from Kilo-Org/kilocode#9068.
-    """
-    params = item.get("supported_parameters") if isinstance(item, dict) else None
-    return "tools" in params if isinstance(params, list) else True
 
 
 # Reasoning-capability cache slots, one set per catalog (OpenRouter, Nous Portal). The logic
@@ -2049,17 +1973,54 @@ def _credential_fingerprint(provider: str) -> str:
     return hashlib.blake2b(blob, digest_size=8).hexdigest()
 
 
-def _load_provider_models_cache() -> dict:
-    """Return the full cache dict, or {} on any error."""
+_CACHE_VERSION_KEY = "__hermes_version__"
+
+
+def _cache_version_stamp() -> Optional[str]:
+    """Running build identity stamping the disk cache. ``derived_version`` (not the release base)
+    so a git install's ``0.22.2+1690.g9e01b44`` bumps the stamp on every code change a release
+    number would hide (#141101). None = provenance unknowable → keep the unstamped legacy behavior."""
     try:
-        return _read_json_cache(_provider_models_cache_path()) or {}
+        return get_version_info().derived_version or None
+    except Exception:  # health: allow BLE001 -- advisory provenance probe: any failure must degrade to the unstamped legacy behavior, never break the picker
+        return None
+
+
+def _load_provider_models_cache() -> dict:
+    """Return the full cache dict, or {} on any error. A cache written by a different Hermes
+    build is also {}: an upgraded install must not keep serving the previous build's catalog
+    while its live probes fail — the empty load makes the next picker open refetch fresh rows.
+    The build-stamp row is stripped so callers keep seeing provider rows only."""
+    try:
+        data = _read_json_cache(_provider_models_cache_path()) or {}
     except Exception:
         return {}
+    stamp = _cache_version_stamp()
+    if stamp is not None and data.get(_CACHE_VERSION_KEY) != stamp:
+        return {}
+    data.pop(_CACHE_VERSION_KEY, None)
+    return data
+
+
+def _cache_file_failed_stamp_check() -> bool:
+    """True when the on-disk cache holds rows but fails the build-stamp check — dead rows an
+    explicit refresh should still drop instead of leaving them for a doctor pass to trip over."""
+    try:
+        data = _read_json_cache(_provider_models_cache_path()) or {}
+    except Exception:  # health: allow BLE001 -- advisory staleness probe: any failure reads as "no stale file", the normal path
+        return False
+    if not data:
+        return False
+    stamp = _cache_version_stamp()
+    return stamp is not None and data.get(_CACHE_VERSION_KEY) != stamp
 
 
 def _save_provider_models_cache(data: dict) -> None:
     """Persist the cache dict. Best-effort — silent on any error."""
     try:
+        stamp = _cache_version_stamp()
+        if stamp is not None:
+            data = {**data, _CACHE_VERSION_KEY: stamp}
         _write_json_cache(_provider_models_cache_path(), data, indent=None)
     except Exception:
         pass
@@ -2184,6 +2145,10 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
             if normalized in cache:
                 del cache[normalized]
                 _save_provider_models_cache(cache)
+            elif _cache_file_failed_stamp_check():
+                # A stamp-missed cache loads as {}: its rows are already dead, so a targeted
+                # refresh drops the file instead of leaving stale rows on disk (#141101).
+                path.unlink()
 
         write_under_cache_lock(path, clear_file)
     except Exception:
