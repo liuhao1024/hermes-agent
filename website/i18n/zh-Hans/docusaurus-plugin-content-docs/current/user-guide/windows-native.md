@@ -49,7 +49,8 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 
 自包含 MSIX 要求 Windows 11 22H2 或更新版本。
 Windows 10 源码安装支持不代表 MSIX 支持 Windows 10。
-打开 `.appinstaller` 文件，Windows 会安装签名包并记录更新源。
+从 `https://hermes-assets.nousresearch.com/releases/win32/stable/stable.appinstaller`
+下载 `.appinstaller` 文件并打开，Windows 会安装签名包并记录更新源。
 软件包包含 Python、Node 和基础依赖，首次启动无需克隆或编译源码。
 
 执行别名提供 `hermes`、`hermes-agent` 和 `hermes-acp`。

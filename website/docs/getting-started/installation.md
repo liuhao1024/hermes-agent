@@ -19,9 +19,10 @@ platform-gated features are supported), see **[Platform Support](./platform-supp
 Download the package for your platform from the
 [Hermes website](https://hermes-agent.nousresearch.com/).
 
-- **Windows:** open the `.appinstaller` download with Windows App Installer.
-  It installs the signed MSIX bundle and records its update source.
-  Microsoft Store packages have separate Store ownership.
+- **Windows:** open the `.appinstaller` download —
+  `https://hermes-assets.nousresearch.com/releases/win32/stable/stable.appinstaller` —
+  with Windows App Installer. It installs the signed MSIX bundle and records
+  its update source. Microsoft Store packages have separate Store ownership.
 - **macOS:** open the DMG, then copy `Hermes.app` to Applications. The ZIP
   artifact carries the signed app used by the automatic updater.
 

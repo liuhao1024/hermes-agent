@@ -54,7 +54,9 @@ The bundled desktop is separate from the source script. Its MSIX package
 requires **Windows 11 22H2 or later**. Windows 10 source-script support does
 not mean the MSIX package supports Windows 10.
 
-Open the downloaded `.appinstaller` file with Windows App Installer. It installs
+Download the stable feed
+(`https://hermes-assets.nousresearch.com/releases/win32/stable/stable.appinstaller`)
+and open the `.appinstaller` file with Windows App Installer. It installs
 a signed universal bundle and records the update source. The package includes
 Python, Node, supported dependencies, and prebuilt interfaces. It does not clone
 a checkout or build the base runtime on first launch.
