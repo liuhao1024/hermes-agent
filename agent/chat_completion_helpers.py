@@ -620,6 +620,13 @@ def _check_stale_giveup(agent) -> None:
         )
 
 
+def _stale_rekill_giveup() -> int:
+    """Re-kills of the SAME attempt before the stale watchdog declares the reader
+    wedged (#141098). A slow unwind needs only a window or two; a kill that never
+    lands (the reader cannot be unblocked) loops forever without this bound."""
+    return env_int("HERMES_STREAM_STALE_REKILL_GIVEUP", 3)
+
+
 def _stream_env_stale_base() -> tuple[float, bool]:
     """(HERMES_STREAM_STALE_TIMEOUT or the implicit 180s, explicit) — like
     ``AIAgent._resolved_api_call_stale_timeout_base``; an explicit env value is the
@@ -2727,6 +2734,9 @@ class _StreamingCall(StreamingWaitMonitor):
         self.stream_attempt_lock = threading.Lock()
         self.stream_attempt_state = {"current": 0, "cancelled": set(), "discarded_chunks": 0, "discarded_bytes": 0}
         self._stale_counted_attempts: set[int] = set()  # breaker counts each attempt once
+        # Re-kills of one already-counted attempt: a few are a slow unwind, many
+        # mean the kill is not landing (wedged reader, #141098).
+        self._stale_rekill_counts: dict[int, int] = {}
         self.managed_stream_holder = {"stream": None}
         # Per-attempt: single-writer token, request-local client, raw HTTP response (chat wire).
         self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
@@ -3822,6 +3832,26 @@ class _StreamingCall(StreamingWaitMonitor):
         if attempt:
             self._stale_counted_attempts.add(attempt)
             _bump_stale_streak(self.agent)
+            return
+        # Already counted once: this is a re-kill of the same attempt. It still
+        # bumps nothing toward the breaker (the contract above), but it is the
+        # evidence that the kill itself failed to unblock the reader (#141098).
+        with self.stream_attempt_lock:
+            current = int(self.stream_attempt_state["current"])
+        if current:
+            self._stale_rekill_counts[current] = self._stale_rekill_counts.get(current, 0) + 1
+
+    def _stale_rekill_count(self) -> int:
+        """Re-kills so far of the current attempt (0 before the first re-kill)."""
+        with self.stream_attempt_lock:
+            return self._stale_rekill_counts.get(int(self.stream_attempt_state["current"]), 0)
+
+    def _stale_rekill_wedged(self) -> bool:
+        """True once re-kills of the current attempt passed the threshold: the
+        reader cannot be unblocked (e.g. the Windows self-pipe abort, #132606),
+        so this attempt will never finish on its own (#141098). 0 disables."""
+        _giveup = _stale_rekill_giveup()
+        return _giveup > 0 and self._stale_rekill_count() >= _giveup
 
     def _kill_stale_stream(self, elapsed: float) -> None:
         """SSE pings but no chunks: cancel the attempt and abort the request-local
@@ -3849,6 +3879,20 @@ class _StreamingCall(StreamingWaitMonitor):
         # Reset the timer so we don't kill repeatedly while the worker unwinds.
         self.last_chunk_time["t"] = time.time()
         self.agent._emit_diagnostic_wait(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
+        _rekills = self._stale_rekill_count()
+        if self._stale_rekill_wedged():
+            # The kill is not landing: the reader never unwound, so this attempt is
+            # wedged (#141098). A touch here (or in the monitor heartbeat) would fake
+            # liveness and keep the kanban dispatcher from ever reclaiming the worker
+            # (observed: 3.5 days of 4-minute re-kills with a fresh heartbeat).
+            if _rekills == _stale_rekill_giveup():
+                logger.error(
+                    "Stale-stream kill has now re-fired %d times on the same attempt without the "
+                    "reader unwinding (threshold %d re-kills) — attempt is wedged; suppressing "
+                    "further activity touches so the dispatcher/watchdog can reclaim the worker.",
+                    _rekills, _stale_rekill_giveup(),
+                )
+            return
         self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
 
     def _abort_for_interrupt(self, stale_elapsed: float) -> None:

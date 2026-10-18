@@ -200,3 +200,112 @@ class TestStreamStaleCircuitBreaker:
         kills = sum("Stream stale for" in r.getMessage() for r in caplog.records)
         assert kills >= 2, f"scenario needs the timer to re-fire; saw {kills} kill(s)"
         assert agent._consecutive_stale_streams == 1
+
+    def test_rekill_counter_tracks_and_resets_per_attempt(self, monkeypatch):
+        """The re-kill ledger is per-attempt: first kill counts the attempt once
+        (existing contract), further kills of it increment the re-kill count, and
+        a new attempt starts from zero (#141098)."""
+        import threading as _threading
+
+        from agent.chat_completion_helpers import _StreamingCall
+
+        monkeypatch.setenv("HERMES_STREAM_STALE_REKILL_GIVEUP", "3")
+        call = SimpleNamespace(
+            agent=SimpleNamespace(),
+            stream_attempt_lock=_threading.Lock(),
+            stream_attempt_state={"current": 1, "cancelled": set()},
+            _stale_counted_attempts=set(),
+            _stale_rekill_counts={},
+        )
+        call._uncounted_stale_attempt = lambda: _StreamingCall._uncounted_stale_attempt(call)
+        call._stale_rekill_count = lambda: _StreamingCall._stale_rekill_count(call)
+
+        _StreamingCall._count_stale_attempt(call)  # first kill: counts the attempt
+        assert call._stale_counted_attempts == {1}
+        assert call.agent._consecutive_stale_streams == 1
+        assert _StreamingCall._stale_rekill_wedged(call) is False
+
+        for _ in range(3):  # three re-kills of the same attempt
+            _StreamingCall._count_stale_attempt(call)
+        assert _StreamingCall._stale_rekill_count(call) == 3
+        assert _StreamingCall._stale_rekill_wedged(call) is True
+
+        call.stream_attempt_state["current"] = 2  # the worker finally unwound; retry
+        assert _StreamingCall._stale_rekill_wedged(call) is False
+
+        monkeypatch.setenv("HERMES_STREAM_STALE_REKILL_GIVEUP", "0")  # 0 disables the wedged verdict
+        call.stream_attempt_state["current"] = 1
+        assert _StreamingCall._stale_rekill_wedged(call) is False
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_rekill_giveup_stops_faking_liveness(self, monkeypatch, caplog):
+        """Once re-kills of one attempt pass HERMES_STREAM_STALE_REKILL_GIVEUP the
+        kill is not landing (#141098): the watchdog must stop touching activity —
+        those touches kept the kanban heartbeat fresh through 3.5 days of 4-minute
+        re-kills — while the breaker's one-attempt-one-count contract stays intact."""
+        monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "0.05")
+        monkeypatch.setenv("HERMES_STREAM_STALE_GIVEUP", "50")
+        monkeypatch.setenv("HERMES_STREAM_STALE_REKILL_GIVEUP", "2")
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+        agent = _make_anthropic_agent()
+        agent._consecutive_stale_streams = 0
+        touches: list[str] = []
+        agent._touch_activity = lambda desc, **k: touches.append(desc)
+        unblock = threading.Event()
+
+        def _blocking_gen():
+            unblock.wait(timeout=2.0)
+            raise httpx.ConnectError("connection dropped")
+            yield
+
+        def _stream_side_effect(*args, **kwargs):
+            cm = MagicMock()
+            stream = MagicMock()
+            stream.__iter__ = MagicMock(return_value=_blocking_gen())
+            cm.__enter__ = MagicMock(return_value=stream)
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
+        agent._anthropic_client.messages.stream.side_effect = _stream_side_effect
+        # The kill never wakes the read: the reader stays wedged for the whole call.
+        agent._abort_request_anthropic_client = lambda *a, **k: None
+
+        with caplog.at_level("WARNING", logger="agent.chat_completion_helpers"), pytest.raises(Exception):
+            agent._interruptible_streaming_api_call({})
+
+        kills = sum("Stream stale for" in r.getMessage() for r in caplog.records)
+        assert kills >= 4, f"scenario needs re-kills past the threshold; saw {kills} kill(s)"
+        # First kill + re-kills below the threshold touch; wedged re-kills never do.
+        kill_touches = [t for t in touches if t.startswith("stale stream detected")]
+        assert len(kill_touches) == 2, f"expected touches only before the wedged verdict, saw {len(kill_touches)}"
+        escalated = sum("without the reader unwinding" in r.getMessage() for r in caplog.records)
+        assert escalated == 1  # the wedged verdict lands once, not per re-kill
+        assert agent._consecutive_stale_streams == 1  # one attempt still counts once
+
+    def test_heartbeat_silent_once_rekill_wedged(self):
+        """The monitor heartbeat must also stop touching activity once the attempt
+        is wedged, or the 30s gateway heartbeat alone would keep faking liveness."""
+        import time as _time
+
+        from agent.chat_completion_stream_monitor import StreamingWaitMonitor
+
+        def _ns(wedged: bool) -> SimpleNamespace:
+            return SimpleNamespace(
+                agent=MagicMock(),
+                _stream_stale_timeout=180.0,
+                last_chunk_time={"t": _time.time() - 75.0},
+                clients=None,
+                _mon=SimpleNamespace(
+                    wait_notice=MagicMock(), wait_notice_started_ts=None, last_heartbeat=_time.time()),
+                _stale_rekill_wedged=lambda: wedged,
+            )
+
+        wedged = _ns(True)
+        StreamingWaitMonitor._heartbeat(wedged, 75)
+        wedged.agent._touch_activity.assert_not_called()
+        wedged.agent._emit_wait_notice.assert_not_called()
+
+        flowing = _ns(False)
+        flowing._mon.wait_notice.should_emit = MagicMock(return_value=False)
+        StreamingWaitMonitor._heartbeat(flowing, 75)
+        flowing.agent._touch_activity.assert_called_once()

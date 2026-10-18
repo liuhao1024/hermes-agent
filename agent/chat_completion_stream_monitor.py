@@ -87,6 +87,10 @@ class StreamingWaitMonitor:
     def _heartbeat(self, waiting_secs: int) -> None:
         """Gateway inactivity heartbeat: the start-to-first-chunk gap (thinking,
         local prefill) can exceed the gateway timeout."""
+        if self._stale_rekill_wedged():
+            # The stale kill is not landing (#141098): a heartbeat here would fake
+            # liveness and keep the kanban dispatcher from reclaiming the worker.
+            return
         if waiting_secs >= 60.0:
             # No chunks for 60s+: say WHAT the wait is and WHEN recovery kicks in —
             # once per silence, not every heartbeat (#92550).
