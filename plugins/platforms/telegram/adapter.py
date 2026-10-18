@@ -1289,6 +1289,71 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Pre-check the 32,768-char cap only; other rich limits surface as BadRequest (permanent)."""
         return len(content) <= self.RICH_MESSAGE_MAX_CHARS
 
+    _RICH_HEADING_RE = re.compile(r"#{1,6}\s")
+
+    def _rich_split_offsets(self, content: str) -> list[int]:
+        """Offsets where over-cap rich content may be cut into several ``sendRichMessage`` parts:
+        the first line of a block after a blank-line run, or a heading start — never inside a
+        fenced code block or a ``<details>`` block, whose internal blank lines are content."""
+        offsets: list[int] = []
+        in_fence = False
+        fence_marker = ""
+        details_depth = 0
+        after_blank = True
+        offset = 0
+        for line in content.splitlines(keepends=True):
+            start = offset
+            offset += len(line)
+            stripped = line.strip()
+            if in_fence:
+                if stripped.startswith(fence_marker):
+                    in_fence = False
+                after_blank = False
+                continue
+            if details_depth:
+                details_depth += stripped.count("<details") - stripped.count("</details")
+                after_blank = False
+                continue
+            block_start = start > 0 and (after_blank or self._RICH_HEADING_RE.match(stripped))
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_marker = stripped[:3]
+            elif "<details" in stripped:
+                details_depth += stripped.count("<details") - stripped.count("</details")
+            elif not stripped:
+                after_blank = True
+                continue
+            if block_start:
+                offsets.append(start)
+            if stripped:
+                after_blank = False
+        return offsets
+
+    def _split_rich_parts(self, content: str) -> Optional[list[str]]:
+        """``[content]`` when it fits the rich cap; over-cap rich-eligible content split at the
+        boundaries :meth:`_rich_split_offsets` allows so each part fits one ``sendRichMessage``.
+        ``None`` when over-cap content has no usable boundary (one giant fenced / ``<details``
+        block), so the caller falls back to legacy MarkdownV2 chunking."""
+        cap = self.RICH_MESSAGE_MAX_CHARS
+        if len(content) <= cap:
+            return [content]
+        offsets = self._rich_split_offsets(content)
+        parts: list[str] = []
+        start = 0
+        while len(content) - start > cap:
+            window = [o for o in offsets if start < o <= start + cap]
+            if not window:
+                return None
+            cut = window[-1]
+            parts.append(content[start:cut].rstrip() + "\n\n")
+            start = cut
+        tail = content[start:].strip()
+        if parts and not tail:
+            parts[-1] = parts[-1].rstrip()
+        elif tail:
+            parts.append(tail)
+        return parts or None
+
     def _bot_supports_rich(self) -> bool:
         """True when ``do_api_request`` is an *async* callable (real Bot or AsyncMock); plain MagicMock
         and SimpleNamespace bots resolve False → legacy path."""
@@ -1341,9 +1406,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Whether rich delivery is allowed (``rich_messages`` opt-in)."""
         return bool(getattr(self, "_rich_messages_enabled", True))
 
-    def _rich_content_ok(self, content: str) -> bool:
+    def _rich_content_ok(self, content: str, *, allow_split: bool = False) -> bool:
         """Shape checks shared by rich sends and rich drafts (non-blank, no Desktop crash/garble
-        shapes, under the cap, async-capable bot)."""
+        shapes, under the cap — or over it but splittable into several rich messages when
+        ``allow_split`` — async-capable bot)."""
         return bool(
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
@@ -1351,20 +1417,21 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
                 getattr(self, "_allow_cjk_rich_messages", False)
                 or not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             )
-            and self._content_fits_rich_limits(content)
+            and (self._content_fits_rich_limits(content) or (allow_split and len(content) > self.RICH_MESSAGE_MAX_CHARS))
             and self._bot_supports_rich())
 
-    def _rich_eligible(self, content: str) -> bool:
+    def _rich_eligible(self, content: str, *, allow_split: bool = False) -> bool:
         """Rich eligibility ignoring ``expect_edits`` (a streamed preview's FINAL edit still upgrades)."""
         return bool(
             self._rich_delivery_enabled()
             and not getattr(self, "_rich_send_disabled", False)
             and content and content.strip()
             and self._needs_rich_rendering(content)
-            and self._rich_content_ok(content))
+            and self._rich_content_ok(content, allow_split=allow_split))
 
-    def _should_attempt_rich(self, content: str, metadata: Optional[dict[str, Any]] = None) -> bool:
-        return bool(not (metadata or {}).get("expect_edits") and self._rich_eligible(content))
+    def _should_attempt_rich(
+        self, content: str, metadata: Optional[dict[str, Any]] = None, *, allow_split: bool = False) -> bool:
+        return bool(not (metadata or {}).get("expect_edits") and self._rich_eligible(content, allow_split=allow_split))
 
     def prefers_fresh_final_streaming(self, content: str, metadata: Optional[dict[str, Any]] = None) -> bool:
         """Replace a streamed preview with a fresh rich final — DM topics only. Root DMs stay off (a live
@@ -1480,8 +1547,34 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
 
     async def _try_send_rich(
         self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]) -> Optional[SendResult]:
-        """Attempt a single ``sendRichMessage``. Returns a SendResult (success, or a transient failure the
-        caller must NOT legacy-resend), or ``None`` = fall back to legacy MarkdownV2."""
+        """Attempt ``sendRichMessage`` delivery: one call when the content fits the rich cap, one per
+        part (split on block boundaries) when it is over. Returns a SendResult (success, or a transient
+        failure the caller must NOT legacy-resend), or ``None`` = fall back to legacy MarkdownV2."""
+        parts = self._split_rich_parts(content)
+        if parts is None:
+            return None
+        first = await self._try_send_rich_part(chat_id, parts[0], reply_to, metadata)
+        if len(parts) == 1:
+            return first
+        if first is None or not first.success:
+            # Nothing landed yet: a permanent rejection (None) falls the whole send back to
+            # legacy; a transient failure propagates untouched.
+            return first
+        delivered = [str(first.message_id)] if first.message_id is not None else []
+        for idx in range(1, len(parts)):
+            # Only the first part carries the reply anchor; the rest follow in sequence.
+            part_result = await self._try_send_rich_part(chat_id, parts[idx], None, metadata)
+            if part_result is not None and part_result.success:
+                if part_result.message_id is not None:
+                    delivered.append(str(part_result.message_id))
+                continue
+            return await self._finish_split_rich_tail(chat_id, parts[idx:], delivered, metadata, failure=part_result)
+        return SendResult(success=True, message_id=delivered[0] if delivered else None)
+
+    async def _try_send_rich_part(
+        self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]) -> Optional[SendResult]:
+        """A single ``sendRichMessage`` call (one part of a possibly split send). Same contract as
+        :meth:`_try_send_rich`."""
         thread_id = self._metadata_thread_id(metadata)
         routing = self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id)
         if routing is None:
@@ -1519,6 +1612,29 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         if message_id is not None:
             await self._record_rich_sent(chat_id, message_id, content)
         return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
+
+    async def _finish_split_rich_tail(
+        self, chat_id: str, tail_parts: list[str], delivered: list[str],
+        metadata: Optional[dict[str, Any]], *, failure: Optional[SendResult]) -> SendResult:
+        """A split rich send died mid-sequence: the rich head is already visible, so the tail is
+        finished on the legacy MarkdownV2 path instead of repeating the head. A permanent rich
+        rejection (``failure=None``) delivers the remaining parts now; a transient failure marks the
+        ``partial_overflow`` contract with the formatted tail for :meth:`_resume_partial_send`."""
+        tail = "\n\n".join(part.strip() for part in tail_parts)
+        chunks = self.truncate_message(self.format_message(tail), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+        if len(chunks) > 1:
+            chunks = [
+                _separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk))
+                for chunk in chunks
+            ]
+        if failure is None:
+            outcome = await self._send_chunks(chat_id, chunks, list(delivered), None, metadata, self._telegram_error_types())
+            if outcome.success:
+                return SendResult(success=True, message_id=delivered[0] if delivered else None)
+            # Triple fault (rich head landed, tail refused): keep the partial contract honest
+            # about the visible head; the tail may resume slightly overlapped rather than be lost.
+            return self._with_partial_send(outcome, chunks, delivered)
+        return self._with_partial_send(failure, chunks, delivered, tail_certain=True)
 
     def _rich_payload_base(self, chat_id: str, content: str) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": normalize_telegram_chat_id(chat_id), "rich_message": self._rich_message_payload(content)}
@@ -3665,12 +3781,22 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         try:
             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
             # errors or DM-topic skips; returns directly on success or transient failure (no legacy resend).
-            if self._should_attempt_rich(content, metadata=metadata):
+            # allow_split: over-cap rich-eligible content is delivered as several sendRichMessage parts
+            # instead of being downgraded wholesale to 4,096-char MarkdownV2 chunks (#141272).
+            if self._should_attempt_rich(content, metadata=metadata, allow_split=True):
                 rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
                 if rich_result is not None:
                     if rich_result.success:
                         await self._retrigger_typing(chat_id, metadata)
                     return rich_result
+                if len(content) > self.RICH_MESSAGE_MAX_CHARS and self._split_rich_parts(content) is None:
+                    # Rich-eligible shape, over the cap, but with no block boundary to split on
+                    # (one giant fenced / <details> block): the legacy downgrade below is the only
+                    # option — make it visible instead of silently degrading (#141272).
+                    logger.warning(
+                        "[%s] Telegram message of %d chars exceeds the %d-char rich cap with no splittable "
+                        "block boundary; delivering as MarkdownV2 chunks, where rich-only markup degrades",
+                        self.name, len(content), self.RICH_MESSAGE_MAX_CHARS)
             chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
             if len(chunks) > 1:
                 # truncate_message appends a raw " (1/2)" suffix; escape the MarkdownV2-special parentheses.

@@ -832,3 +832,180 @@ async def test_rich_reply_records_and_recovers_text(monkeypatch, tmp_path):
     )
     assert event.reply_to_message_id == "678"
     assert event.reply_to_text == "Your morning briefing: CI is green."
+
+
+# ----------------------------------------------------------------------
+# Over-cap rich-eligible content splits into several sendRichMessage parts
+# instead of being downgraded wholesale to MarkdownV2 chunks (#141272).
+# The cap is shrunk per-instance so the tests stay small; the splitting
+# logic only ever compares against self.RICH_MESSAGE_MAX_CHARS.
+# ----------------------------------------------------------------------
+
+DETAILS_BLOCK = (
+    "<details><summary>Section</summary>\n\n"
+    "{body}\n\n"
+    "inner blank line above\n\n"
+    "</details>\n\n"
+)
+
+
+def _oversized_rich_content(blocks: int, body_len: int = 300) -> str:
+    return "# Report\n\n" + "".join(
+        DETAILS_BLOCK.format(body="x" * body_len) for _ in range(blocks)
+    ).rstrip()
+
+
+def _shrink_cap(adapter, cap: int) -> None:
+    adapter.RICH_MESSAGE_MAX_CHARS = cap
+
+
+@pytest.mark.asyncio
+async def test_oversized_rich_content_splits_into_multiple_rich_sends():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 800)
+    content = _oversized_rich_content(blocks=6)  # ~2.5x the shrunk cap
+
+    result = await adapter.send("12345", content)
+
+    assert result.success is True
+    rich_calls = [c for c in adapter._bot.do_api_request.await_args_list if c.args[0] == "sendRichMessage"]
+    assert len(rich_calls) > 1
+    for call in rich_calls:
+        markdown = call.kwargs["api_kwargs"]["rich_message"]["markdown"]
+        assert len(markdown) <= 800
+        # Every part keeps <details> blocks whole (balanced open/close tags).
+        assert markdown.count("<details") == markdown.count("</details>")
+    # The first part carries the heading; no legacy fallback fired.
+    assert rich_calls[0].kwargs["api_kwargs"]["rich_message"]["markdown"].startswith("# Report")
+    adapter._bot.send_message.assert_not_called()
+    assert result.message_id == "123"  # first landed rich message id
+
+
+@pytest.mark.asyncio
+async def test_only_first_split_part_carries_the_reply_anchor():
+    adapter = _make_adapter()
+
+    async def _api(endpoint, api_kwargs=None, **kwargs):
+        return SimpleNamespace(message_id=500 + len(str(api_kwargs)))
+
+    adapter._bot.do_api_request = AsyncMock(side_effect=_api)
+    _shrink_cap(adapter, 800)
+
+    result = await adapter.send("12345", _oversized_rich_content(blocks=6), reply_to="42")
+
+    assert result.success is True
+    rich_calls = [c for c in adapter._bot.do_api_request.await_args_list if c.args[0] == "sendRichMessage"]
+    assert len(rich_calls) > 1
+    first, *rest = rich_calls
+    assert first.kwargs["api_kwargs"].get("reply_parameters") == {"message_id": 42}
+    for call in rest:
+        assert "reply_parameters" not in call.kwargs["api_kwargs"]
+
+
+def test_split_rich_parts_never_cuts_inside_fence_or_details():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 300)
+    fenced = "```python\ndef f():\n\n    return 1\n```\n\n"
+    content = "intro paragraph\n\n" + (fenced + DETAILS_BLOCK.format(body="y" * 80)) * 4
+
+    parts = adapter._split_rich_parts(content)
+
+    assert parts is not None and len(parts) > 1
+    for part in parts:
+        assert len(part) <= 300
+        # A fenced block or <details> block must not be cut open mid-part.
+        assert part.count("<details") == part.count("</details>")
+        fence_lines = [ln.strip() for ln in part.splitlines() if ln.strip().startswith("```")]
+        assert len(fence_lines) % 2 == 0
+
+
+def test_split_rich_parts_none_for_single_giant_block():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 200)
+    # One over-cap fenced block with no blank line or heading boundary after it.
+    content = "```python\n" + "x" * 500 + "\n```"
+
+    assert adapter._split_rich_parts(content) is None
+
+
+@pytest.mark.asyncio
+async def test_unsplittable_oversized_rich_content_downgrades_with_warning(caplog):
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 200)
+    # One over-cap <details> block: rich-needed, but its interior has no split boundary.
+    content = "<details><summary>Big</summary>\n" + "x" * 500 + "\n</details>"
+
+    with caplog.at_level(logging.WARNING):
+        result = await adapter.send("12345", content)
+
+    assert result.success is True
+    adapter._bot.do_api_request.assert_not_called()
+    assert adapter._bot.send_message.await_count >= 1  # legacy path delivered it
+    assert "rich cap" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_split_rich_tail_permanent_failure_finishes_on_legacy():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 800)
+    content = _oversized_rich_content(blocks=6)
+    calls = {"n": 0}
+
+    async def _api(endpoint, api_kwargs=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(message_id=777)
+        raise BadRequest("can't parse rich message")
+
+    adapter._bot.do_api_request = AsyncMock(side_effect=_api)
+
+    result = await adapter.send("12345", content)
+
+    # The rich head landed; the tail was finished through legacy MarkdownV2 chunks.
+    assert result.success is True
+    assert result.message_id == "777"
+    rich_calls = [c for c in adapter._bot.do_api_request.await_args_list if c.args[0] == "sendRichMessage"]
+    assert len(rich_calls) >= 1
+    assert adapter._bot.send_message.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_split_rich_tail_transient_failure_marks_partial_overflow():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 800)
+    content = _oversized_rich_content(blocks=6)
+    calls = {"n": 0}
+
+    async def _api(endpoint, api_kwargs=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(message_id=777)
+        raise TimedOut("timed out")
+
+    adapter._bot.do_api_request = AsyncMock(side_effect=_api)
+
+    result = await adapter.send("12345", content)
+
+    # Transient tail failure: no legacy resend now (duplicate risk); the partial_overflow
+    # contract carries the formatted tail for resume.
+    assert result.success is False
+    adapter._bot.send_message.assert_not_called()
+    raw = result.raw_response
+    assert raw["partial_overflow"] is True
+    assert raw["delivered_chunks"] >= 1
+    assert raw["undelivered_chunks"]
+
+
+@pytest.mark.asyncio
+async def test_content_at_exact_rich_cap_stays_one_message():
+    adapter = _make_adapter()
+    _shrink_cap(adapter, 200)
+    body = "z" * (200 - len("## H\n\n") - len("\n\n- [x] done"))
+    content = f"## H\n\n{body}\n\n- [x] done"
+    assert len(content) == 200
+
+    result = await adapter.send("12345", content)
+
+    assert result.success is True
+    adapter._bot.do_api_request.assert_awaited_once()
+    adapter._bot.send_message.assert_not_called()
