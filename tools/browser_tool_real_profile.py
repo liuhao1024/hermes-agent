@@ -45,6 +45,10 @@ def _real_profile_daemon_env() -> tuple:
     _bt = _origin()
     socket_dir = _session._prepare_session_socket_dir(_bt._REAL_PROFILE_SESSION)
     env = _session._agent_browser_command_env(socket_dir)
+    # Same Chromium sandbox policy as the normal command path: on AppArmor-restricted
+    # userns hosts (Ubuntu 23.10+) the daemon's Chromium subprocesses die with
+    # 'No usable sandbox' and the lane reports 'no devtools endpoint' (#141370).
+    _session._apply_chromium_sandbox_args(env)
     env.pop("AGENT_BROWSER_IDLE_TIMEOUT_MS", None)
     return env, socket_dir
 

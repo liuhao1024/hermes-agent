@@ -353,6 +353,43 @@ class TestRealProfileCdpLaunch:
         assert not bt_real_profile._cdp_on_data_dir("http://127.0.0.1:9999", str(tmp_path))
 
 
+class TestRealProfileDaemonEnv:
+    """#141370: the lane never runs the normal command path, so its daemon env
+    must apply the shared Chromium sandbox policy itself."""
+
+    def test_daemon_env_applies_chromium_sandbox_policy(self, tmp_path, monkeypatch):
+        """On a host that needs the sandbox bypass (root/docker/AppArmor-restricted
+        userns), the daemon env carries the same AGENT_BROWSER_ARGS the normal
+        command path injects, while the lane's idle-timer drop stays intact."""
+        monkeypatch.setattr(bt_session, "_prepare_session_socket_dir", lambda name: str(tmp_path))
+        monkeypatch.setattr(bt_session, "_agent_browser_command_env",
+                            lambda socket_dir: {"AGENT_BROWSER_SOCKET_DIR": str(tmp_path),
+                                                "AGENT_BROWSER_IDLE_TIMEOUT_MS": "9000"})
+        monkeypatch.setattr(bt_session, "_needs_chromium_sandbox_bypass", lambda: True)
+
+        env, socket_dir = bt_real_profile._real_profile_daemon_env()
+
+        assert env["AGENT_BROWSER_ARGS"] == "--no-sandbox,--disable-dev-shm-usage"
+        assert "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in env
+        assert socket_dir == str(tmp_path)
+
+    def test_daemon_env_never_overrides_user_args_and_skips_clean_hosts(self, tmp_path, monkeypatch):
+        """A user-set AGENT_BROWSER_ARGS wins, and an unrestricted host gets
+        nothing injected — same contract as _apply_chromium_sandbox_args."""
+        monkeypatch.setattr(bt_session, "_prepare_session_socket_dir", lambda name: str(tmp_path))
+        monkeypatch.setattr(bt_session, "_agent_browser_command_env",
+                            lambda socket_dir: {"AGENT_BROWSER_ARGS": "--user-flag"})
+        monkeypatch.setattr(bt_session, "_needs_chromium_sandbox_bypass", lambda: True)
+        env, _ = bt_real_profile._real_profile_daemon_env()
+        assert env["AGENT_BROWSER_ARGS"] == "--user-flag"
+
+        monkeypatch.setattr(bt_session, "_agent_browser_command_env",
+                            lambda socket_dir: {"AGENT_BROWSER_SOCKET_DIR": str(tmp_path)})
+        monkeypatch.setattr(bt_session, "_needs_chromium_sandbox_bypass", lambda: False)
+        env, _ = bt_real_profile._real_profile_daemon_env()
+        assert "AGENT_BROWSER_ARGS" not in env
+
+
 class TestAgentBrowserCliCapture:
     """#96731: agent-browser's resident daemon inherits the caller's stdio and
     outlives the CLI, so pipe-based capture never sees EOF after the CLI
