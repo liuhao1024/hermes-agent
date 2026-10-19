@@ -276,6 +276,29 @@ class TestPreToolCallBlocking:
         result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
         assert result == {"ok": True}
 
+    def test_hook_dispatch_error_fails_closed(self, monkeypatch):
+        """A dispatch that raises must block the call: the guard never ran, so it
+        cannot have approved the tool (#141420)."""
+        hook_calls = []
+
+        def broken_invoke_hook(hook_name, **kwargs):
+            hook_calls.append((hook_name, kwargs))
+            if hook_name == "pre_tool_call":
+                raise RuntimeError("guard broken")
+            return []
+
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", broken_invoke_hook)
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        monkeypatch.setattr("model_tools.registry.dispatch",
+                            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not run")))
+
+        result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
+        assert result["error"].startswith("pre_tool_call hook failed: ")
+        assert "guard broken" in result["error"]
+        assert result["error"].endswith("; call not run")
+        post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
+        assert post_call[1]["status"] == "blocked"
+        assert post_call[1]["error_type"] == "pre_tool_call_hook_error"
 
     def test_relay_rewrite_is_visible_to_pre_tool_authorization(self, monkeypatch):
         observed = {}

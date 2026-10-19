@@ -783,7 +783,11 @@ def _pre_dispatch_guards(function_name: str, function_args: dict[str, Any], skip
             if modified_args is not None:
                 function_args = modified_args
         except Exception as _hook_err:
-            logger.debug("pre_tool_call hook error: %s", _hook_err)
+            # Fail closed, like the ACP guard below: a guard that crashed never
+            # got to look at the call, so the call must not run.
+            logger.warning("pre_tool_call hook error: %s", _hook_err)
+            return function_args, (tool_error(f"pre_tool_call hook failed: {_hook_err}; call not run"),
+                                   "pre_tool_call_hook_error", None)
         if block_message is not None:
             return function_args, (tool_error(block_message), "plugin_block", block_message)
 
