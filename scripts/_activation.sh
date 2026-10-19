@@ -34,6 +34,13 @@ hermes_sync() {
 # any dependency is importable. It only emits the environment; it installs nothing.
 hermes_bootstrap_python() {
     local repo="$1" store candidate
+    # zsh aborts the whole `for` word list when any glob in it fails to match
+    # (default nomatch), and this probe deliberately lists Windows-only
+    # python.exe candidates that never exist on a POSIX host, so `source
+    # ./activate` died on macOS's default shell. Expand unmatched globs to
+    # nothing inside this function only; local_options restores the caller's
+    # option state on return, and other shells never take the setopt branch.
+    [ -n "${ZSH_VERSION:-}" ] && setopt local_options null_glob
     for candidate in "$repo/.venv/bin/python" "$repo/.venv/Scripts/python.exe" \
                      "$repo/venv/bin/python" "$repo/venv/Scripts/python.exe"; do
         [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
