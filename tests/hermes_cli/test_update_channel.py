@@ -382,6 +382,9 @@ def test_doctor_channel_records_are_read_only(tmp_path, monkeypatch, kind, expec
         root.mkdir()
     key = '0' * 16 if kind == 'replaced' else install_id(root)
     config = {'update': {'installs': {key: {'path': str(root), 'channel': 'main'}}}}
+    if kind == 'unclaimed':
+        # Only a record with no path fact reaches the install.json probe.
+        del config['update']['installs'][key]['path']
     if kind == 'healthy':
         state = home / 'installs' / key
         state.mkdir(parents=True)
@@ -390,3 +393,17 @@ def test_doctor_channel_records_are_read_only(tmp_path, monkeypatch, kind, expec
     assert [(key, reason) for key, _, reason in stale_channel_records(config)] == (
         [(key, expected)] if expected else [])
     assert config == before
+
+
+def test_doctor_path_verified_record_is_live_without_install_json(tmp_path, monkeypatch):
+    """#141424: a record whose path exists and keys back to its own sha16 is live by
+    that fact; no production path writes ``installs/<sha16>/install.json`` (editable
+    workspace snapshots report ``Install method: unknown``), so probing for it used to
+    flag every such record "unclaimed" forever and doctor offered to GC a correct
+    record — which would have silently reverted the update channel."""
+    home, root = tmp_path / '.hermes', tmp_path / 'install'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    root.mkdir()
+    (home / 'installs' / install_id(root) / 'environments').mkdir(parents=True)
+    config = {'update': {'installs': {install_id(root): {'path': str(root), 'channel': 'main'}}}}
+    assert stale_channel_records(config) == []

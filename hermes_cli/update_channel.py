@@ -351,8 +351,14 @@ def stale_channel_records(config: Optional[dict]) -> list[tuple[str, dict, str]]
       to a DIFFERENT sha16 (the tree moved / was recreated elsewhere and a
       new record claimed it; this one is a leftover).
     * ``"missing"``  — nothing at the recorded path: offer GC (keep-on-doubt).
-    * ``"unclaimed"`` — the sha16 matches no live install record
-      (``installs/<sha16>/install.json``): offer GC.
+    * ``"unclaimed"`` — a record with NO path fact whose sha16 matches no live
+      install record (``installs/<sha16>/install.json``): offer GC.
+
+    A record whose path exists and keys back to its own sha16 is live by that
+    fact alone and is never flagged: install methods that do not write
+    ``install.json`` (an editable workspace snapshot, ``Install method:
+    unknown``) would otherwise trip "unclaimed" forever and doctor would offer
+    to GC a correct record — silently reverting the update channel (#141424).
     """
     stale: list[tuple[str, dict, str]] = []
     for sha16, record in _install_records(config).items():
@@ -371,6 +377,9 @@ def stale_channel_records(config: Optional[dict]) -> list[tuple[str, dict, str]]
             if install_key(path) != sha16:
                 stale.append((sha16, record, "replaced"))
                 continue
+            # A tree that keys back to this sha16 IS the live install; the
+            # install.json probe below carries no signal for it (#141424).
+            continue
 
         # Cross-check against the live install-state records: a channel
         # record whose sha16 has no installs/<sha16>/install.json was
