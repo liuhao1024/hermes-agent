@@ -196,6 +196,50 @@ def _apply_child_compression_cap(child, delegation_cfg: dict) -> None:
         cc._apply_threshold_tokens_cap()
 
 
+def _child_compression_ratio(raw) -> "float | None":
+    """Validated ``delegation.compression_threshold_ratio``: a fraction in (0.0, 1.0], or None for "no override".
+
+    Unset / ``0`` / ``false`` / ``null`` mean no subagent-specific ratio: the child keeps the global
+    ``compression.threshold`` (default 0.50) as its base. A bool ``true`` (YAML) would coerce to 1.0
+    (a trigger the window can never reach) and a percentage written as ``45`` instead of the fraction
+    ``0.45`` is out of range; both are config errors: warn and treat as unset so a typo never changes
+    compaction behaviour."""
+    if raw is None or raw is False or raw == 0:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not (0.0 < float(raw) <= 1.0):
+        logger.warning(
+            "delegation.compression_threshold_ratio=%r is not a fraction in (0.0, 1.0]; ignoring it "
+            "(children keep the global ratio trigger).", raw,
+        )
+        return None
+    return float(raw)
+
+
+def _apply_child_compression_ratio(child, delegation_cfg: dict) -> None:
+    """Optional base-ratio override on the child's compaction trigger, ``delegation.compression_threshold_ratio``
+    (a fraction of the window, replacing the global ``compression.threshold`` as the child's base). The token cap
+    can only clamp a child's trigger DOWN: this is the only way to let children compact LATER than a parent that
+    keeps a small ratio trigger. It writes the same layer the config loader does (``_config_threshold_percent``),
+    so ``_derive_trigger`` — model switches and window corrections included — keeps resolving from the override,
+    per-model ``model_thresholds`` still win, and the raise-only small-context floor and any token cap apply on top."""
+    from agent.context_compressor import ContextCompressor, resolve_model_threshold
+
+    cc = getattr(child, "context_compressor", None)
+    if not isinstance(cc, ContextCompressor):
+        return
+    ratio = _child_compression_ratio((delegation_cfg or {}).get("compression_threshold_ratio"))
+    if ratio is None:
+        return
+    cc._config_threshold_percent = ratio
+    if cc._threshold_tokens is not None:  # already resolved: re-derive now, mirroring update_model()
+        cc._base_threshold_percent, cc.threshold_percent, cc.threshold_tokens = cc._derive_trigger(
+            cc.model, cc.context_length, cc.provider)
+        cc._apply_threshold_tokens_cap()
+    else:  # first window resolution derives and floors from the new base on its own
+        cc._base_threshold_percent = resolve_model_threshold(cc.model, cc.model_thresholds, ratio, cc.provider)
+        cc.threshold_percent = cc._base_threshold_percent
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -308,6 +352,7 @@ def _build_child_agent(
     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
     child._subagent_id, child._parent_subagent_id = subagent_id, parent_subagent_id
     _apply_child_compression_cap(child, delegation_cfg)
+    _apply_child_compression_ratio(child, delegation_cfg)
     # Ownership chain for action=list/steer/stop; weakref so a finished parent
     # can be collected while a detached child record lingers in the registry.
     try:
