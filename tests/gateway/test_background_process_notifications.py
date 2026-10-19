@@ -324,6 +324,83 @@ async def test_post_turn_watch_drain_all_injects_from_queued_event_origin(monkey
     assert completion_queue.get_nowait() is async_event
 
 
+class _BoundarySessionDB:
+    """Session rows whose end_reason names how the pinned session ended."""
+
+    def __init__(self, end_reason):
+        self._end_reason = end_reason
+
+    async def get_session(self, session_id):
+        return {"session_id": session_id, "ended_at": 1786288000.0,
+                "end_reason": self._end_reason, "model_config": None}
+
+    async def get_compression_tip(self, session_id):
+        return session_id
+
+
+def _pinned_watch_event(parent_session_id="pinned-owner"):
+    evt = _watch_event()
+    evt["parent_session_id"] = parent_session_id
+    return evt
+
+
+@pytest.mark.asyncio
+async def test_drain_drops_refused_notice_pinned_to_reset_session(
+        monkeypatch, tmp_path, caplog):
+    """Regression for #141562: a refused watch notice pinned to a session that ended at a user
+    boundary (``session_reset``) can never admit again — ``_owner`` follows only compression
+    lineage, never /new or a reset fork — so the drain must drop it instead of requeueing it
+    every watcher tick forever (the reporter counted ~61k refusals over 2.5 days)."""
+    import logging
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    runner._session_db = _BoundarySessionDB("session_reset")
+    evt = _pinned_watch_event()
+    monkeypatch.setattr(runner, "_inject_watch_notification", AsyncMock(return_value=False))
+    completion_queue = queue.Queue()
+    completion_queue.put(evt)
+
+    with caplog.at_level(logging.WARNING):
+        await runner._drain_watch_notifications(completion_queue)
+
+    assert completion_queue.qsize() == 0
+    assert "targets permanently-retired session pinned-owner" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_drain_requeues_refused_notice_for_routable_parent(monkeypatch, tmp_path):
+    """A refused notice whose pinned session ended routably (idle timeout, not a user
+    boundary) keeps the historical requeue: only a provably terminal verdict drops."""
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    runner._session_db = _BoundarySessionDB("idle_timeout")
+    evt = _pinned_watch_event("idle-parent")
+    monkeypatch.setattr(runner, "_inject_watch_notification", AsyncMock(return_value=False))
+    completion_queue = queue.Queue()
+    completion_queue.put(evt)
+
+    await runner._drain_watch_notifications(completion_queue)
+
+    assert completion_queue.qsize() == 1
+    assert completion_queue.get_nowait() is evt
+
+
+@pytest.mark.asyncio
+async def test_drain_requeues_refused_notice_without_session_pin(monkeypatch, tmp_path):
+    """Legacy events that never stamped the spawning session keep today's requeue; the drop
+    needs a pin whose retirement the shared boundary verdict can prove."""
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    runner._session_db = _BoundarySessionDB("session_reset")
+    evt = _watch_event()  # no parent_session_id pin
+    monkeypatch.setattr(runner, "_inject_watch_notification", AsyncMock(return_value=False))
+    completion_queue = queue.Queue()
+    completion_queue.put(evt)
+
+    await runner._drain_watch_notifications(completion_queue)
+
+    assert completion_queue.qsize() == 1
+    assert completion_queue.get_nowait() is evt
+
+
 @pytest.mark.asyncio
 async def test_inject_watch_notification_drops_stale_trigger_reply_anchor(monkeypatch, tmp_path):
     """Regression for #52694: the synthetic watch event must not reuse the triggering

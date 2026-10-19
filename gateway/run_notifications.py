@@ -728,9 +728,33 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     except Exception:
                         logger.exception("Watch notification injection error")
                         delivered = False
+                # A refused notice pinned to a session that provably ended at a user boundary can
+                # never admit again — ``_owner`` follows only compression lineage, never /new or a
+                # reset (#141562) — so drop it instead of requeueing it every watcher tick; the
+                # durable completion pre-flight already applies the same terminal verdict.
+                if delivered is False and await self._watch_notice_target_retired(evt):
+                    logger.warning(
+                        "Watch notification for process %s targets permanently-retired session %s "
+                        "(user boundary such as /new); dropping instead of requeueing forever "
+                        "(output remains available via process(action='log')).",
+                        evt.get("session_id") or "<unknown>",
+                        str(evt.get("parent_session_id") or "").strip() or "<unknown>",
+                    )
+                    delivered = None  # terminal, like a deduplicated event
             # The original event: a requeued tick folds again from what is still queued.
             if delivered is False:
                 completion_queue.put(evt)
+
+    async def _watch_notice_target_retired(self, evt: dict) -> bool:
+        """Whether a refused watch notice is pinned to a session that provably ended at a user
+        boundary (``/new``, reset): ``_owner`` admits only the pinned session itself or its
+        compression lineage, so every requeue re-refuses (#141562). Shares the durable completion
+        pre-flight's verdict; transient uncertainty (``retry``) still requeues."""
+        parent_session_id = str(evt.get("parent_session_id") or "").strip()
+        if not parent_session_id:
+            return False
+        return await self._classify_completion_target(
+            parent_session_id, str(evt.get("session_key") or "")) == "terminal"
 
     def _adapter_by_platform_value(self, platform_name: str):
         """Literal ``p.value == platform_name`` scan over connected adapters (native adapters only)."""
