@@ -6,7 +6,7 @@ stays the single late-binding seam tests monkeypatch (``web_deps.late``).
 Usage: ``python -m hermes_cli.main web [--port 8080]``.
 """
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import asyncio
 from collections import deque
@@ -1279,6 +1279,15 @@ def _on_server_started(
 
     _best_effort("loop noise filter install", _install_noise_filter)
 
+    # Python 3.14 turns every dashboard client that drops without a close frame
+    # (1005) into an ERROR "exception in shielded future" record from the legacy
+    # websockets impl's close task (#141687) — normal disconnect noise; collapse
+    # it to a debug line before errors.log sees it.
+    def _install_ws_close_filter() -> None:
+        _install_ws_close_noise_filter(asyncio.get_running_loop())
+
+    _best_effort("ws close noise filter install", _install_ws_close_filter)
+
     # Loop heartbeat watchdog (CF-1): a 2s call_later tick whose drift equals
     # any GIL stall, so a stalled-loop WS drop is diagnosable from the log.
     # call_later (not a task) dies with the loop — nothing to cancel.
@@ -1294,6 +1303,58 @@ def _on_server_started(
         _hb_loop.call_later(_hb_interval, _loop_heartbeat, now + _hb_interval)
 
     _hb_loop.call_later(_hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval)
+
+
+def _is_shielded_ws_close_noise(context: dict[str, Any]) -> bool:
+    """True when a loop error is the legacy websockets impl reporting a dropped
+    client (no close frame) as an unretrieved shielded-future exception.
+
+    Python 3.14's ``asyncio.shield`` surfaces the inner task's exception via
+    ``call_exception_handler`` once the outer await was cancelled (earlier
+    Pythons dropped it). uvicorn's ``auto`` ws picks the legacy websockets
+    protocol, which shields its ``close_connection_task``; a dashboard client
+    that goes away without a close frame (tab close, proxy recycle, laptop
+    sleep — close code 1005) ends that task with ``ConnectionClosedOK``: a
+    normal disconnect, not a failure (#141687). Gated on BOTH the
+    shielded-future message AND the exception type, so a ``ConnectionClosedOK``
+    from any other path still reaches the default handler, and
+    ``ConnectionClosedError`` (e.g. keepalive ping timeout) stays ERROR.
+    """
+    if "exception in shielded future" not in str(context.get("message", "")):
+        return False
+    try:
+        from websockets.exceptions import ConnectionClosedOK
+    except ImportError:  # pragma: no cover - no websockets -> no legacy impl
+        return False
+    return isinstance(context.get("exception"), ConnectionClosedOK)
+
+
+def _install_ws_close_noise_filter(loop: asyncio.AbstractEventLoop) -> None:
+    """Chain a shielded-close filter ahead of the loop's existing handler.
+
+    Mirrors ``tui_gateway.loop_noise``: idempotent (a loop already carrying the
+    filter is left alone), and everything non-matching forwards to the previous
+    handler unchanged.
+    """
+    if getattr(loop, "_hermes_ws_close_noise_installed", False):
+        return
+    previous = loop.get_exception_handler()
+
+    def _handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        if _is_shielded_ws_close_noise(context):
+            _log.debug(
+                "dashboard websocket peer dropped without a close frame (suppressed): %s",
+                context.get("exception"),
+            )
+            return
+        if previous is not None:
+            previous(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+    with suppress(AttributeError, TypeError):  # pragma: no cover - exotic loop impls
+        loop._hermes_ws_close_noise_installed = True  # type: ignore[attr-defined]
 
 
 def _windows_serve_loop_factory(config):
