@@ -63,3 +63,27 @@ def test_managed_install_uses_the_committed_generation_not_the_in_tree_venv(
     assert overlay is not None, "the committed generation must supply a site-packages entry"
     assert overlay == committed / "Lib" / "site-packages"
     assert not overlay.is_relative_to(stale)
+
+
+def test_uv_overlay_does_not_append_ambient_pythonpath(tmp_path, monkeypatch):
+    """The scheduler's own PYTHONPATH (the managed store's repo + site-packages) must not ride
+    the uv overlay: it would shadow the script venv's packages for foreign-ABI children, which
+    is the same wrong-ABI import the bootstrap now prevents (#141571)."""
+    from cron import scheduler_script as sched_script
+
+    venv = _write_venv(tmp_path / "venv")
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "python.exe").write_text("", encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text(f"uv = true\nhome = {base}\n", encoding="utf-8")
+    monkeypatch.setattr("hermes_cli._launchers.resolve_store_python", lambda _root: None)
+    foreign = str(tmp_path / "foreign")
+    monkeypatch.setenv("PYTHONPATH", foreign)
+
+    interpreter, env_overlay = sched_script._windows_cron_python_invocation(
+        str(venv / "Scripts" / "python.exe"))
+
+    assert interpreter == str(base / "python.exe")
+    entries = env_overlay["PYTHONPATH"].split(os.pathsep)
+    assert foreign not in entries, "the ambient PYTHONPATH must not be appended"
+    assert entries[-1] == str(venv / "Lib" / "site-packages")

@@ -832,3 +832,34 @@ class TestScriptTimeoutTreeKill:
                     psutil.Process(gpid).kill()
                 except psutil.NoSuchProcess:
                     pass
+
+
+def test_windows_bootstrap_drops_pythonpath_before_the_script_runs(tmp_path):
+    """The overlay PYTHONPATH stops at the cron script process itself: the interpreter folded
+    it into ``sys.path`` at startup and the bootstrap drops it from ``os.environ``, so an
+    interpreter the script spawns (another venv, another ABI) cannot import the managed
+    store's compiled extensions (#141571). Runs the real bootstrap on any host — it is plain
+    ``python -c`` code, no Windows host is being faked."""
+    from cron.scheduler_script import _windows_cron_bootstrap_argv
+
+    site_packages = tmp_path / "venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    script = tmp_path / "job.py"
+    script.write_text(
+        "import os, subprocess, sys\n"
+        "print('site=%s' % any(p.endswith('site-packages') for p in sys.path))\n"
+        "print('own=%s' % ('PYTHONPATH' in os.environ))\n"
+        "subprocess.run([sys.executable, '-c', "
+        "\"import os; print('child=%s' % ('PYTHONPATH' in os.environ))\"])\n",
+        encoding="utf-8")
+
+    overlay = {"PYTHONPATH": os.pathsep.join([str(tmp_path / "repo"), str(site_packages)])}
+    argv = _windows_cron_bootstrap_argv(sys.executable, overlay, str(script))
+    run = subprocess.run(
+        argv, capture_output=True, text=True, timeout=120, check=False,
+        env={**os.environ, "PYTHONPATH": overlay["PYTHONPATH"]})
+
+    assert run.returncode == 0, run.stderr
+    assert "site=True" in run.stdout, "addsitedir must keep the venv importable"
+    assert "own=False" in run.stdout, "the script process must not export PYTHONPATH"
+    assert "child=False" in run.stdout, "descendants must not inherit PYTHONPATH"

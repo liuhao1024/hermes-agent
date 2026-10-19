@@ -202,12 +202,11 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
         if base_python.exists() and site_packages.exists():
             interpreter = base_python
             env_overlay["VIRTUAL_ENV"] = str(venv_dir)
-            pythonpath_entries = [
-                str(_sched.Path(__file__).resolve().parents[1]), str(site_packages)]
-            existing_pythonpath = os.environ.get("PYTHONPATH", "")
-            if existing_pythonpath:
-                pythonpath_entries.append(existing_pythonpath)
-            env_overlay["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+            # No ambient PYTHONPATH: the bootstrap drops the variable before the script runs,
+            # and the scheduler's own store entries would shadow this venv's packages for any
+            # foreign-ABI interpreter the script spawns (#141571).
+            env_overlay["PYTHONPATH"] = os.pathsep.join(
+                [str(_sched.Path(__file__).resolve().parents[1]), str(site_packages)])
 
     return str(interpreter), env_overlay
 
@@ -298,7 +297,13 @@ def _windows_cron_bootstrap_argv(
     """Bootstrap a cron script under the base interpreter with ``.pth`` support. Overlay mode puts
     the venv on ``PYTHONPATH``, but ``.pth`` files are only processed by ``site.addsitedir()``, so
     editable installs would be invisible; bootstrap via addsitedir + ``runpy.run_path`` (keeps
-    ``__file__``/``sys.path[0]`` semantics). Plain invocation if the venv is unresolvable."""
+    ``__file__``/``sys.path[0]`` semantics). Plain invocation if the venv is unresolvable.
+
+    ``PYTHONPATH`` stops at this process: the interpreter folded it into ``sys.path`` at startup,
+    and the bootstrap drops it from ``os.environ`` before the script runs, so everything the
+    script spawns (often another interpreter/venv) inherits a clean env instead of importing
+    the managed store's compiled extensions from the wrong ABI (#141571; the POSIX-side
+    rationale in ``_posix_cron_script_argv`` / #123440)."""
     site_packages = next((Path(item) for item in env_overlay.get("PYTHONPATH", "").split(os.pathsep)
                           if Path(item).name == "site-packages"),
                          _sched.Path(env_overlay.get("VIRTUAL_ENV", "")) / "Lib" / "site-packages")
@@ -311,6 +316,7 @@ def _windows_cron_bootstrap_argv(
         return [python_exe, script_path]
     bootstrap = (
         "import os, runpy, site, sys;"
+        "os.environ.pop('PYTHONPATH', None);"
         f"site.addsitedir({str(site_packages)!r});"
         "script = sys.argv[1];"
         "sys.argv = [script] + sys.argv[2:];"
