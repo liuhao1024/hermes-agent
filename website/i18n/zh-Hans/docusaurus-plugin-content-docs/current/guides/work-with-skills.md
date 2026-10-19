@@ -109,6 +109,8 @@ hermes skills install https://sharethis.chat/SKILL.md
 已安装的 skills 在新会话中生效。如需在当前会话中立即使用，可用 `/reset` 开启新会话，或添加 `--now` 参数立即使 prompt 缓存失效（下一轮会消耗更多 tokens）。
 :::
 
+社区 skill 在安装前会经过安全扫描。`dangerous` 判定会阻止安装且 `--force` 无法覆盖——扫描器检查哪些内容、以及 skill 作者如何用 `.skillignore` 将仅供开发的文件（测试夹具、文档、CI 配置）排除出扫描，参见[安全扫描](../developer-guide/creating-skills.md#安全扫描)。
+
 ### 验证安装
 
 ```bash

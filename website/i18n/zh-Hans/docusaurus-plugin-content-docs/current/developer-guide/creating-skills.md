@@ -367,6 +367,21 @@ hermes skills tap add owner/repo
 - `trusted`——来自 openai/skills、anthropics/skills、huggingface/skills
 - `community`——非危险发现可通过 `--force` 覆盖；`dangerous` 判定仍会被阻止
 
+### 用 `.skillignore` 将开发文件排除出扫描
+
+大型 skill 常常自带测试夹具、文档和 CI 配置——它们在安装时永远不会被执行，却容易触发扫描器：一段用于测试的 prompt 注入夹具、或文档里写明的 `pip install` 命令，在扫描器眼中与真实攻击载荷并无区别。skill 可以在根目录放置 `.skillignore` 文件（对通过 ClawHub 发布的 skill，`.clawhubignore` 同样有效），把这些路径排除出扫描：
+
+```gitignore
+# gitignore 风格语法
+tests/
+docs/
+.github/
+```
+
+语义遵循 gitignore 基础规则：空行和 `#` 注释会被跳过；以 `/` 结尾表示目录（它及其下所有内容）；支持 `*`/`?` 通配；以 `/` 开头则将模式锚定到 skill 根目录。被排除的路径会同时从内容扫描和结构检查中移除，因此也不再计入 50 个文件的上限。`SKILL.md` 本身永远无法被排除。
+
+排除文件只是减少扫描器看到的内容——它不是覆盖机制。如果剩余文件仍导致 `dangerous` 判定，社区 skill 的安装依然会被阻止，`--force` 无法改变这一点。
+
 Hermes 现在可以通过多种外部发现模型使用第三方 skill：
 - 直接 GitHub 标识符（例如 `openai/skills/k8s`）
 - `skills.sh` 标识符（例如 `skills-sh/vercel-labs/json-render/json-render-react`）

@@ -432,6 +432,21 @@ Trust levels:
 - `trusted` — from openai/skills, anthropics/skills, huggingface/skills
 - `community` — non-dangerous findings can be overridden with `--force`; `dangerous` verdicts remain blocked
 
+### Excluding dev files from the scan (`.skillignore`)
+
+Large skills often ship test fixtures, docs and CI configs that trip the scanner without ever executing on install — a prompt-injection test fixture or a documented `pip install` line reads the same as a real payload. A skill can exclude such paths from the scan with a `.skillignore` file at the skill root (`.clawhubignore` is also honored for skills published through ClawHub):
+
+```gitignore
+# gitignore-style syntax
+tests/
+docs/
+.github/
+```
+
+Semantics are gitignore basics: blank lines and `#` comments are skipped, a trailing `/` marks a directory (it and everything under it), `*`/`?` globs are supported, and a leading `/` anchors a pattern to the skill root. Excluded paths are removed from both the content scan and the structural checks, so they also stop counting toward the 50-file limit. `SKILL.md` itself can never be excluded.
+
+Excluding files only trims what the scanner sees — it is not an override. A `dangerous` verdict from the files that remain still blocks installation of a community skill, and `--force` does not change that.
+
 Hermes can now consume third-party skills from multiple external discovery models:
 - direct GitHub identifiers (for example `openai/skills/k8s`)
 - `skills.sh` identifiers (for example `skills-sh/vercel-labs/json-render/json-render-react`)

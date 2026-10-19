@@ -109,6 +109,8 @@ What happens:
 Installed skills take effect in new sessions. If you want it available in the current session, use `/reset` to start fresh, or add `--now` to invalidate the prompt cache immediately (costs more tokens on the next turn).
 :::
 
+Community skills pass a security scan before installation. A `dangerous` verdict blocks the install and `--force` does not override it — see [Security Scanning](../developer-guide/creating-skills.md#security-scanning) for what the scanner checks and how skill authors can exclude dev-only files (test fixtures, docs, CI configs) from the scan with `.skillignore`.
+
 ### Verifying Installation
 
 ```bash
