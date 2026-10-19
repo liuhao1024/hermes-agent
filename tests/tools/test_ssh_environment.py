@@ -336,6 +336,67 @@ class TestSSHProbeOnly:
         assert len(control_exit_calls) == 1
 
 
+class TestSSHCleanupRemovesRemoteSessionFiles:
+    """The remote host outlives the session, so cleanup() must rm this session's snapshot/cwd
+    files there the way LocalEnvironment.cleanup() does on the host (#141497)."""
+
+    @pytest.fixture(autouse=True)
+    def _multiplex(self, monkeypatch):
+        monkeypatch.setattr(ssh_env, "_SSH_MULTIPLEX", True)
+
+    @staticmethod
+    def _record_runs(monkeypatch, *, rm_raises: Exception | None = None) -> list:
+        calls = []
+
+        def _fake_run(*args, **kwargs):
+            calls.append(args[0])
+            if rm_raises is not None and "-O" not in args[0]:
+                raise rm_raises
+            return subprocess.CompletedProcess([], 0)
+
+        monkeypatch.setattr(ssh_env.subprocess, "run", _fake_run)
+        return calls
+
+    @staticmethod
+    def _split(calls):
+        return [c for c in calls if "-O" not in c], [c for c in calls if "-O" in c]
+
+    def test_cleanup_rms_session_files_over_the_open_master_before_exit(self, monkeypatch, _mock_ssh_runtime):
+        calls = self._record_runs(monkeypatch)
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice")
+        env.control_socket.touch()
+
+        env.cleanup()
+
+        rm_calls, exit_calls = self._split(calls)
+        assert len(rm_calls) == 1 and len(exit_calls) == 1
+        snap = env._snapshot_path
+        assert rm_calls[0][-1] == f"rm -f -- {snap} {env._cwd_file} {snap}.tmp.*"
+        # Rides the still-open ControlMaster: same ControlPath, issued before ``-O exit``.
+        assert f"ControlPath={env.control_socket}" in rm_calls[0]
+        assert calls.index(rm_calls[0]) < calls.index(exit_calls[0])
+        assert not env.control_socket.exists()
+
+    def test_cleanup_still_closes_the_master_when_the_rm_times_out(self, monkeypatch, _mock_ssh_runtime):
+        calls = self._record_runs(monkeypatch, rm_raises=subprocess.TimeoutExpired(["ssh"], 5))
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice")
+        env.control_socket.touch()
+
+        env.cleanup()
+
+        rm_calls, exit_calls = self._split(calls)
+        assert len(rm_calls) == 1 and len(exit_calls) == 1
+        assert not env.control_socket.exists()
+
+    def test_probe_only_cleanup_does_not_rm_a_session_it_never_bootstrapped(self, monkeypatch, _mock_ssh_runtime):
+        calls = self._record_runs(monkeypatch)
+        env = ssh_env.SSHEnvironment(host="example.com", user="alice", probe_only=True)
+
+        env.cleanup()
+
+        assert calls == []
+
+
 def _setup_ssh_env(monkeypatch, persistent: bool):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     monkeypatch.setenv("TERMINAL_SSH_HOST", _SSH_HOST)

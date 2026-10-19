@@ -61,6 +61,7 @@ class SSHEnvironment(BaseEnvironment):
                  probe_only: bool = False, sync_files: bool = True, persistent: bool = True):
         super().__init__(cwd=cwd, timeout=timeout, persist_env=persistent)
         self.host, self.user, self.port, self.key_path = host, user, port, key_path
+        self._probe_only = probe_only
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         # Short, deterministic socket name: the path must stay under macOS's 104-byte sun_path
@@ -288,10 +289,22 @@ class SSHEnvironment(BaseEnvironment):
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
 
+    def _remove_remote_session_files(self) -> None:
+        """Best-effort ``rm -f`` of this session's snapshot/cwd files on the remote host — the
+        remote counterpart of ``LocalEnvironment.cleanup()``. The host outlives the session, so
+        without it one 0600 env dump per session piles up in its temp dir (#141497). Issued over
+        the still-open ControlMaster, so it must run before the ``-O exit`` loop."""
+        snap = self._quote_shell_path(self._snapshot_path)
+        targets = f"{snap} {self._quote_shell_path(self._cwd_file)} {snap}.tmp.*"
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self._run_ssh(f"rm -f -- {targets}", timeout=5)
+
     def cleanup(self):
         if self._sync_manager:
             logger.info("SSH: syncing files from sandbox...")
             self._sync_manager.sync_back()
+        if not self._probe_only:  # a probe never bootstraps a session, so it left nothing behind
+            self._remove_remote_session_files()
         for socket in self._control_sockets():
             if not socket.exists():
                 continue
