@@ -34,6 +34,10 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
+# Set when the call resolved to a SHARED CDP browser (operator BU_CDP_* env or browser.cdp_url /
+# ``/browser connect``): several concurrent sessions legitimately reach the same Chrome, so an unnamed
+# call must not land on the one `default` daemon and its first tab. Popped before launching the CLI.
+_SHARED_CDP_SENTINEL = "_HERMES_BU_SHARED_CDP"
 # Internal route provenance: this exec resolved to a browser on the Bot Desktop display and must use
 # the same human-control lease fence as the built-in browser tools. Popped before launching the CLI.
 _BOT_DESKTOP_BROWSER_SENTINEL = "_HERMES_BU_BOT_DESKTOP_BROWSER"
@@ -400,6 +404,31 @@ def _sidecar_daemon_name(name: str) -> str:
     return f"_local_{name or 'default'}"[:64]
 
 
+def _task_scoped_session_name(task_id: str) -> str:
+    """BU_NAME for an UNNAMED browser_exec call on a shared CDP browser, scoped to the task so concurrent
+    chats get separate daemons and tabs instead of steering the one `default` tab (#141692). Word
+    characters only — the result must satisfy ``_SESSION_RE``; empty means "keep the default"."""
+    stem = re.sub(r"[^A-Za-z0-9_-]", "", str(task_id))[:12].strip("-_")
+    return f"task-{stem}" if stem else ""
+
+
+def _scope_unnamed_shared_cdp(env: dict, session: str, task_id: Optional[str], *,
+                              shared_cdp: bool, private_browser: bool,
+                              local_sidecar: bool) -> str:
+    """The session name an unnamed call runs under on a shared CDP browser (``_SHARED_CDP_SENTINEL``):
+    without a name two concurrent chats land on the ONE `default` daemon and its first tab and steer
+    the same page — each navigates the other's away, the loser times out. Scoped to the task, the call
+    gets the own daemon and own tab a named session gets. No task id (CLI one-shots), a private
+    per-name browser, or the sidecar keeps the caller's name (the shared `default`)."""
+    if session or private_browser or local_sidecar or not shared_cdp or not task_id:
+        return session
+    scoped = _task_scoped_session_name(task_id)
+    if scoped:
+        env["BU_NAME"] = scoped
+        return scoped
+    return session
+
+
 def _export_real_profile_note(env: dict, key: str) -> None:
     """The session layer decides real profile vs fresh browser once per key; carry its note (if it fell
     back) so the result reports the browser this call actually drives."""
@@ -517,6 +546,10 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     key (hybrid routing; see ``_hybrid_routes_locally``). It sits BELOW the two operator overrides, and the
     sidecar verdict never fires while a CDP override is set."""
     if _has_cdp_env(env):
+        # Not when the real-profile route already set BU_CDP_*: that browser is a per-cache-key
+        # PRIVATE snapshot (_resolve_real_profile_cdp sets the Bot Desktop marker), never shared.
+        if not env.get(_BOT_DESKTOP_BROWSER_SENTINEL):
+            env[_SHARED_CDP_SENTINEL] = "1"
         return None
     try:
         from tools.browser_tool_cloud import _get_cloud_provider
@@ -528,6 +561,7 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     override = _quiet(_get_cdp_override, "")
     if override:
         _set_cdp_env(env, override)
+        env[_SHARED_CDP_SENTINEL] = "1"
         return None
     if force_local_sidecar:
         return _resolve_local_engine_cdp(env, task_id, session_name, sidecar=True)
@@ -806,6 +840,11 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
     # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
+    shared_cdp = env.pop(_SHARED_CDP_SENTINEL, None)  # always pop: never exported to the CLI
+    # An unnamed call on that shared browser is task-scoped instead (own daemon + own tab).
+    session = _scope_unnamed_shared_cdp(env, session, task_id, shared_cdp=bool(shared_cdp),
+                                        private_browser=bool(private_browser),
+                                        local_sidecar=local_sidecar)
     if session and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
 

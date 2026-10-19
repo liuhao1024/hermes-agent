@@ -644,9 +644,11 @@ class TestBackendCdpResolution:
 
 class TestOwnTabPreamble:
     """Named sessions on SHARED browsers (a /browser connect CDP override) get the own-tab preamble
-    prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not."""
+    prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not.
+    An unnamed call on a shared CDP browser is task-scoped instead: its own daemon name and tab."""
 
-    def _run(self, tmp_path, monkeypatch, *, session="", private=False, provider=False, shared_cdp=""):
+    def _run(self, tmp_path, monkeypatch, *, session="", private=False, provider=False, shared_cdp="",
+             task_id=None, echo_name=False):
 
         monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: shared_cdp)
         if provider:
@@ -658,9 +660,10 @@ class TestOwnTabPreamble:
         else:
             monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
         # fake CLI echoes stdin back so we can inspect what code was sent
-        cli = _fake_cli(tmp_path, "cat\n")
+        body = 'cat\necho "name:${BU_NAME:-unset}"\n' if echo_name else "cat\n"
+        cli = _fake_cli(tmp_path, body)
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
-        return json.loads(bu_cli.browser_exec("print('payload')", session=session))
+        return json.loads(bu_cli.browser_exec("print('payload')", session=session, task_id=task_id))
 
     def test_named_shared_browser_gets_preamble(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, session="r7k2", shared_cdp="http://127.0.0.1:9222")
@@ -679,6 +682,38 @@ class TestOwnTabPreamble:
         result = self._run(tmp_path, monkeypatch, session="")
         assert result["success"] is True
         assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_unnamed_shared_cdp_is_task_scoped_with_own_tab(self, tmp_path, monkeypatch):
+        """Two concurrent chats calling browser_exec without `session` on a shared CDP Chrome must not
+        steer the one `default` daemon and its first tab: each task gets its own daemon name (and,
+        through the preamble, its own tab) — the isolation a named session gets (#141692)."""
+        result = self._run(tmp_path, monkeypatch, session="", shared_cdp="http://127.0.0.1:9222",
+                           task_id="0f1e2d3c4b5a6f7d8e9f0011", echo_name=True)
+        assert result["success"] is True
+        assert "name:task-0f1e2d3c4b5a" in result["output"]
+        assert "_hermes_ensure_own_tab" in result["output"]
+
+    def test_unnamed_shared_cdp_without_task_id_keeps_default(self, tmp_path, monkeypatch):
+        """CLI one-shots have no task id: the literal shared default session stays (no renames)."""
+        result = self._run(tmp_path, monkeypatch, session="", shared_cdp="http://127.0.0.1:9222",
+                           echo_name=True)
+        assert result["success"] is True
+        assert "name:unset" in result["output"]
+        assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_unnamed_local_engine_stays_default(self, tmp_path, monkeypatch):
+        """The packaged Chromium is private per cache key — no task-scoped rename, no preamble."""
+        result = self._run(tmp_path, monkeypatch, session="",
+                           task_id="0f1e2d3c4b5a6f7d8e9f0011", echo_name=True)
+        assert result["success"] is True
+        assert "name:unset" in result["output"]
+        assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_task_scoped_session_name_sanitizes(self):
+        assert bu_cli._task_scoped_session_name("a:b/c d!e") == "task-abcde"
+        assert bu_cli._task_scoped_session_name("0f1e2d3c4b5a6f7d8e9f") == "task-0f1e2d3c4b5a"
+        assert bu_cli._task_scoped_session_name("---") == ""
+        assert bu_cli._SESSION_RE.match(bu_cli._task_scoped_session_name("0f1e2d3c4b5a6f7d8e9f"))
 
     def test_named_provider_browser_skips_preamble(self, tmp_path, monkeypatch):
         """Per-name provider browsers are private — preamble would leak a tab."""
