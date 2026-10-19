@@ -278,7 +278,19 @@ class GatewayProfileReconcileMixin:
                 logger.info("[MULTIPLEX] Now serving profile '%s' (%s adapter(s) connected; %s)", name, connected, reason)
                 result["added"].append(name)
             else:
-                logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
+                # Already-connected adapters were skipped above, so a zero-adapter rescan stored
+                # the new config without rebinding anything: the live adapters keep their
+                # pre-change settings until the profile is re-served (#141595).
+                live_map = (getattr(self, "_profile_adapters", None) or {}).get(name) or {}
+                if connected == 0 and live_map:
+                    logger.warning(
+                        "[MULTIPLEX] Re-scanned profile '%s' after config/.env change, but its %d "
+                        "already-connected adapter(s) (%s) keep their pre-change settings — re-serve "
+                        "the profile or restart the gateway for the change to take effect",
+                        name, len(live_map), ", ".join(sorted(p.value for p in live_map)),
+                    )
+                else:
+                    logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
                 result["rescanned"].append(name)
         if config_parked:
             added = [name for name in added if name not in config_parked]
