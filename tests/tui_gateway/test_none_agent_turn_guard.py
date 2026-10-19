@@ -66,7 +66,11 @@ def test_turn_without_agent_is_refused_with_retryable_frame(monkeypatch, tmp_pat
     assert len(frames) == 1
     assert frames[0]["status"] == "error" and frames[0]["recoverable"] is True
     assert frames[0]["error"] == AGENT_BUILD_ABANDONED
-    assert frames[0]["error_surface"] == {"layer": "runtime", "code": "agent_init_failed", "retryable": True}
+    # captured_at (the refusal moment, #141348) rides along on the surface.
+    assert frames[0]["error_surface"]["layer"] == "runtime"
+    assert frames[0]["error_surface"]["code"] == "agent_init_failed"
+    assert frames[0]["error_surface"]["retryable"] is True
+    assert isinstance(frames[0]["error_surface"].get("captured_at"), float)
     assert session["running"] is False
     assert session["inflight_turn"]["status"] == "error"  # retained for session.resume
 

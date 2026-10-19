@@ -98,6 +98,11 @@ export interface ErrorSurface {
    *  `resets_at` body field on a 429). Rendered as "Limit resets at HH:mm" next
    *  to Retry. Absent when the provider named no reset or on older backends. */
   resetsAt?: number
+  /** Epoch seconds when the backend classified this failure — the moment the
+   *  turn failed. Beats copy/render time in the error-details blob, so a card
+   *  reopened hours later still shows the original incident time (#141348).
+   *  Absent on older backends; locally-synthesized surfaces fill it in. */
+  capturedAt?: number
 }
 
 /** Validate a wire payload into an ErrorSurface, or null when absent/garbled. */
@@ -109,6 +114,7 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
   const raw = value as {
     api_key_env?: unknown
     auth_kind?: unknown
+    captured_at?: unknown
     code?: unknown
     layer?: unknown
     message?: unknown
@@ -135,6 +141,9 @@ export function parseErrorSurface(value: unknown): ErrorSurface | null {
     ...(typeof raw.provider_label === 'string' && raw.provider_label ? { providerLabel: raw.provider_label } : {}),
     ...(typeof raw.api_key_env === 'string' && raw.api_key_env ? { apiKeyEnv: raw.api_key_env } : {}),
     ...(typeof raw.message === 'string' && raw.message.trim() ? { message: raw.message.trim() } : {}),
+    ...(typeof raw.captured_at === 'number' && Number.isFinite(raw.captured_at) && raw.captured_at > 0
+      ? { capturedAt: raw.captured_at }
+      : {}),
     ...(typeof raw.resets_at === 'number' && Number.isFinite(raw.resets_at) && raw.resets_at > 0
       ? { resetsAt: raw.resets_at }
       : {})
@@ -322,7 +331,9 @@ export function formatErrorDiagnostics(input: {
 
   const lines = [
     '── Hermes error details ──',
-    `time: ${new Date().toISOString()}`,
+    // The turn's failure moment when the backend named it (#141348); copy time
+    // is a last resort for older backends that never sent `captured_at`.
+    `time: ${new Date((input.surface?.capturedAt ?? Date.now() / 1000) * 1000).toISOString()}`,
     input.surface ? `layer: ${input.surface.layer}` : null,
     input.surface ? `code: ${input.surface.code}` : null,
     input.surface ? `retryable: ${input.surface.retryable}` : null,

@@ -15,6 +15,7 @@ string sniffing when absent or partial.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,9 @@ def _surface(layer: str, code: str, retryable: bool, provider: str = "", model: 
     # Identity captured at classification time, so clients report the session
     # that actually failed — not whatever the composer points at later.
     identity = {k: v for k, v in (("provider", provider), ("model", model)) if v}
-    surface = {"layer": layer, "code": code, "retryable": bool(retryable), **identity}
+    # Same for the moment itself: the client stamps its error-details blob
+    # with this instead of its own copy/render time (#141348).
+    surface = {"layer": layer, "code": code, "retryable": bool(retryable), "captured_at": time.time(), **identity}
     if provider:
         # Clients name the failing provider in the card copy ("OpenCode Go did
         # not answer…"), not by its config slug.

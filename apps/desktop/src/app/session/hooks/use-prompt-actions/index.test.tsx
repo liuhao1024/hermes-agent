@@ -5612,7 +5612,10 @@ describe('usePromptActions live-owner refusal (#106217)', () => {
     const bubble = (latest?.messages as { error?: string; errorSurface?: Record<string, unknown> }[]).at(-1)
 
     expect(bubble?.error).toBeTruthy()
-    expect(bubble?.errorSurface).toEqual({ layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false })
+    // capturedAt rides along too (the local-clock failure moment, #141348).
+    expect(bubble?.errorSurface).toEqual(
+      expect.objectContaining({ layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false })
+    )
     // Not a stale-runtime symptom: no resume/re-mint attempt hides the refusal.
     expect(requestGateway.mock.calls.map(c => c[0])).toEqual(['prompt.submit'])
   })

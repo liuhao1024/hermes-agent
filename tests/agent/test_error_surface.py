@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agent.error_surface import (
@@ -44,7 +46,12 @@ def test_result_auth_reasons_map_to_auth_layer():
     # Both auth reasons are non-retryable, matching classify_api_error's own
     # verdict (a bare retry replays the same rejected credential).
     surface = build_error_surface_from_result(_failed_result("auth"))
-    assert surface == {"layer": LAYER_AUTH, "code": "auth", "retryable": False}
+    assert surface == {
+        "layer": LAYER_AUTH,
+        "code": "auth",
+        "retryable": False,
+        "captured_at": pytest.approx(time.time(), abs=10),
+    }
 
     surface = build_error_surface_from_result(_failed_result("auth_permanent"))
     assert surface["layer"] == LAYER_AUTH
@@ -89,7 +96,12 @@ def test_result_billing_block_wins():
 
 def test_result_billing_reason_without_block():
     surface = build_error_surface_from_result(_failed_result("billing"))
-    assert surface == {"layer": LAYER_BILLING, "code": "billing", "retryable": False}
+    assert surface == {
+        "layer": LAYER_BILLING,
+        "code": "billing",
+        "retryable": False,
+        "captured_at": pytest.approx(time.time(), abs=10),
+    }
 
 
 def test_result_provider_default_for_classified_reasons():
@@ -167,7 +179,12 @@ def test_result_stream_drop_text_maps_to_streaming():
 
 def test_result_unclassified_failure_defaults_to_provider_unknown():
     surface = build_error_surface_from_result(_failed_result(error="something odd"))
-    assert surface == {"layer": LAYER_PROVIDER, "code": "unknown", "retryable": True}
+    assert surface == {
+        "layer": LAYER_PROVIDER,
+        "code": "unknown",
+        "retryable": True,
+        "captured_at": pytest.approx(time.time(), abs=10),
+    }
 
 
 def test_result_disk_full_wins_over_reason():
@@ -221,6 +238,7 @@ def test_anthropic_usage_limit_routes_to_billing_recovery():
         "layer": LAYER_BILLING,
         "code": "billing",
         "retryable": False,
+        "captured_at": pytest.approx(time.time(), abs=10),
         "provider": "anthropic",
         "provider_label": "Anthropic",
         "model": "claude-opus-5",
@@ -233,6 +251,20 @@ def test_exception_auth_status_routes_to_auth_layer():
 
     surface = build_error_surface_from_exception(FakeAuthError("invalid api key"))
     assert surface["layer"] == LAYER_AUTH
+
+
+def test_every_surface_stamps_the_classification_moment():
+    """`captured_at` is what clients stamp as the failure time in their
+    error-details blob (#141348) — without it they fall back to copy/render
+    time, and a card reopened hours later looks like a fresh incident."""
+    before = time.time()
+    from_result = build_error_surface_from_result(_failed_result("rate_limit"))
+    from_exception = build_error_surface_from_exception(KeyError("history"))
+    after = time.time()
+
+    for surface in (from_result, from_exception):
+        assert isinstance(surface["captured_at"], float)
+        assert before <= surface["captured_at"] <= after
 
 
 def test_exception_never_raises_on_weird_input():

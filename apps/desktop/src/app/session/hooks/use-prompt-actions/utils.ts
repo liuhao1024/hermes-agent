@@ -331,17 +331,21 @@ function gatewayReason(error: unknown): unknown {
 // deterministic: drop Retry, offer a new session), or the gateway owner is mid-turn and could not
 // queue the send (#140385, transient: Retry once the turn ends). Empty for any other error.
 export function ownershipErrorSurface(error: unknown): { errorSurface?: ErrorSurface } {
+  // These are synthesized locally (no backend descriptor), so the failure
+  // moment is now — the card must not stamp its copy time instead (#141348).
+  const capturedAt = Math.floor(Date.now() / 1000)
+
   if (isSessionNotOwnedError(error)) {
-    return { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }
+    return { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false, capturedAt } }
   }
 
   if (gatewayReason(error) === 'SESSION_OWNER_UNCONFIRMED') {
     // The owner may already hold the send: a Retry would run a second copy.
-    return { errorSurface: { layer: 'gateway', code: 'SESSION_OWNER_UNCONFIRMED', retryable: false } }
+    return { errorSurface: { layer: 'gateway', code: 'SESSION_OWNER_UNCONFIRMED', retryable: false, capturedAt } }
   }
 
   return isSessionOwnerBusyError(error)
-    ? { errorSurface: { layer: 'gateway', code: 'SESSION_OWNER_BUSY', retryable: true } }
+    ? { errorSurface: { layer: 'gateway', code: 'SESSION_OWNER_BUSY', retryable: true, capturedAt } }
     : {}
 }
 

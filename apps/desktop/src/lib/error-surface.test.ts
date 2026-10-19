@@ -57,6 +57,14 @@ describe('parseErrorSurface', () => {
     // Absent identity yields no keys, not empty strings.
     expect(parseErrorSurface({ layer: 'provider', code: 'x', retryable: true })?.provider).toBeUndefined()
   })
+
+  it('carries the classification moment when present, ignoring garbage', () => {
+    expect(parseErrorSurface({ layer: 'gateway', code: 'loop_error', retryable: true, captured_at: 1762852635 })?.capturedAt).toBe(1762852635)
+    // Absent/non-positive/non-numeric values yield no key, not a zero.
+    expect(parseErrorSurface({ layer: 'gateway', code: 'x', retryable: true })?.capturedAt).toBeUndefined()
+    expect(parseErrorSurface({ layer: 'gateway', code: 'x', retryable: true, captured_at: 0 })?.capturedAt).toBeUndefined()
+    expect(parseErrorSurface({ layer: 'gateway', code: 'x', retryable: true, captured_at: 'soon' as unknown })?.capturedAt).toBeUndefined()
+  })
 })
 
 describe('formatErrorDiagnostics', () => {
@@ -79,6 +87,30 @@ describe('formatErrorDiagnostics', () => {
     expect(text).not.toContain('layer:')
     expect(text).not.toContain('model:')
     expect(text.split('\n').every(line => line.trim().length > 0)).toBe(true)
+  })
+
+  it('stamps the failure moment from the descriptor, not copy time', () => {
+    // #141348: reopening a stale card hours later must keep showing the
+    // original incident time, so `time:` follows the descriptor's captured
+    // moment instead of Date.now() at copy/render time.
+    const failedAt = 1762852635
+
+    const text = formatErrorDiagnostics({
+      errorText: 'boom',
+      surface: { layer: 'gateway', code: 'SESSION_OWNER_BUSY', retryable: true, capturedAt: failedAt }
+    })
+
+    expect(text).toContain(`time: ${new Date(failedAt * 1000).toISOString()}`)
+  })
+
+  it('falls back to copy time for older backends without a captured moment', () => {
+    const before = Date.now()
+    const text = formatErrorDiagnostics({ errorText: 'boom' })
+    const stamped = text.match(/^time: (\S+)$/m)?.[1]
+
+    // Still a valid ISO timestamp line, just the local clock's.
+    expect(stamped).toBeDefined()
+    expect(new Date(stamped!).getTime()).toBeGreaterThanOrEqual(before)
   })
 })
 

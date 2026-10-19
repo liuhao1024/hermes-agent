@@ -168,9 +168,11 @@ def _admit_prompt_turn(
         # thread with ``running`` still True — the prompt vanished and the session stayed "busy" (#111531).
         reason = session.get("agent_error") or AGENT_MISSING_FOR_TURN
         logger.info("Refusing turn for session %s: no agent attached (%s)", session.get("session_key") or sid, reason)
+        import time as _time
         _emit_terminal_turn_error(
             sid, session, reason,
-            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True,
+                           "captured_at": _time.time()})
         return None
     return images, agent
 

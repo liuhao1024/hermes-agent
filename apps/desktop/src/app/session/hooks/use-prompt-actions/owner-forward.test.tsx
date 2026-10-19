@@ -100,7 +100,9 @@ describe('usePromptActions gateway-owner queue (#140385)', () => {
 
     expect(await handle!.submitText('continue here')).toBe(false)
     const bubble = (latest?.messages as { errorSurface?: Record<string, unknown> }[]).at(-1)
-    expect(bubble?.errorSurface).toEqual({ layer: 'gateway', code: 'SESSION_OWNER_BUSY', retryable: true })
+    expect(bubble?.errorSurface).toEqual(
+      expect.objectContaining({ layer: 'gateway', code: 'SESSION_OWNER_BUSY', retryable: true })
+    )
   })
 
   it('turns an unconfirmed forward into a card without Retry: the owner may already hold it', async () => {
@@ -131,7 +133,9 @@ describe('usePromptActions gateway-owner queue (#140385)', () => {
 
     expect(await handle!.submitText('continue here')).toBe(false)
     const bubble = (latest?.messages as { errorSurface?: ErrorSurface }[]).at(-1)
-    expect(bubble?.errorSurface).toEqual({ layer: 'gateway', code: 'SESSION_OWNER_UNCONFIRMED', retryable: false })
+    expect(bubble?.errorSurface).toEqual(
+      expect.objectContaining({ layer: 'gateway', code: 'SESSION_OWNER_UNCONFIRMED', retryable: false })
+    )
     expect(errorRecoveryPlan(bubble?.errorSurface).retry).toBe(false)
   })
 
