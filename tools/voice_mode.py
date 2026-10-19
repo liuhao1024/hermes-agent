@@ -1090,9 +1090,19 @@ def _system_player_candidates(file_path: str) -> list[list[str]]:
     if ps_cmd:
         players.append(ps_cmd)
     players.append(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file_path])
-    if system == "Linux":
+    if system == "Linux" and file_path.lower().endswith(".wav"):
+        # aplay only plays PCM/WAV; fed MP3/OGG bytes it emits full-scale
+        # static (#141320). Compressed formats are ffplay's job.
         players.append(["aplay", "-q", file_path])
     return players
+
+
+def _playback_was_interrupted(proc) -> bool:
+    """True when stop_playback() already cleared ``proc`` mid-wait: the player was
+    killed by an interrupt (barge-in/Ctrl+B), not by a player failure. The exit code
+    alone can't tell the two apart — a terminated ffplay exits non-zero too (#141320)."""
+    with _playback_lock:
+        return proc is not None and _active_playback is not proc
 
 
 def _run_system_player(cmd: list[str]) -> bool:
@@ -1108,6 +1118,11 @@ def _run_system_player(cmd: list[str]) -> bool:
         proc.wait(timeout=300)
         rc = proc.returncode
         if rc == 0:
+            return True
+        if _playback_was_interrupted(proc):
+            # The user cut this playback off; falling through would start the
+            # next player on the same file (aplay replaying MP3 bytes as static).
+            logger.debug("System player %s interrupted by stop_playback", cmd[0])
             return True
         # e.g. WSL ffplay/aplay with no audio device — fall through to the next player.
         logger.debug("System player %s exited with code %d, trying next", cmd[0], rc)

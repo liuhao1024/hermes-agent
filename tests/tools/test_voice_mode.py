@@ -896,6 +896,62 @@ class TestPlaybackInterrupt:
         with _playback_lock:
             assert vm._active_playback is None
 
+    def test_aplay_is_not_a_candidate_for_non_wav(self):
+        """aplay is a raw PCM player: handed MP3/OGG bytes it plays them as
+        full-scale static (#141320). Only .wav may route to it."""
+        from tools import voice_mode as vm
+
+        fake_platform = MagicMock(system=lambda: "Linux")
+        with patch.object(vm, "platform", fake_platform), \
+             patch.object(vm, "is_wsl", return_value=False):
+            mp3_players = vm._system_player_candidates("/tmp/hermes-tts-sentence.mp3")
+            wav_players = vm._system_player_candidates("/tmp/hermes-beep.wav")
+
+        assert [c[0] for c in mp3_players] == ["ffplay"]
+        assert [c[0] for c in wav_players] == ["ffplay", "aplay"]
+
+    def test_interrupted_player_does_not_fall_through(self, tmp_path):
+        """stop_playback() kills ffplay mid-file, so it exits non-zero — the
+        player loop must treat that as an interrupt, not a player failure, and
+        must not start the next candidate on the file the user just cut off
+        (#141320: aplay replaying MP3 bytes as static)."""
+        from tools import voice_mode as vm
+
+        mp3 = tmp_path / "sentence.mp3"
+        mp3.write_bytes(b"ID3\x03fake-mp3-payload")
+
+        captured_cmds = []
+
+        def _fake_popen(cmd, **kwargs):
+            captured_cmds.append(cmd[0])
+            m = MagicMock()
+            if cmd[0] == "ffplay":
+
+                def _interrupted_wait(timeout=None):
+                    # Real barge-in ordering: stop_playback() clears the active
+                    # proc, then the terminated player dies non-zero.
+                    vm.stop_playback()
+                    m.returncode = 1
+                    return 1
+
+                m.wait = _interrupted_wait
+            else:
+                m.returncode = 0
+                m.wait = MagicMock(return_value=0)
+            return m
+
+        fake_platform = MagicMock(system=lambda: "Linux")
+        with patch.object(vm, "platform", fake_platform), \
+             patch.object(vm, "is_wsl", return_value=False), \
+             patch.object(vm, "_import_audio", side_effect=ImportError), \
+             patch.object(vm.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch.object(vm.subprocess, "Popen", side_effect=_fake_popen):
+            result = vm.play_audio_file(str(mp3))
+
+        assert result is True, "An interrupted playback is not a failure"
+        assert captured_cmds == ["ffplay"], (
+            f"Must not start another player after an interrupt: {captured_cmds}")
+
 # ============================================================================
 # Continuous mode flow
 # ============================================================================
