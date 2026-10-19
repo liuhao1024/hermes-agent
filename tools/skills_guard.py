@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-SCANNER_VERSION = "skills-guard-v10"
+SCANNER_VERSION = "skills-guard-v11"
 
 # NVIDIA-verified skills each ship a signed `skill.oms.sig` + governance `skill-card.md`.
 TRUSTED_REPOS = {"openai/skills", "anthropics/skills", "huggingface/skills", "NVIDIA/skills"}
@@ -199,9 +199,12 @@ THREAT_PATTERNS = [
      "dump_all_env", "high", "exfiltration", "dumps all environment variables"),
     # Bare `os.environ` (dump/iteration) is suspicious; ANY `.get("<name>")` form is exempt — plain config
     # reads, with secret-shaped names scored medium by python_environ_get_secret below (a blanket high here
-    # would swamp that). `^[^#\n]*` skips lines with a '#' anywhere before it (full-line or inline comment);
-    # scan_file()'s docstring pre-filter skips triple-quoted prose.
-    (r'^[^#\n]*os\.environ\b(?!\s*\.get\s*\()',
+    # would swamp that). Passing the mapping along is the same tier: `dict(os.environ, X=...)` test
+    # scaffolding builds a child environment from it, `.copy()` clones it. The dump/iteration shapes —
+    # `dump = dict(os.environ)`, `for k in os.environ:`, `.items()`, `os.environ[...]` — keep their
+    # delimiter/attribute boundary and still match. `^[^#\n]*` skips lines with a '#' anywhere before it
+    # (full-line or inline comment); scan_file()'s docstring pre-filter skips triple-quoted prose.
+    (r'^[^#\n]*os\.environ\b(?!\s*\.get\s*\()(?!\s*,)(?!\s*\.copy\s*\()',
      "python_os_environ", "high", "exfiltration", "accesses os.environ outside comments/docstrings (potential env dump)"),
     (r'os\.environ\s*\.get\s*\(\s*["\'][^"\']*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)',
      "python_environ_get_secret", "medium", "exfiltration", "reads secret via os.environ.get() (normal API-key access; informational)"),
@@ -584,6 +587,34 @@ def _demote_inert_path_reference(pid: str, severity: str, description: str, line
     return severity, description
 
 
+# ── Quoted-string injection literals (#141755) ──
+# A prompt-injection phrase inside a CODE file's string literal (`INJECTION = "ignore all previous
+# instructions"` — the sample a detector's own tests assert on) is data the code carries, not prose the
+# agent reads; Markdown prose keeps full severity. Sample and attack share the shape and are not
+# separable statically, so the tier drops critical → high — a confirmable caution, never a silent pass —
+# mirroring agent_config_contract's "never critical" precedent. One such false critical is an
+# unoverridable dangerous verdict on a community source, hard-blocking well-structured skills.
+_INJECTION_CRITICAL_IDS = frozenset({"prompt_injection_ignore", "sys_prompt_override", "disregard_rules",
+                                     "bypass_restrictions", "translate_execute", "jailbreak_dan",
+                                     "jailbreak_dev_mode", "remove_filters"})
+_LITERAL_SUFFIXES = frozenset({'.py', '.js', '.ts', '.rb', '.pl', '.r', '.jl', '.php'})
+_LITERAL_SPAN_RE = re.compile(r""""[^"\n]*"|'[^'\n]*'""")
+
+
+def _in_quoted_literal(line: str, start: int) -> bool:
+    """True when offset *start* falls inside a same-line quoted string literal."""
+    return any(m.start() <= start < m.end() for m in _LITERAL_SPAN_RE.finditer(line))
+
+
+def _demote_quoted_injection(pid: str, severity: str, description: str, line: str, match_start: int,
+                             suffix: str) -> tuple[str, str]:
+    """``(severity, description)`` for an injection match, lowered one tier inside a code string literal."""
+    if (severity == "critical" and pid in _INJECTION_CRITICAL_IDS
+            and suffix in _LITERAL_SUFFIXES and _in_quoted_literal(line, match_start)):
+        return "high", f"{description} (in a string literal — sample/fixture shape; confirm before installing)"
+    return severity, description
+
+
 # Structural limits: file count; total KB (5MB, informational only — large skills don't block); single-file KB.
 MAX_FILE_COUNT, MAX_TOTAL_SIZE_KB, MAX_SINGLE_FILE_KB = 50, 5120, 256
 
@@ -708,10 +739,13 @@ def scan_file(file_path: Path, rel_path: str = "") -> list[Finding]:
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
             scan_line = traversal_lines[i - 1] if pid in _PATH_TRAVERSAL_PATTERN_IDS else line
-            if i not in docstring_lines and pattern.search(scan_line):
+            m = pattern.search(scan_line)
+            if i not in docstring_lines and m:
                 text = line.strip()
                 line_severity, line_description = _demote_inert_path_reference(
                     pid, severity, description, line, lines[owners[i - 1]], suffix)
+                line_severity, line_description = _demote_quoted_injection(
+                    pid, line_severity, line_description, line, m.start(), suffix)
                 findings.append(Finding(pid, line_severity, category, rel_path, i,
                                         text if len(text) <= 120 else text[:117] + "...", line_description))
     for i, line in enumerate(lines, start=1):
