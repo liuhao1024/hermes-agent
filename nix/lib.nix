@@ -217,6 +217,12 @@ let
     # original semver overrides (EOVERRIDE). Drop them only from this offline
     # build manifest; the hook restores the repository manifest afterwards.
     package = builtins.removeAttrs rootPackageJson [ "overrides" ];
+    # importNpmLock reads the lockfile at evaluation time, and a
+    # fileset.toSource path is name-only under read-only evaluation
+    # (`nix flake check --no-build`), so read it from the real flake
+    # source instead. npmRoot still carries the filtered fileset for the
+    # build-time hook.
+    packageLock = builtins.fromJSON (builtins.readFile (repoRoot + "/package-lock.json"));
   };
 
   # Build a per-package npm source: workspace resolution files + the
