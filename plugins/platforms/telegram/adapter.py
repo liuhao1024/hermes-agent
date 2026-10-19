@@ -4357,16 +4357,16 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Handle choice picker button taps (cp:<index>)."""
         state = self._choice_picker_state.get(chat_id)
         if not state:
-            await query.answer(text=_toast("platform.telegram.picker.expired_rerun"))
+            await self._picker_toast(query, "platform.telegram.picker.expired_rerun")
             return
         try:
             choice = state["choices"][int(data[3:])]
         except (ValueError, IndexError):
-            await query.answer(text=_toast("platform.telegram.picker.invalid_selection"))
+            await self._picker_toast(query, "platform.telegram.picker.invalid_selection")
             return
         callback = state.get("on_choice_selected")
         if not callback:
-            await query.answer(text=_toast("platform.telegram.picker.expired"))
+            await self._picker_toast(query, "platform.telegram.picker.expired")
             return
         try:
             result_text = await callback(chat_id, str(choice.get("value") or ""))
@@ -4374,8 +4374,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             logger.error("Choice picker selection failed: %s", exc)
             result_text = t("platform.telegram.picker.apply_error", error=str(exc))
         await self._edit_result_text(query, result_text)
-        await query.answer()
         self._choice_picker_state.pop(chat_id, None)
+        await self._answer_quiet(query)
 
     _MODEL_PAGE_SIZE = 8
 
@@ -4451,7 +4451,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
     async def _picker_edit(self, query, text_md: str, keyboard) -> None:
         """Re-render the picker message in place (MarkdownV2) and ack the tap."""
         await query.edit_message_text(text=self.format_message(text_md), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
-        await query.answer()
+        await self._answer_quiet(query)
 
     async def _picker_show_models(self, query, state: dict, page: int) -> None:
         """Render the model page for the provider currently selected in ``state``."""
@@ -4492,15 +4492,15 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         try:
             idx = int(raw_idx)
         except ValueError:
-            await query.answer(text=_toast("platform.telegram.picker.invalid_selection"))
+            await self._picker_toast(query, "platform.telegram.picker.invalid_selection")
             return None
         model_list = state.get("model_list", [])
         if idx < 0 or idx >= len(model_list):
-            await query.answer(text=_toast("platform.telegram.picker.invalid_model_index"))
+            await self._picker_toast(query, "platform.telegram.picker.invalid_model_index")
             return None
         callback = state.get("on_model_selected")
         if not callback:
-            await query.answer(text=_toast("platform.telegram.picker.expired"))
+            await self._picker_toast(query, "platform.telegram.picker.expired")
             return None
         return idx, model_list[idx], state.get("selected_provider", ""), callback
 
@@ -4514,29 +4514,30 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             result_text = t("platform.telegram.picker.switch_error", error=str(exc))
             switch_failed = True
         await self._edit_result_text(query, result_text)
-        await query.answer(text=_toast("platform.telegram.picker.switch_failed" if switch_failed else "platform.telegram.picker.switched"))
         self._model_picker_state.pop(chat_id, None)
+        # The result text above is the real feedback; a refused ack (stale tap) must not fail the switch.
+        with contextlib.suppress(Exception):
+            await query.answer(text=_toast("platform.telegram.picker.switch_failed" if switch_failed else "platform.telegram.picker.switched"))
 
-    @staticmethod
-    async def _parse_page(query, raw: str) -> Optional[int]:
+    async def _parse_page(self, query, raw: str) -> Optional[int]:
         try:
             return int(raw)
         except ValueError:
-            await query.answer(text=_toast("platform.telegram.picker.invalid_page"))
+            await self._picker_toast(query, "platform.telegram.picker.invalid_page")
             return None
 
     async def _handle_model_picker_callback(self, query, data: str, chat_id: str) -> None:
         """Handle model picker callbacks (mp:/mpg:/mpv:/mm:/mc:/mb/mx/mg:)."""
         state = self._model_picker_state.get(chat_id)
         if not state:
-            await query.answer(text=_toast("platform.telegram.picker.expired_model"))
+            await self._picker_toast(query, "platform.telegram.picker.expired_model")
             return
         get_label = self._provider_get_label()
         if data.startswith("mp:"):  # provider selected: show model buttons (page 0)
             provider_slug = data[3:]
             provider = next((p for p in state["providers"] if p["slug"] == provider_slug), None)
             if not provider:
-                await query.answer(text=_toast("platform.telegram.picker.provider_not_found"))
+                await self._picker_toast(query, "platform.telegram.picker.provider_not_found")
                 return
             state["selected_provider"] = provider_slug
             state["selected_provider_name"] = provider.get("name", provider_slug)
@@ -4573,7 +4574,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
                 await query.edit_message_text(
                     text=self.format_message(f"⚠ *{warning.title}*\n\n{warning.message}"),
                     parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
-                await query.answer(text=_toast("platform.telegram.picker.confirm_selection"))
+                with contextlib.suppress(Exception):  # the confirm card above is the feedback
+                    await query.answer(text=_toast("platform.telegram.picker.confirm_selection"))
                 return
             await self._picker_switch(query, chat_id, model_id, provider_slug, callback)
         elif data.startswith("mpg:"):  # provider group selected: show member providers
@@ -4586,7 +4588,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             by_slug = {p["slug"]: p for p in state["providers"]}
             members = [by_slug[m] for m in member_slugs if m in by_slug]
             if not members:
-                await query.answer(text=_toast("platform.telegram.picker.group_not_found"))
+                await self._picker_toast(query, "platform.telegram.picker.group_not_found")
                 return
             rows = self._rows_of_two([self._provider_button(p) for p in members])
             rows.append(self._picker_back_cancel_row())
@@ -4601,9 +4603,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         elif data == "mx":
             self._model_picker_state.pop(chat_id, None)
             await query.edit_message_text(text=t("platform.telegram.picker.cancelled"), reply_markup=None)
-            await query.answer()
+            await self._answer_quiet(query)
         else:
-            await query.answer()  # e.g. page-counter button "mx:noop"
+            await self._answer_quiet(query)  # e.g. page-counter button "mx:noop"
 
     async def _notify_clarify_expired(self, query, user_display: str) -> None:
         """Tell the user a clarify tap arrived too late (entry evicted or gateway restarted) — otherwise
@@ -4623,6 +4625,28 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """MarkdownV2 edit with the keyboard removed; failures ignored (non-fatal)."""
         with contextlib.suppress(Exception):
             await query.edit_message_text(text=self.format_message(text_md), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+
+    async def _picker_toast(self, query, key: str) -> None:
+        """Toast a picker tap. Telegram refuses acks on taps past its callback answer window
+        ("Query is too old"), so a refused toast is re-delivered as a card edit — a tap must
+        never end in silence (#141587). The keyboard survives: edits are plain bot API calls,
+        so the card itself stays usable when its acks no longer are."""
+        text = _toast(key)
+        try:
+            await query.answer(text=text)
+        except Exception:
+            logger.debug("Picker toast refused (stale tap), falling back to a card edit", exc_info=True)
+            with contextlib.suppress(Exception):
+                await query.edit_message_text(
+                    text=self.format_message(text), parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=getattr(getattr(query, "message", None), "reply_markup", None))
+
+    @staticmethod
+    async def _answer_quiet(query) -> None:
+        """Best-effort bare ack: the card edit right before it already delivered this tap's
+        effect, so a refused ack must not abort the rest of the flow (#141587)."""
+        with contextlib.suppress(Exception):
+            await query.answer()
 
     async def _handle_inline_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Answer ``@botname <query>`` with a searchable command/skill picker (the ``/`` menu is capped at
