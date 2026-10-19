@@ -657,6 +657,34 @@ def test_runtime_provenance_is_independent_of_aliases_and_virtual_env(child_env,
 
 
 @pytest.mark.usefixtures("child_env")
+def test_symlinked_install_spelling_is_stripped_as_owned(tmp_path, monkeypatch):
+    """A generation site-packages reached through a differently-spelled symlink of its
+    install tree is the same physical directory; a child of another Python version
+    must not load the gateway's compiled packages through it (#141767)."""
+    from pm.environments import runtime_facts_path
+    physical_state = tmp_path / "physical/state/environments/gen1"
+    pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site = physical_state / f"lib/{pyver}/site-packages"
+    site.mkdir(parents=True)
+    (physical_state / "pyvenv.cfg").write_text("version = 3.14\n", encoding="utf-8")
+    aliased = tmp_path / "aliased-home"
+    _make_directory_link(aliased, tmp_path / "physical")
+    monkeypatch.setattr("pm.environments.install_state_dir", lambda repo: tmp_path / "physical/state")
+    facts = runtime_facts_path(Path(__file__).resolve().parents[2])
+    facts.parent.mkdir(parents=True, exist_ok=True)
+    facts.write_text(json.dumps({"packages": {"venv": {"environment": str(physical_state)}}}),
+                     encoding="utf-8")
+    monkeypatch.setattr(local, "_in_venv", False)
+    monkeypatch.setattr(local, "_hermes_site_packages", None)
+    monkeypatch.setattr(local, "_hermes_repo_root_aliases", (tmp_path / "unrelated-alias",))
+    leaked = aliased / "state/environments/gen1" / f"lib/{pyver}/site-packages"
+    user_site = tmp_path / "user-site"
+    result = local._sanitize_subprocess_env(
+        {"PYTHONPATH": os.pathsep.join([str(leaked), str(user_site)])})
+    assert result["PYTHONPATH"] == str(user_site)
+
+
+@pytest.mark.usefixtures("child_env")
 def test_sealed_payload_venv_is_runtime_provenance_without_facts(tmp_path, monkeypatch):
     """A sealed payload boots its store interpreter (not a venv) on its shipped venv
     before PM commits a generation; that venv's site-packages must never reach a child."""

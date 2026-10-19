@@ -137,10 +137,23 @@ def _strip_hermes_owned_pythonpath_and_runtime_markers(env: dict) -> None:
         env.pop(_marker, None)
 
 
+def _resolved_or_none(path: Path) -> Path | None:
+    """Resolved spelling, or ``None`` when resolution itself fails (symlink loop,
+    unreadable component). Non-strict on purpose: a not-yet-built alias still compares."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
 def _strip_hermes_owned_pythonpath(env: dict) -> None:
-    """Remove Hermes-owned PYTHONPATH entries: only exact matches of the repo root
-    (any launcher spelling) and runtime site-packages — never descendants, which are
-    user paths. Empty components (= cwd) and everything else are preserved.
+    """Remove Hermes-owned PYTHONPATH entries: exact matches of the repo root (any
+    launcher spelling) and runtime site-packages — never descendants, which are user
+    paths — plus aliases of those same physical directories reached through a
+    symlinked/junctioned home or install tree (#141767: a differently-spelled
+    generation site-packages still loads the gateway's compiled packages into a
+    child of another Python version). Empty components (= cwd) and everything else
+    are preserved.
 
     Everything else -- user libs, Nix plugin paths, a pythonX.Y/site-packages entry meant for a DIFFERENT
     child version -- is preserved byte-for-byte: ownership is decided by path provenance, never by a
@@ -150,8 +163,16 @@ def _strip_hermes_owned_pythonpath(env: dict) -> None:
     if not pp:
         return
     owned_paths = [*_get_hermes_site_packages(env), *_state()._hermes_repo_root_aliases]
+    owned_resolved = {r for p in owned_paths if (r := _resolved_or_none(p)) is not None}
+
+    def _owned(entry: str) -> bool:
+        if any(_same_path(Path(entry), p) for p in owned_paths):
+            return True
+        resolved = _resolved_or_none(Path(entry))
+        return resolved is not None and resolved in owned_resolved
+
     entries = pp.split(os.pathsep)
-    stripped = [e for e in entries if e and any(_same_path(Path(e), p) for p in owned_paths)]
+    stripped = [e for e in entries if e and _owned(e)]
     kept = [e for e in entries if e not in stripped]
     if kept:
         env["PYTHONPATH"] = os.pathsep.join(kept)
