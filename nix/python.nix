@@ -18,7 +18,14 @@ let
   python = pythonLock.interpreter;
   pythonPackages = python.pkgs;
 
-  workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = pythonSrc; };
+  # uv2nix reads uv.lock/pyproject.toml (and stats workspace members) at
+  # evaluation time. Under read-only evaluation (`nix flake check --no-build`)
+  # a cleanSourceWith path is name-only — the store path is computed but never
+  # realised, so importTOML through it fails with "path ... is not valid" on
+  # any store that hasn't already built the venv. Read workspace metadata from
+  # the real (unfiltered) flake source; the hermes-agent package below still
+  # builds from the filtered pythonSrc.
+  workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./..; };
   hacks = callPackage pyproject-nix.build.hacks { };
 
   overlay = workspace.mkPyprojectOverlay {
@@ -139,6 +146,10 @@ let
           (final: prev: {
             hermes-agent = prev.hermes-agent.overrideAttrs (_old: {
               HERMES_NIX_BUILD = "1";
+              # loadWorkspace now reads metadata from the unfiltered root;
+              # bind the build itself back to the filtered source so
+              # JS/docs/skills edits still don't invalidate the venv.
+              src = pythonSrc;
             });
           })
         ]
