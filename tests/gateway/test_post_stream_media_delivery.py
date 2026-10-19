@@ -113,3 +113,67 @@ async def test_explicit_media_tag_still_delivers_post_stream(tmp_path, monkeypat
     assert str(media_file) in unquote(images_kwargs["images"][0][0])
 
 
+@pytest.mark.asyncio
+async def test_failed_sendresult_notifies_user_post_stream(tmp_path, monkeypatch):
+    """A refused upload (SendResult.success=False) must not be silent: the streamed text
+    already promised the file, so each failed attachment gets the same failure notice
+    the non-streaming path sends (#141585)."""
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "vector.svg")
+    adapter = _adapter()
+    adapter._notify_media_delivery_failure = AsyncMock()
+    adapter.send_document = AsyncMock(return_value=SendResult(success=False, error="rejected"))
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({}),
+        f"Here is the file.\nMEDIA:{media_file}",
+        _event(),
+        adapter,
+    )
+
+    adapter.send_document.assert_awaited_once()
+    adapter._notify_media_delivery_failure.assert_awaited_once()
+    kwargs = adapter._notify_media_delivery_failure.await_args.kwargs
+    assert kwargs["chat_id"] == "C123CHAN"
+    assert kwargs["media_path"] == str(media_file)
+    assert kwargs["is_voice"] is False
+
+
+@pytest.mark.asyncio
+async def test_failed_image_batch_notifies_user_post_stream(tmp_path, monkeypatch):
+    """A failed post-stream image batch gets one failure notice per image, not silence."""
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "chart.png")
+    adapter = _adapter()
+    adapter._notify_media_delivery_failure = AsyncMock()
+    adapter.send_multiple_images = AsyncMock(return_value=SendResult(success=False, error="too large"))
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({}),
+        f"Here is the chart.\nMEDIA:{media_file}",
+        _event(),
+        adapter,
+    )
+
+    adapter.send_multiple_images.assert_awaited_once()
+    adapter._notify_media_delivery_failure.assert_awaited_once()
+    kwargs = adapter._notify_media_delivery_failure.await_args.kwargs
+    assert kwargs["chat_id"] == "C123CHAN"
+    assert kwargs["media_path"] == str(media_file)
+
+
+@pytest.mark.asyncio
+async def test_successful_sendresult_needs_no_notice_post_stream(tmp_path, monkeypatch):
+    """Successful uploads must not grow spurious failure notices."""
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "chart.png")
+    adapter = _adapter()
+    adapter._notify_media_delivery_failure = AsyncMock()
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({}),
+        f"Here is the chart.\nMEDIA:{media_file}",
+        _event(),
+        adapter,
+    )
+
+    adapter._notify_media_delivery_failure.assert_not_awaited()
+
+

@@ -256,20 +256,34 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             if image_paths:
                 try:
                     images = [(f"file://{_quote(p)}", "") for p in image_paths]
-                    await adapter.send_multiple_images(chat_id=chat_id, images=images, metadata=_thread_meta)
+                    result = await adapter.send_multiple_images(chat_id=chat_id, images=images, metadata=_thread_meta)
+                    if not result.success:
+                        # The streamed text already promised the files; silence would be a silent
+                        # drop — same per-attachment notice the non-streaming path sends (#141585).
+                        logger.warning(
+                            "[%s] Post-stream image batch delivery failed: %s", adapter.name, result.error)
+                        for image_path in image_paths:
+                            await adapter._notify_media_delivery_failure(
+                                chat_id=chat_id, media_path=image_path, metadata=_thread_meta)
                 except Exception as e:
                     logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
             for media_path, is_voice in non_image_media:
                 try:
                     ext = Path(media_path).suffix.lower()
                     if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
-                        await adapter.send_voice(
+                        result = await adapter.send_voice(
                             chat_id=chat_id, audio_path=media_path, metadata=_thread_meta, is_voice=is_voice,
                         )
                     elif ext in _VIDEO_EXTS:
-                        await adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=_thread_meta)
+                        result = await adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=_thread_meta)
                     else:
-                        await adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=_thread_meta)
+                        result = await adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=_thread_meta)
+                    if not result.success:
+                        # Parity with the non-streaming path's per-attachment failure notice (#141585).
+                        logger.warning(
+                            "[%s] Post-stream media delivery failed (%s): %s", adapter.name, ext, result.error)
+                        await adapter._notify_media_delivery_failure(
+                            chat_id=chat_id, media_path=media_path, is_voice=is_voice, metadata=_thread_meta)
                 except Exception as e:
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
 
