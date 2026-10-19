@@ -200,6 +200,95 @@ class TestNoninteractiveGitEnv:
             "repo must still be refused"
         )
 
+    @pytest.mark.real_git_transport
+    def test_transport_config_replayed_into_isolated_env(self, tmp_path, monkeypatch):
+        """The user's proxy/TLS backend survives the config isolation (#141301).
+
+        ``GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`` exists to drop hooks/pagers/credential sinks, but
+        on a machine whose only route to github.com IS its own git config (proxy, non-default
+        sslBackend) the same blanking killed every isolated network git call — the stable-channel
+        release ``ls-remote`` died with exit 128 while fetches under the ambient config kept
+        working. Contract: the whitelisted global transport keys are replayed verbatim through
+        the KEY_n channel, while the config files stay /dev/null and non-transport keys —
+        URL-scoped proxies included — do not.
+        """
+        global_config = tmp_path / "gitconfig"
+        global_config.write_text(
+            "[http]\n\tproxy = http://127.0.0.1:9\n\tsslBackend = openssl\n"
+            "\tuserAgent = not-replayed\n"
+            "[http \"https://github.com\"]\n\tproxy = http://127.0.0.1:10\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+        env = noninteractive_git_env()
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull, "isolation itself must stay in place"
+        replayed = [
+            (env[f"GIT_CONFIG_KEY_{idx}"], env[f"GIT_CONFIG_VALUE_{idx}"])
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+            if env[f"GIT_CONFIG_KEY_{idx}"].startswith("http.")
+        ]
+        assert replayed == [
+            ("http.proxy", "http://127.0.0.1:9"),
+            # git canonicalises the variable to lowercase; the replay keeps git's own spelling.
+            ("http.sslbackend", "openssl"),
+        ], "only the whitelisted global transport keys ride the KEY_n channel"
+
+    @pytest.mark.real_git_transport
+    def test_transport_replay_order_matches_gits_effective_view(self, tmp_path, monkeypatch):
+        """A system proxy stays below a global override, exactly as git reads them.
+
+        These keys are last-one-wins; replaying them out of scope order would silently flip
+        which proxy an isolated probe uses. The injected sequence equals git's own view of the
+        same two files, lowest-precedence scope first.
+        """
+        system_config = tmp_path / "system-gitconfig"
+        system_config.write_text("[http]\n\tproxy = http://system-proxy:1\n", encoding="utf-8")
+        global_config = tmp_path / "gitconfig"
+        global_config.write_text("[http]\n\tproxy = http://global-proxy:2\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_config))
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+        env = noninteractive_git_env()
+        injected = [
+            env[f"GIT_CONFIG_VALUE_{idx}"]
+            for idx in range(int(env["GIT_CONFIG_COUNT"]))
+            if env[f"GIT_CONFIG_KEY_{idx}"] == "http.proxy"
+        ]
+        expected = subprocess.run(
+            ["git", "config", "-z", "--get-all", "http.proxy"],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "GIT_CONFIG_SYSTEM": str(system_config),
+                 "GIT_CONFIG_GLOBAL": str(global_config)},
+        ).stdout.split("\0")[:-1]
+
+        assert expected == ["http://system-proxy:1", "http://global-proxy:2"]
+        assert injected == expected
+
+    @pytest.mark.real_git_transport
+    def test_isolated_git_sees_the_users_transport_config(self, tmp_path, monkeypatch):
+        """End-to-end: real git resolves the replayed proxy under the isolated env.
+
+        Proves the KEY_n replay changes git's effective view, not just the env dict: before the
+        replay both queries answered "no such key" (exit 1) under GIT_CONFIG_GLOBAL=/dev/null.
+        """
+        if not shutil.which("git"):
+            pytest.skip("git not installed")
+        global_config = tmp_path / "gitconfig"
+        global_config.write_text(
+            "[http]\n\tproxy = http://127.0.0.1:9\n\tsslBackend = openssl\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+        env = noninteractive_git_env()
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+        for key, value in (("http.proxy", "http://127.0.0.1:9"), ("http.sslBackend", "openssl")):
+            got = subprocess.run(
+                ["git", "config", "--get", key],
+                capture_output=True, text=True, env=env, check=True,
+            ).stdout.strip()
+            assert got == value, f"isolated git lost the user's {key}"
+
     def test_ssh_host_key_prompts_fail_closed(self):
         """core.sshCommand is pinned to BatchMode ssh (#104591).
 

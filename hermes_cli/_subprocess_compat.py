@@ -381,6 +381,68 @@ def _user_safe_directories(base_env: Mapping[str, str]) -> list[str]:
     return values
 
 
+# The user's http transport settings replayed into the isolated internal-git env. Pure transport:
+# these keys choose HOW git reaches the remote (proxy, TLS backend/CA), never WHAT it executes, so
+# replaying them cannot re-enable any hook/pager/credential sink the isolation removed. URL-scoped
+# variants (``http.<url>.*``) are deliberately out: the global settings are what a proxy-restricted
+# machine actually reaches github.com with (#141301). Lowercase throughout: git canonicalises a
+# config key's section and variable to lowercase, and ``--get-regexp`` matches case-sensitively.
+_GIT_TRANSPORT_KEYS_REGEXP = r"^(https?\.proxy|http\.sslbackend|http\.sslcainfo|http\.schannelcheckrevoke)$"
+_transport_config_cache: dict[tuple, list[tuple[str, str]]] = {}
+
+
+def _user_transport_config(base_env: Mapping[str, str]) -> list[tuple[str, str]]:
+    """The user's global http transport settings, in git's own effective order.
+
+    ``GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`` strips the user's proxy and TLS backend along with the
+    hooks/filters that isolation targets, so on a machine whose only route to github.com IS its own
+    git config, every isolated network git call — the stable-channel release ``ls-remote`` probe
+    (#141301) — died with exit 128 (schannel ``CRYPT_E_REVOCATION_OFFLINE``, or a direct connect
+    the firewall drops) while fetches, which run under the ambient config, kept working. Like
+    ``safe.directory``, the values are read under *base_env* (the caller's untouched environment)
+    so an explicit ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM`` still selects the file the user
+    means, best-effort (any failure yields no entries and leaves the caller exactly as it behaved
+    before), and memoised per process on the config-file selector. Order is policy for these
+    last-one-wins keys — a system proxy must stay below a global override exactly as git reads
+    them — so scopes are read lowest-precedence first and every entry is preserved verbatim.
+    """
+    cache_key = _safe_directory_cache_key(base_env)
+    cached = _transport_config_cache.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    env = dict(base_env)
+    # --get-regexp itself must not be derailed by ambient injection or an interactive prompt.
+    for key in list(env):
+        if key == "GIT_CONFIG_PARAMETERS" or key.startswith(_GIT_CONFIG_INJECT_PREFIXES):
+            env.pop(key, None)
+    env.pop("GIT_CONFIG_COUNT", None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    pairs: list[tuple[str, str]] = []
+    for scope in ("--system", "--global"):
+        try:
+            proc = subprocess.run(
+                ["git", "config", scope, "-z", "--get-regexp", _GIT_TRANSPORT_KEYS_REGEXP],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=5, stdin=subprocess.DEVNULL, env=env, check=False,
+                creationflags=windows_hide_flags(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        # -z terminates every record with NUL and each --get-regexp record is "key\nvalue"; the
+        # trailing split field is always empty and is not a config entry.
+        records = proc.stdout.split("\0")
+        if records and records[-1] == "":
+            records.pop()
+        for entry in records:
+            key, _, value = entry.partition("\n")
+            if key:
+                pairs.append((key, value))
+    _transport_config_cache[cache_key] = list(pairs)
+    return pairs
+
+
 def selected_git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """PM's full Git environment, or the original base for system-Git fallback.
 
@@ -482,6 +544,9 @@ def noninteractive_git_env(base: Mapping[str, str] | None = None) -> dict[str, s
     # does for the user's interactive git. Appended last, but the hardening overrides above are
     # distinct keys, so they are unaffected by ordering within safe.directory.
     overrides.extend(("safe.directory", value) for value in safe_directories)
+    # The user's proxy/TLS backend rides the same KEY_n channel so an isolated probe can still
+    # reach the remote at all (#141301); see _user_transport_config for the whitelist's boundary.
+    overrides.extend(_user_transport_config(base if base is not None else os.environ))
     env["GIT_CONFIG_COUNT"] = str(len(overrides))
     for idx, (key, value) in enumerate(overrides):
         env[f"GIT_CONFIG_KEY_{idx}"] = key

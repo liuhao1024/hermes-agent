@@ -472,19 +472,20 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _neutralize_git_safe_directory_read(request, monkeypatch):
-    """Skip the ``git config --get-all safe.directory`` pre-read in ``noninteractive_git_env()``.
+    """Skip the ``git config`` pre-reads in ``noninteractive_git_env()``.
 
     Many tests fake ``subprocess.run``/``Popen`` with a fixed sequence of expected git calls;
-    the pre-read is an extra spawn that would trip them. Tests of the carve-out itself opt in
-    with ``@pytest.mark.real_safe_directory``.
+    each pre-read is an extra spawn that would trip them. Tests of a carve-out itself opt in
+    with ``@pytest.mark.real_safe_directory`` / ``@pytest.mark.real_git_transport``.
     """
-    if request.node.get_closest_marker("real_safe_directory"):
-        return
     try:
         from hermes_cli import _subprocess_compat
     except Exception:
         return
-    monkeypatch.setattr(_subprocess_compat, "_user_safe_directories", lambda base_env: [], raising=False)
+    if not request.node.get_closest_marker("real_safe_directory"):
+        monkeypatch.setattr(_subprocess_compat, "_user_safe_directories", lambda base_env: [], raising=False)
+    if not request.node.get_closest_marker("real_git_transport"):
+        monkeypatch.setattr(_subprocess_compat, "_user_transport_config", lambda base_env: [], raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -1193,6 +1194,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_safe_directory: run the real `git config --get-all safe.directory` pre-read in "
+        "noninteractive_git_env() (autouse fixture otherwise stubs it to no entries).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_git_transport: run the real `git config --get-regexp` http-transport pre-read in "
         "noninteractive_git_env() (autouse fixture otherwise stubs it to no entries).",
     )
     config.addinivalue_line(
