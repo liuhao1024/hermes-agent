@@ -330,6 +330,20 @@ class StreamTransportMixin:
                     and await self._try_frame(self._send_frame("✅", finalize=True),
                                               "Finalize empty stream failed: %s")):
                 self._mark_final_delivered()
+            elif (finalize and is_turn_final and self._has_real_preview()
+                    and not self._use_native_streaming):
+                # A MEDIA-only turn on an edit transport: mid-stream the partial tag
+                # has no deliverable extension yet, so the preview holds it plus the
+                # cursor; the final frame strips the complete tag and lands here
+                # empty.  Edit transports get no finalize frame, so the preview was
+                # neither edited nor removed — delete it; post-stream media delivery
+                # is the turn's only visible output (#141584).
+                await self._delete_previews(self._stale_preview_ids(),
+                                            label="Empty-final preview cleanup")
+                self._preview_message_ids = set()
+                self._segment_preview_message_ids = set()
+                self._message_id = None
+                self._mark_final_delivered()
             return True  # cursor-only / whitespace-only update
         # Don't open a new message for 1-2 tokens + cursor (rapid tool-calling): if
         # the cursor-strip edit is then rate-limited, "X ▉" stays forever.
