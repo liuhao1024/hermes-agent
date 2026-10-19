@@ -126,6 +126,12 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
         from hermes_state import format_session_db_unavailable
 
         return json.dumps({"success": False, "error": format_session_db_unavailable()})
+    if not hasattr(session_db, "search_messages"):
+        # Managed workers hand out the RuntimeSessionStore RPC facade, which has none of the
+        # read interfaces _discover uses (search_messages, get_anchored_view, fts_rebuild_status)
+        # — forwarding it dies on AttributeError (#141705). Drop it so session_search falls back
+        # to opening the state DB read-only, or reports the DB unavailable when even that fails.
+        session_db = None
     return _call_tool(
         "tools.session_search_tool", "session_search", args,
         (

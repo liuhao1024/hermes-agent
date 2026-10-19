@@ -43,3 +43,28 @@ def test_session_search_honours_requested_profile_db(tmp_path, monkeypatch):
 
     assert [r["session_id"] for r in routed["results"]] == ["profile-session"]
     assert missing["success"] is False and "default-session" not in json.dumps(missing)
+
+
+def test_session_search_runtime_store_falls_back_to_readonly_state_db(tmp_path, monkeypatch):
+    """A managed worker's ``_get_session_db_for_recall`` hands out the RuntimeSessionStore RPC
+    facade, which has none of the read interfaces ``_discover`` uses; the executor must drop it
+    so the tool searches the read-only state DB instead of failing on AttributeError (#141705)."""
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    state_db = SessionDB(hermes_home / "state.db")
+    state_db.create_session("worker-session", source="gateway")
+    state_db.append_message("worker-session", role="user", content="quarterly numbers kanban")
+    state_db._conn.commit()
+    state_db.close()
+
+    rpc_facade = SimpleNamespace()  # like RuntimeSessionStore: no search_messages et al.
+    agent = SimpleNamespace(_get_session_db_for_recall=lambda: rpc_facade, session_id="worker-1")
+    ctx = InlineToolContext(effective_task_id="task-1", tool_call_id="call-1")
+    result = json.loads(INLINE_TOOL_EXECUTORS["session_search"](
+        agent, {"query": "quarterly numbers"}, ctx))
+
+    assert "search_messages" not in json.dumps(result)
+    assert [r["session_id"] for r in result["results"]] == ["worker-session"]
