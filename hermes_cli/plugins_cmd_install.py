@@ -320,6 +320,31 @@ def _refuse_unavailable_portable_plugin(plugin_name: str, tree: Path) -> None:
         )
 
 
+def _reclaim_stripped_remnant(target: Path, plugin_name: str, *, force: bool, prior) -> None:
+    """Reclaim the slot of a removal remnant (#141539). A remove whose tree another process held
+    left the directory stripped in place with no install record; an install then refused with
+    "already exists" plus `plugins update` advice that needs the record removal already deleted.
+    Sweep what the removal parked and retry the delete; a tree that survives is still held, and
+    that refusal names the cause instead."""
+    if force or prior is not None or not target.is_dir():
+        return
+    from hermes_cli.plugins_cmd_remove import is_stripped_remnant, sweep_pending_plugin_deletes
+
+    if not is_stripped_remnant(target):
+        return
+    sweep_pending_plugin_deletes()
+    _pc().rmtree_readonly(target, ignore_errors=True)
+    if target.exists():
+        from pm.environments import cli_command_name
+        from pm.paths import repo_root
+
+        raise _pc().PluginOperationError(
+            f"Plugin '{plugin_name}' is not installed, but {target} is still held by "
+            f"another process (an earlier removal parked it for deletion). Close that "
+            f"process or restart {cli_command_name(repo_root())}, then install again.",
+            failure_class="already_installed")
+
+
 def _known_issue_warnings(entry) -> list[str]:
     """Catalog ``known_issues`` are informational (#124058): surface them as warnings, never a gate.
 
@@ -425,6 +450,8 @@ def _install_plugin_core(
                     "--no-deps cannot replace an active plugin. Retry without --no-deps; "
                     "PM must prepare its dependencies before publication.", failure_class="already_installed")
         _refuse_unavailable_portable_plugin(plugin_name, tmp_target)
+
+        _reclaim_stripped_remnant(target, plugin_name, force=force, prior=prior)
 
         if target.exists() and not force:
             from pm.environments import cli_command_name

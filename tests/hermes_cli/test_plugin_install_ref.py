@@ -496,6 +496,80 @@ def test_reinstall_after_manual_directory_removal_retains_pin(monkeypatch, tmp_p
     assert _metadata(home)["demo"]["pinned"] is True
 
 
+def _remnant_of(home: Path, name: str = "demo") -> Path:
+    """Recreate what a Windows removal leaves when a process holds the tree: the install record
+    is gone, the manifests are stripped, the empty directory stays, and a ``.path`` note parks it
+    for the startup sweep (#141539)."""
+    target = home / "plugins" / name
+    (home / "plugins" / ".install-metadata.json").write_text("{}", encoding="utf-8")
+    for manifest in ("plugin.yaml", "plugin.yml", "plugin.json", "__init__.py"):
+        (target / manifest).unlink(missing_ok=True)
+    (target / "mcp.json").write_text("{}", encoding="utf-8")  # non-manifest residue survives the strip
+    notes = home / "cache" / "plugin-pending-delete"
+    notes.mkdir(parents=True)
+    (notes / f"plugins-{name}.path").write_text(str(target), encoding="utf-8")
+    return target
+
+
+def test_reinstall_over_a_stripped_remnant_reclaims_the_slot(monkeypatch, tmp_path):
+    """The remnant state is "not installed" by every record Hermes keeps, so an install reclaims
+    the held-behind directory instead of refusing with "already exists" and unusable
+    `plugins update` advice (that path needs the install record removal already deleted)."""
+    from hermes_cli.plugins_cmd import _install_plugin_core
+
+    repo, old_sha, _new_sha = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
+    target = _remnant_of(home)
+
+    target, _manifest, _name = _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
+
+    assert (target / "plugin.yaml").is_file()
+    assert not (target / "mcp.json").exists()  # the reclaimed slot is a fresh tree, not a merge
+    assert _git(target, "rev-parse", "HEAD") == old_sha
+    assert _metadata(home)["demo"]["revision"] == old_sha
+    assert list((home / "cache" / "plugin-pending-delete").glob("*.path")) == []
+
+
+def test_reinstall_over_a_still_held_remnant_names_the_cause(monkeypatch, tmp_path):
+    """A remnant that still cannot be deleted gets a refusal naming the held directory, not the
+    misleading `plugins update` remedy."""
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugins_cmd import PluginOperationError, _install_plugin_core
+
+    repo, old_sha, _new_sha = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
+    target = _remnant_of(home)
+    monkeypatch.setattr(plugins_cmd, "rmtree_readonly", lambda _path, **_kw: None)
+
+    with pytest.raises(PluginOperationError, match="still held by another process") as exc:
+        _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
+
+    assert "plugins update" not in str(exc.value)
+    assert target.is_dir()
+
+
+def test_reinstall_leaves_a_manifest_tree_without_a_record_alone(monkeypatch, tmp_path):
+    """A directory that still carries a manifest is a plugin placed outside the catalog, not a
+    removal remnant: the install keeps refusing and never deletes it."""
+    from hermes_cli.plugins_cmd import PluginOperationError, _install_plugin_core
+
+    repo, old_sha, _new_sha = _plugin_repo(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    manual = home / "plugins" / "demo"
+    manual.mkdir(parents=True)
+    (manual / "plugin.yaml").write_text("name: demo\nversion: '1.0'\n", encoding="utf-8")
+
+    with pytest.raises(PluginOperationError, match="already exists"):
+        _install_plugin_core(repo.as_uri(), force=False, ref=old_sha)
+
+    assert (manual / "plugin.yaml").read_text(encoding="utf-8") == "name: demo\nversion: '1.0'\n"
+
+
 def test_annotated_tag_pin_installs_at_its_commit(monkeypatch, tmp_path):
     """A pin recorded from an annotated tag — the TAG object's sha, which is 40
     hex but not a commit — must install at the commit that tag points to.

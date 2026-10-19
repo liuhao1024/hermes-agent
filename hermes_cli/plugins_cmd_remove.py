@@ -21,6 +21,15 @@ def _pc():
 
 _PENDING_DELETE_DIR = "plugin-pending-delete"
 
+# What makes a tree loadable; `_discard_tree` strips exactly these when a held directory can
+# neither be deleted nor renamed, so their absence marks a removal remnant, not a plugin.
+_LOADABLE_MANIFESTS = ("plugin.yaml", "plugin.yml", "plugin.json", "__init__.py")
+
+
+def is_stripped_remnant(tree: Path) -> bool:
+    """True when *tree* holds none of the loadable manifests: what an in-place strip leaves."""
+    return not any((tree / name).exists() for name in _LOADABLE_MANIFESTS)
+
 
 def _pending_delete_root() -> Path:
     """``<HERMES_HOME>/cache/plugin-pending-delete``: trees a running process still held at removal."""
@@ -63,7 +72,7 @@ def _discard_tree(tree: Path) -> None:
     except OSError:
         # A held directory itself (a process's cwd, an open handle on it) cannot even be renamed. Strip
         # its manifests so the remnant no longer loads, and leave the files to the next start.
-        for name in ("plugin.yaml", "plugin.yml", "plugin.json", "__init__.py"):
+        for name in _LOADABLE_MANIFESTS:
             (tree / name).unlink(missing_ok=True)
         (root / f"{tree.parent.name}-{tree.name}.path").write_text(str(tree), encoding="utf-8")
 
