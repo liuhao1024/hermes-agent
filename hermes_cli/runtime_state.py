@@ -196,16 +196,51 @@ def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> lis
         generations = root / "environments"
         if not generations.is_dir():
             return removed
+        config_texts = _user_config_texts()
         for generation in generations.iterdir():
             if generation.is_symlink() or not generation.is_dir() or generation.resolve() == selected:
                 continue
             marker = generation / ".lease-managed"
             if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
                 continue
+            if any(text is None or generation.name in text for text in config_texts):
+                # A hard-coded path is a durable reference from configuration to this one
+                # generation: leases prove selection, not use (#141448), and children of a
+                # dead activator run unleased. Pinned like ``selected``, until the
+                # reference itself goes away.
+                LOG.info("generation %s kept: referenced by a user config file", generation.name)
+                continue
             if not leases_held(generation):
                 shutil.rmtree(generation)
                 removed.append(generation)
     return removed
+
+
+def _user_config_texts() -> list[str | None]:
+    """Text of every user config.yaml that can hard-code a generation path.
+
+    Covers the active root's config and each named profile's, so a reference written by
+    any deployment pins its generation. Matching is by generation directory name, which
+    keeps it independent of the path separators and case a platform spells the rest of
+    the path with. ``None`` marks a config that exists but cannot be read — treated as a
+    reference to everything, the same fail-closed rule as an unopenable lease.
+    """
+    from hermes_constants import get_default_hermes_root
+
+    root = get_default_hermes_root()
+    paths = [root / "config.yaml"]
+    profiles = root / "profiles"
+    if profiles.is_dir():
+        paths.extend(sorted(profiles.glob("*/config.yaml")))
+    texts: list[str | None] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            texts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+        except OSError:
+            texts.append(None)
+    return texts
 
 
 def leases_held(generation: Path) -> bool:
