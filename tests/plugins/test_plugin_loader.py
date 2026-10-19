@@ -8,7 +8,57 @@ import sys
 import threading
 from types import SimpleNamespace
 
-from plugins.plugin_loader import load_plugin_module
+from plugins.plugin_loader import NoopPluginContext, instance_from_module, load_plugin_module
+
+
+def test_register_failure_logs_at_warning_with_repr(caplog):
+    """A crashing register() must surface at WARNING with its repr instead of vanishing at DEBUG."""
+    class _Base:
+        pass
+
+    class _Collector(NoopPluginContext):
+        engine = None
+
+    def _crash(ctx):
+        raise RuntimeError("boom-register")
+
+    logger = logging.getLogger("test_plugin_loader_register_failure")
+    with caplog.at_level(logging.DEBUG, logger="test_plugin_loader_register_failure"):
+        result = instance_from_module(
+            SimpleNamespace(register=_crash), collector=_Collector(), collected_attr="engine",
+            base_cls=_Base, name="demo", logger=logger)
+    assert result is None
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "register() failed" in r.getMessage()]
+    assert warnings, "register() failure must be logged at WARNING, not DEBUG"
+    assert "RuntimeError('boom-register')" in warnings[0].getMessage()
+
+
+def test_broken_subclass_constructor_logs_warning_and_falls_through(caplog):
+    """A crashing provider constructor must be logged at WARNING with its repr and must not abort
+    the scan for the next base_cls subclass."""
+
+    class _Base:
+        pass
+
+    class _Broken(_Base):
+        def __init__(self):
+            raise RuntimeError("boom-init")
+
+    class _Good(_Base):
+        pass
+
+    mod = SimpleNamespace(alpha=_Broken, beta=_Good)  # dir() order: alpha first, beta second
+    logger = logging.getLogger("test_plugin_loader_ctor_failure")
+    with caplog.at_level(logging.DEBUG, logger="test_plugin_loader_ctor_failure"):
+        result = instance_from_module(
+            mod, collector=NoopPluginContext(), collected_attr="engine",
+            base_cls=_Base, name="demo", logger=logger)
+    assert isinstance(result, _Good), "a later subclass must still be tried after a crashing one"
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "Failed to instantiate" in r.getMessage()]
+    assert warnings, "constructor failure must be logged at WARNING"
+    assert "RuntimeError('boom-init')" in warnings[0].getMessage()
 
 
 def test_failed_sibling_is_removed_before_init_handles_missing_import(tmp_path):
