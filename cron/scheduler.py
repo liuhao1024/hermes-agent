@@ -438,14 +438,17 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
 def _merge_mcp_into_per_job_toolsets(per_job: list[str], cfg: dict) -> list[str]:
     """Layer enabled MCP servers onto a per-job ``enabled_toolsets`` allowlist (else a per-job list
     silently drops every MCP server). Mirrors ``_get_platform_tools``: ``no_mcp`` sentinel -> none
-    (stripped); any MCP server already listed -> allowlist, add nothing; else union all enabled."""
+    (stripped); any MCP server already listed -> allowlist, add nothing; else union all enabled.
+    A server may be named either bare or as its ``mcp-<server>`` toolset spelling — both are
+    accepted by ``toolset_validation`` — and both must count as "already listed" (#141468)."""
     result = [t for t in per_job if t != "no_mcp"]
     if "no_mcp" in per_job:
         return result
     # lazy: avoid heavy hermes_cli import at module load; shares MCP-membership with gateway/CLI
     from hermes_cli.tools_config import enabled_mcp_server_names
     enabled_mcp = enabled_mcp_server_names(cfg)
-    if set(result) & enabled_mcp:
+    listed = {t.removeprefix("mcp-") for t in result}
+    if listed & enabled_mcp:
         return result
     for name in sorted(enabled_mcp):
         if name not in result:

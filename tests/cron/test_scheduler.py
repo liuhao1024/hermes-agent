@@ -162,6 +162,22 @@ class TestPerJobToolsetMcpMerge:
         assert result == ["web"]
         assert not (set(result) & self._enabled_names())
 
+    def test_mcp_prefixed_server_name_is_treated_as_allowlist(self):
+        # "mcp-<server>" is the other accepted spelling of an MCP entry (toolset_validation
+        # knows both). Naming a server that way must form an allowlist exactly like the bare
+        # name instead of widening the job to every enabled MCP server (#141468).
+        result = _merge_mcp_into_per_job_toolsets(["tts", "mcp-playwright"], self.CFG)
+        assert result == ["tts", "mcp-playwright"]
+        assert "finnhub" not in result
+
+    def test_resolver_treats_mcp_prefixed_server_as_allowlist(self):
+        result = _resolve_cron_enabled_toolsets(
+            {"enabled_toolsets": ["tts", "mcp-playwright"]},
+            {"mcp_servers": {"finnhub": {"enabled": True}, "playwright": {"enabled": True}}},
+        )
+        assert result == ["tts", "mcp-playwright"]
+        assert "finnhub" not in result
+
     def test_resolver_keeps_memory_in_per_job_list(self):
         result = _resolve_cron_enabled_toolsets(
             {"enabled_toolsets": ["memory", "file"]},
