@@ -202,6 +202,15 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> tuple[Option
     except OSError:
         pass
     chrome_argv = [real_binary, f"--user-data-dir={copy_dir}", *_REAL_PROFILE_CHROME_FLAGS]
+    # The copy must decrypt the mirrored cookies with the SAME keyring backend the live browser
+    # used. When Hermes itself was launched without desktop-session markers (systemd, cron, SSH)
+    # Chromium's own Linux detection misses the wallet and drops every cookie it cannot decrypt
+    # at startup (#141241) — pin the store explicitly, like the desktop app already does.
+    if sys.platform.startswith("linux"):
+        from hermes_cli.main_desktop import _detect_linux_password_store
+        password_store = _detect_linux_password_store()
+        if password_store:
+            chrome_argv.append(f"--password-store={password_store}")
     _session._ensure_screen_for_headed_chromium()
     browser_env = _bt._build_browser_env()  # carries the Bot Desktop DISPLAY when one is running
     _has_display = bool(browser_env.get("DISPLAY") or browser_env.get("WAYLAND_DISPLAY"))

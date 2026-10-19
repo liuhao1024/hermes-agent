@@ -320,6 +320,51 @@ class TestRealProfileCdpLaunch:
         assert "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in captured["env"]
         self._reset()
 
+    def _linux_launch_captures_chrome_argv(self, tmp_path, monkeypatch, password_store):
+        """Run the launch path as-if on Linux with a fixed detected store; return the argv Popen saw."""
+        import sys as _sys
+        import tools.browser_tool as bt
+        self._reset()
+        captured = {}
+
+        class FakeChrome:
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):
+            captured["chrome_argv"] = argv
+            (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n", encoding="utf-8")
+            return FakeChrome()
+
+        monkeypatch.setattr(_sys, "platform", "linux")
+        with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
+             patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
+             patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)), \
+             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/brave"), \
+             patch("hermes_cli.main_desktop._detect_linux_password_store", return_value=password_store), \
+             patch.object(bt.subprocess, "Popen", side_effect=fake_popen), \
+             patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
+             patch.object(bt_session, "_popen_agent_browser",
+                          side_effect=lambda *a, **k: Mock(wait=Mock(return_value=0), returncode=0)), \
+             patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)), \
+             patch.object(bt_cloud, "_is_headed_mode", return_value=False):
+            bt_real_profile._launch_real_profile_chrome("/usr/bin/brave", str(tmp_path))
+        self._reset()
+        return captured["chrome_argv"]
+
+    def test_linux_launch_pins_detected_password_store(self, tmp_path, monkeypatch):
+        """A Linux copy must decrypt the mirrored cookies with the live browser's keyring backend:
+        the detected store is pinned via --password-store because Chromium's own detection fails
+        when Hermes was launched without desktop-session markers (#141241)."""
+        argv = self._linux_launch_captures_chrome_argv(tmp_path, monkeypatch, "kwallet6")
+        assert "--password-store=kwallet6" in argv
+
+    def test_linux_launch_without_detectable_store_adds_no_flag(self, tmp_path, monkeypatch):
+        """No detectable keyring (headless server, no session bus) keeps the argv unchanged —
+        Chromium's own fallback stays in charge instead of pinning a wrong backend."""
+        argv = self._linux_launch_captures_chrome_argv(tmp_path, monkeypatch, None)
+        assert not [a for a in argv if a.startswith("--password-store")]
+
     def test_reuses_only_session_on_our_copy_dir(self, tmp_path):
         """A live session on a DIFFERENT dir (stale/throwaway) is closed, not reused."""
         import tools.browser_tool as bt
