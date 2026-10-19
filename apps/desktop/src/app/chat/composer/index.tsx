@@ -1452,6 +1452,36 @@ export function ChatBar({
                   dragActive && COMPOSER_DROP_ACTIVE_CLASS
                 )}
                 data-slot="composer-surface"
+                // Click-the-bar-to-stop: while the primary control sits in its
+                // Stop state (busy, nothing staged), the surface itself doubles
+                // as one large stop target — the small square button asks for
+                // more precision than a pointer stop should (#141444). Only
+                // inert areas qualify: a click that hit a nested control keeps
+                // that control's meaning, and a staged draft or attachment keeps
+                // send/queue/steer so a stray click never discards a composed
+                // message. A turn parked on the user keeps its own dismissal —
+                // the same exemption Esc-to-stop takes.
+                onClick={event => {
+                  if (
+                    !busy ||
+                    disabled ||
+                    awaitingInput ||
+                    blockingPrompt ||
+                    voiceConversationActive ||
+                    hasComposerPayload
+                  ) {
+                    return
+                  }
+
+                  const hit = event.target as HTMLElement
+
+                  if (hit.closest('button, a, input, textarea, select, label, [contenteditable], [role="textbox"]')) {
+                    return
+                  }
+
+                  triggerHaptic('cancel')
+                  void Promise.resolve(haltRun())
+                }}
                 ref={composerSurfaceRef}
               >
                 <div aria-hidden className={composerInputBacking} />
