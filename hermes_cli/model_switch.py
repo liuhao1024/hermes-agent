@@ -252,6 +252,36 @@ def _load_direct_aliases(cfg: Optional[dict] = None) -> dict[str, DirectAlias]:
     return merged
 
 
+def format_model_alias_listing(direct_aliases: Optional[dict] = None) -> str:
+    """Render both alias tables for display: built-in short names plus user-defined aliases.
+
+    ``hermes model aliases`` prints this (#141409): the built-in table shows the vendor/family
+    each short name resolves to via the catalog, the user table (``model_aliases:`` /
+    ``model.aliases``) shows the provider/model each alias resolves to, and a built-in whose
+    name a user alias redefines is marked shadowed (user aliases win during resolution).
+    """
+    if direct_aliases is None:
+        direct_aliases = _load_direct_aliases()
+    lines = ["Built-in short names (catalog-resolved):"]
+    builtin_width = max((len(name) for name in MODEL_ALIASES), default=0)
+    for name, identity in sorted(MODEL_ALIASES.items()):
+        shadowed = "  (shadowed by your alias)" if name in direct_aliases else ""
+        lines.append(f"  {name:<{builtin_width}}  →  {identity.vendor}/{identity.family}{shadowed}")
+    lines.append("")
+    if direct_aliases:
+        lines.append("User-defined aliases (model_aliases: / model.aliases: in config.yaml):")
+        user_width = max(len(name) for name in direct_aliases)
+        for name, alias in sorted(direct_aliases.items()):
+            target = f"{alias.provider}/{alias.model}" if alias.provider else alias.model
+            if alias.base_url:
+                target += f"  ({alias.base_url})"
+            lines.append(f"  {name:<{user_width}}  →  {target}")
+    else:
+        lines.append("No user-defined aliases configured — add them under "
+                     "model_aliases: or model.aliases: in config.yaml.")
+    return "\n".join(lines)
+
+
 # Identity of the config the cached aliases were built from. The cache is process-global but its
 # source is profile-local: unkeyed, the first profile to resolve an alias would pin its definitions
 # — and, since entries carry `api_key`, its credentials — for every later profile. Same shape

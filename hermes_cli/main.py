@@ -1866,6 +1866,12 @@ cmd_import_agent = _forward_command("cmd_import_agent", "hermes_cli.agent_import
 
 def cmd_model(args):
     """Select default model — starts with provider selection, then model picker."""
+    if getattr(args, "model_command", None) == "aliases":
+        # Listed before _require_tty: enumerating aliases is read-only and is exactly what a
+        # piped/non-interactive caller needs (#141409).
+        from hermes_cli.model_switch import format_model_alias_listing
+        print(format_model_alias_listing())
+        return
     _require_tty("model")
     if getattr(args, "refresh", False):
         try:

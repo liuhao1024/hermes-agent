@@ -228,7 +228,7 @@ Then in chat:
 /model grok --global  # also persists current-model change to config.yaml
 ```
 
-User aliases take precedence over built-in short names, so naming an alias `sonnet`, `kimi`, `opus`, etc. will shadow the built-in. Alias names are case-insensitive.
+User aliases take precedence over built-in short names, so naming an alias `sonnet`, `kimi`, `opus`, etc. will shadow the built-in. Alias names are case-insensitive. To see every alias that exists — the built-in short names with the vendor/family each resolves to, your own aliases with their provider and model, and which built-ins your aliases shadow — run `hermes model aliases` (see [CLI commands](./cli-commands.md)).
 
 ### Alias Resolution
 

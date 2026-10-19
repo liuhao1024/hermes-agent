@@ -33,4 +33,12 @@ def build_model_parser(subparsers, *, cmd_model: Callable) -> None:
     model_parser.add_argument(
         "--insecure", action="store_true",
         help="Disable TLS verification for Nous login (testing only)")
+    model_subparsers = model_parser.add_subparsers(dest="model_command", metavar="<subcommand>")
+    aliases_parser = model_subparsers.add_parser(
+        "aliases", help="List built-in short names and user-defined model aliases",
+        description="Print every model alias that -m/--model and /model can resolve: the "
+        "built-in short names (sonnet, kimi, glm, …) with the vendor/family each resolves to, "
+        "plus your model_aliases: / model.aliases: entries with the provider and model they "
+        "point at. Built-ins shadowed by a user alias of the same name are marked.")
+    aliases_parser.set_defaults(func=cmd_model)
     model_parser.set_defaults(func=cmd_model)

@@ -278,6 +278,28 @@ Use this when you want to:
 **If you need to add a new provider:** Exit your Hermes session first (`Ctrl+C` or `/quit`), then run `hermes model` from your terminal prompt.
 :::
 
+### `hermes model aliases`
+
+List every model alias that `-m`/`--model` and `/model` can resolve — both tables, in one place:
+
+```bash
+hermes model aliases
+```
+
+```
+Built-in short names (catalog-resolved):
+  claude     →  anthropic/claude
+  glm        →  z-ai/glm
+  kimi       →  moonshotai/kimi   (shadowed by your alias)
+  ...
+
+User-defined aliases (model_aliases: / model.aliases: in config.yaml):
+  kabeuchi   →  openrouter/ling-3.1-flash
+  kimi       →  moonshotai/kimi-k2
+```
+
+Built-in short names are printed with the vendor/family each resolves to; your `model_aliases:` / `model.aliases:` entries are printed with the provider and model they point at (plus the `base_url` for custom endpoints). A built-in whose name one of your aliases redefines is marked `(shadowed by your alias)` — user aliases take precedence during resolution. This is read-only and works when piped; it never opens the interactive picker.
+
 ### `/model` slash command (mid-session)
 
 Switch between already-configured models without leaving a session:
