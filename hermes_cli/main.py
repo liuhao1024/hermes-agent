@@ -101,7 +101,10 @@ _oneshot_cleanup_done = False
 # (module, attr, kwargs, exceptions swallowed). MCP shutdown may raise
 # BaseException-derived errors from executor teardown; the rest are Exception.
 _ONESHOT_CLEANUPS = (
-    ("tools.terminal_tool", "cleanup_all_environments", {}, Exception),
+    # os._exit below skips terminal_tool's atexit hook; its drain variant wraps
+    # cleanup_all_environments with a wait for every sandbox teardown worker,
+    # so daemon `docker stop`/`rm` threads finish before the hard exit (#141661).
+    ("tools.terminal_tool", "_atexit_cleanup", {}, Exception),
     ("tools.async_delegation", "interrupt_all", {"reason": "oneshot shutdown"}, Exception),
     ("tools.browser_tool_lifecycle", "_emergency_cleanup_all_sessions", {}, Exception),
     ("tools.mcp_tool_lifecycle", "shutdown_mcp_servers", {}, BaseException),
@@ -185,26 +188,10 @@ def _run_and_exit_oneshot(
         _exit_after_oneshot(rc)
 
 
-def _warn_if_unsupervised_pid1(pid: int | None = None) -> None:
-    """Warn when this process is PID 1 with nothing above it to reap orphans.
-
-    The official image's ENTRYPOINT (``docker/entrypoint-dispatch.sh`` -> s6-overlay's
-    ``/init``) is the reaper for orphaned grandchildren (browser tooling, MCP servers, shell
-    children). A Compose service that overrides ``entrypoint:`` to invoke hermes directly makes
-    hermes itself PID 1 — nothing then ``wait()``s on those orphans and they accumulate as
-    zombies without bound (#111577). Outside a container a user process is never PID 1, so
-    this is quiet everywhere else; it mirrors the dispatcher's own non-PID-1 warning.
-    """
-    if (pid if pid is not None else os.getpid()) != 1:
-        return
-    print(
-        "[hermes] WARNING: this process is PID 1 with no init above it "
-        "(entrypoint override?). Orphaned child processes will not be "
-        "reaped and will accumulate as zombies. Use the image's default "
-        "ENTRYPOINT (docker/entrypoint-dispatch.sh) instead of overriding "
-        "it, or run with `docker run --init` / `init: true` in Compose.",
-        file=sys.stderr,
-    )
+# FILE_LINES offset: moved verbatim into the sibling; re-exported so the
+# ``main()`` call site and ``from hermes_cli.main import _warn_if_unsupervised_pid1``
+# keep working.
+from hermes_cli.cli_pid1_warning import _warn_if_unsupervised_pid1
 
 
 def _set_process_title() -> None:
