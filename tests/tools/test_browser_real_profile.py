@@ -389,6 +389,18 @@ class TestRealProfileDaemonEnv:
         env, _ = bt_real_profile._real_profile_daemon_env()
         assert "AGENT_BROWSER_ARGS" not in env
 
+    def test_get_cdp_failure_logs_daemon_stderr_tail(self, caplog, monkeypatch):
+        """The dead end of #141370: a daemon that answers nothing must leave its stderr in
+        the log instead of vanishing behind "without exposing a devtools endpoint"."""
+        import logging
+        from types import SimpleNamespace
+
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="daemon warm\nFATAL: No usable sandbox!\n")
+        monkeypatch.setattr(bt_real_profile, "_agent_browser_session_cmd", lambda *a, **k: failed)
+        with caplog.at_level(logging.WARNING):
+            assert bt_real_profile._agent_browser_get_cdp("hermes-real-profile") is None
+        assert "No usable sandbox!" in caplog.text
+
 
 class TestAgentBrowserCliCapture:
     """#96731: agent-browser's resident daemon inherits the caller's stdio and

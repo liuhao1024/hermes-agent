@@ -98,10 +98,21 @@ def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> 
 
 
 def _agent_browser_get_cdp(session_name: str) -> Optional[str]:
-    """HTTP CDP discovery root of an agent-browser session (from its ``ws://`` cdp-url), or None."""
+    """HTTP CDP discovery root of an agent-browser session (from its ``ws://`` cdp-url), or None.
+
+    A daemon that answers nothing is a real failure mode that used to vanish here (#141370:
+    Chromium's "No usable sandbox!" on an AppArmor userns host), surfacing only as the lane's
+    "without exposing a devtools endpoint" dead end — so the daemon's last stderr line goes to
+    the log before returning None."""
     proc = _agent_browser_session_cmd(session_name, "get", "cdp-url", log_label="get cdp-url")
     m = re.search(r"ws://127\.0\.0\.1:(\d+)/", (proc.stdout or "").strip()) if proc is not None else None
-    return f"http://127.0.0.1:{m.group(1)}" if m else None
+    if m:
+        return f"http://127.0.0.1:{m.group(1)}"
+    if proc is not None:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        _origin().logger.warning("real-profile: get cdp-url returned no ws url%s",
+                                 f" (daemon: {tail[-1]})" if tail else "")
+    return None
 
 
 def _read_devtools_port(data_dir: str) -> Optional[str]:
