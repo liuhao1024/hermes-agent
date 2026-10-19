@@ -717,16 +717,32 @@ class AuthorityConnection:
             payload['attachments'] = params['attachments']
         return Submission(request_id, ref, payload, 'queue')
 
+    async def _release_delete_viewer(self, ref):
+        """A delete's CAS tuple is read through ``session.resume``, which attaches this connection
+        as the row's viewer. A refused delete must release that viewer: kept attached, it re-lights
+        a closed row in the live list until the client exits (#139161 TUI-19) — the sender asked to
+        drop the row, never to watch it. A release failure must not mask the refusal itself."""
+        subscription = self.subscriptions.get(ref.session_id)
+        if subscription is not None:
+            try:
+                await self.detach(ref, {'session_id': ref.session_id, 'subscription_id': subscription})
+            except RuntimeStoreError:
+                logger.debug('refused delete could not release its CAS viewer', exc_info=True)
+
     async def mutate(self, ref, params):
         from gateway.session_mutations import mutate_session
         from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS, busy_refusal
         try:
             result = await mutate_session(self.authority, self.actor, ref, params)
         except MUTATION_GUARD_REFUSALS as exc:
+            if params.get('operation') == 'delete':
+                await self._release_delete_viewer(ref)
             # A live turn lease / compression lock is the same retryable busy verdict a
             # running admission gets (REST maps it to 409), not an internal error.
             raise busy_refusal(exc) from exc
         except RuntimeStoreError as exc:
+            if params.get('operation') == 'delete':
+                await self._release_delete_viewer(ref)
             if exc.reason in {'revision_conflict', 'stale_generation'}:
                 # The fresh fences ride on the refusal, so the client retries once without a re-read.
                 row = await asyncio.to_thread(self.authority.db.get_session, ref.session_id)

@@ -77,6 +77,40 @@ async def test_close_after_a_subscribed_session_was_deleted_releases_every_membe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('refusal', ['stale_revision', 'read_only_grant'])
+async def test_a_refused_delete_releases_the_viewer_its_cas_resume_attached(tmp_path, refusal):
+    """TUI-19 (#139161): a delete reads its CAS tuple through ``session.resume``, which attaches
+    this connection as a viewer. A refused delete must release that viewer: attached, it re-lights
+    a closed row in the live list until the client exits."""
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        db.create_session('s', source='test')
+        db.end_session('s', 'cli_close')
+        epoch = begin_runtime_epoch(db, instance_id='test')
+        runner = SimpleNamespace(_draining=False)
+        authority = SessionAuthority(runner, profile_id='test',
+                                     instance_id='test', db=db, epoch=epoch)
+        authority.sessions['s'] = LiveSession(None, 'route')
+        identity = ({'user_id': 'human'} if refusal == 'stale_revision'
+                    else {'user_id': 'human', 'capabilities': ['session:read']})
+        viewer = AuthorityConnection(authority, object(), identity)
+        reply = await viewer.dispatch({'id': 1, 'method': 'session.resume', 'params': {'session_id': 's'}})
+        assert 'result' in reply, reply
+        assert authority.sessions['s'].subscribers
+        params = {'session_id': 's', 'request_id': 'delete', 'expected_revision': 0,
+                  'expected_generation': 0, 'operation': 'delete', 'payload': {}}
+        if refusal == 'stale_revision':
+            params['expected_revision'] = 99  # the row moved after the CAS read
+        reply = await viewer.dispatch({'id': 2, 'method': 'session.mutate', 'params': params})
+        assert reply['error']['data']['reason'] == (
+            'revision_conflict' if refusal == 'stale_revision' else 'permission_denied'), reply
+        assert not authority.sessions['s'].subscribers
+        assert 's' not in viewer.subscriptions
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_detach_releases_only_the_paired_subscription_without_stopping_execution(tmp_path):
     db = SessionDB(db_path=tmp_path / 'state.db')
     running = None
