@@ -93,3 +93,36 @@ def test_manual_gateway_of_another_home_is_not_stopped(monkeypatch, own_home):
     fleet._restart_manual_gateways(out, 5.0)
     assert killed == [(111, signal.SIGTERM)]
     assert out.killed_pids == {111}
+
+
+def test_manual_gateway_sharing_only_the_pathname_with_a_container_is_not_stopped(monkeypatch, own_home):
+    """A container gateway whose HERMES_HOME *pathname string* matches the updating home is a
+    separate installation (#141516): the pathname resolves through ``/proc/<pid>/root`` into that
+    container's filesystem, so it is left alone. The host's own gateway with the same string is
+    still restarted, and a root that cannot be stat'ed keeps the string verdict."""
+    from hermes_cli import update_fleet_scope as scope
+
+    _pid_homes(monkeypatch, {111: str(own_home), 222: str(own_home), 333: str(own_home)})
+
+    def fake_fs_object(path):
+        if path.startswith("/proc/222/root"):
+            return (200, 9)  # the container's identically-named home: another filesystem's object
+        if path.startswith("/proc/333/root"):
+            return None  # unstat'able root (off Linux, another account's process): no proof either way
+        return (100, 7)  # this host's object
+
+    monkeypatch.setattr(scope, "_fs_object", fake_fs_object)
+    monkeypatch.setattr("hermes_cli.gateway._get_service_pids", lambda **k: set())
+    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda **k: [111, 222, 333])
+    monkeypatch.setattr("hermes_cli.gateway.find_profile_gateway_processes", lambda **k: [])
+    monkeypatch.setattr("hermes_cli.gateway._wait_for_gateway_exit", lambda **k: None)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    out = fleet._GatewayRestartOutcome(
+        incomplete=False, phase_errors=[], pre_restart_gateway_pids=[], restarted_services=[],
+        failed_or_stale_units=[], relaunched_profiles=[], externally_supervised_profiles=[], killed_pids=set(),
+    )
+    fleet._restart_manual_gateways(out, 5.0)
+    assert sorted(killed) == [(111, signal.SIGTERM), (333, signal.SIGTERM)]
+    assert out.killed_pids == {111, 333}

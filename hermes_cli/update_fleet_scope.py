@@ -16,6 +16,7 @@ outage.
 
 from __future__ import annotations
 
+import os
 import shlex
 from contextlib import suppress
 from pathlib import Path
@@ -77,12 +78,40 @@ def gateway_pid_home(pid: int) -> str | None:
     return home or _ledger_gateway_home(pid)
 
 
+def _fs_object(path: str) -> tuple[int, int] | None:
+    """Filesystem identity ``(st_dev, st_ino)`` of *path*, or ``None`` when it cannot be stat'ed."""
+    with suppress(OSError, ValueError):
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino)
+    return None
+
+
+def _pid_home_shares_scope_filesystem(pid: int, home: Path, homes: set[Path]) -> bool:
+    """True unless *home* — a scope home by pathname — is provably a different filesystem object
+    on *pid*'s own root. ``/proc/<pid>/root`` resolves inside the process's mount namespace, so an
+    LXC container's identically-named ``HERMES_HOME`` (#141516) stats as that container's
+    directory; the pathname match alone would SIGTERM an install this update does not own. An
+    unstat'able side — off Linux, another account's process, a reaped pid — proves nothing and
+    keeps the string verdict."""
+    pid_object = _fs_object(f"/proc/{pid}/root{home}")
+    if pid_object is None or home not in homes:
+        return True
+    host_object = _fs_object(str(home))
+    return host_object is None or host_object == pid_object
+
+
 def gateway_pid_in_update_scope(pid: int, scope: set[Path] | None = None) -> bool | None:
-    """Does gateway *pid* run on a home this update owns? ``None`` when its home cannot be read."""
+    """Does gateway *pid* run on a home this update owns? ``None`` when its home cannot be read.
+    A home that only shares the pathname with a scope home but lives in another filesystem (a
+    container install, #141516) is not owned either."""
     home = gateway_pid_home(pid)
-    if home is None:
+    if not home:
         return None
-    return home_in_update_scope(home, scope)
+    homes = update_scope_homes() if scope is None else scope
+    resolved = _resolved(home)
+    if resolved is None or resolved not in homes:
+        return False
+    return _pid_home_shares_scope_filesystem(pid, resolved, homes)
 
 
 def partition_gateway_pids_by_scope(pids, scope: set[Path] | None = None) -> tuple[list[int], list[tuple[int, str | None]]]:
@@ -100,6 +129,8 @@ def partition_gateway_pids_by_scope(pids, scope: set[Path] | None = None) -> tup
                 with suppress(Exception):
                     from hermes_cli.dashboard_procs import _hermes_home_for_pid
                     home = _hermes_home_for_pid(pid)
+                    if home is not None and _resolved(home) in scope:
+                        home = f"{home} (same pathname on another filesystem)"
             foreign.append((pid, home))
     return owned, foreign
 
