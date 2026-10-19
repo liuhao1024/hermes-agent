@@ -175,6 +175,21 @@ def _scrub(text: str) -> str:
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-./+]{16,}")
 
+# Bot Mode group rooms synthesize one prompt per member turn (Desktop's
+# group-round-prompt.ts, GROUP_PROMPT_HEADER_PREFIX — the header Desktop itself
+# uses to tell room turns apart): participation header + room delta +
+# "Rules for this room". None of it is the member user's speech, but it lands as
+# the session's user row, so providers that model the user ingested the harness
+# text verbatim (#141333). Such a turn stays out of provider ingestion entirely —
+# tick, recall and sync alike: the delta is room speech, not a user query, and
+# the assistant side is the member bot's reply.
+_GROUP_CHAT_PROMPT_PREFIX = '[Group chat: "'
+
+
+def _is_group_room_turn_prompt(content: Any) -> bool:
+    """Whether *content* is a synthesized Bot Mode group-room turn prompt."""
+    return isinstance(content, str) and content.startswith(_GROUP_CHAT_PROMPT_PREFIX)
+
 
 def _redact_for_provider(*values: Any) -> Any:
     """Copies of ``values`` with every string scrubbed before it reaches a memory provider.
@@ -365,7 +380,7 @@ class MemoryManager:
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
         """Merge non-empty prefetch context from all providers (failures are non-fatal)."""
         clean_query = self._strip_skill_scaffolding(query)
-        if not clean_query or not self._owner_allows("prefetch"):
+        if not clean_query or _is_group_room_turn_prompt(clean_query) or not self._owner_allows("prefetch"):
             return ""
         clean_query = _redact_for_provider(clean_query)
         parts = self._each_provider(
@@ -436,7 +451,7 @@ class MemoryManager:
         """Queue background prefetch on all providers for the next turn (see ``sync_all``)."""
         providers = list(self._providers)
         clean_query = self._strip_skill_scaffolding(query) if providers else None
-        if not clean_query or not self._owner_allows("queue_prefetch"):
+        if not clean_query or _is_group_room_turn_prompt(clean_query) or not self._owner_allows("queue_prefetch"):
             return
         clean_query = _redact_for_provider(clean_query)
         self._submit_background(lambda: self._each_provider(
@@ -465,7 +480,8 @@ class MemoryManager:
         """
         providers = list(self._providers)
         clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
-        if not clean_user_content or not self._owner_allows("sync_turn"):
+        if not clean_user_content or _is_group_room_turn_prompt(clean_user_content) \
+                or not self._owner_allows("sync_turn"):
             return
         clean_user_content, assistant_content, redacted_messages = _redact_for_provider(
             clean_user_content, assistant_content, messages)
@@ -591,6 +607,8 @@ class MemoryManager:
         return result
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        if _is_group_room_turn_prompt(message):
+            return
         if not self._owner_allows("on_turn_start"):
             return
         message = _redact_for_provider(message)
