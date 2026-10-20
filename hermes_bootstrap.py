@@ -534,8 +534,9 @@ def _settle_interrupted_update() -> None:
             if recovery.restore_interrupted_pull(_root):
                 recovery.relaunch_after_restore()
         finally:
-            for name in [n for n in sys.modules if n == "hermes_cli" or n.startswith("hermes_cli.")]:
-                del sys.modules[name]
+            for name in list(sys.modules):  # snapshot first — never iterate the live mapping
+                if name == "hermes_cli" or name.startswith("hermes_cli."):
+                    sys.modules.pop(name, None)
         return
     if recovery.restore_interrupted_pull(_root):
         recovery.relaunch_after_restore()

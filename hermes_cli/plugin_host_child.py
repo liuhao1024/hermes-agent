@@ -397,8 +397,9 @@ class HostRuntime:
                 self.owners.pop(ref, None)
         module_name = self.modules.pop(plugin_key, "")
         if module_name:
-            for name in [m for m in sys.modules if m == module_name or m.startswith(module_name + ".")]:
-                sys.modules.pop(name, None)
+            for name in list(sys.modules):  # snapshot first — never iterate the live mapping
+                if name == module_name or name.startswith(module_name + "."):
+                    sys.modules.pop(name, None)
         return {"errors": errors}
 
     def op_shutdown(self, _params: dict[str, Any]) -> None:
@@ -485,8 +486,9 @@ def _import_plugin(params: dict[str, Any]) -> Any:
     try:
         spec.loader.exec_module(module)
     except BaseException:
-        for name in [m for m in sys.modules if m == module_name or m.startswith(module_name + ".")]:
-            sys.modules.pop(name, None)
+        for name in list(sys.modules):  # snapshot first — never iterate the live mapping
+            if name == module_name or name.startswith(module_name + "."):
+                sys.modules.pop(name, None)
         raise
     return module
 
