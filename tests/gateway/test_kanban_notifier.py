@@ -796,3 +796,67 @@ def test_review_requested_does_not_wake_a_notify_only_subscription(
     assert adapter.handled == [], (
         "notify-only subscriptions must not be woken by a review handoff"
     )
+
+
+def test_notifier_warns_once_while_an_offline_platform_freezes_pending_events(
+    tmp_path, monkeypatch, caplog,
+):
+    """A subscription whose platform adapter is offline is skipped without
+    advancing the cursor, so every later terminal event for it freezes behind a
+    single silent DEBUG skip (#141866). The freeze must surface ONCE at WARNING
+    per (row, cursor) — re-armed after a successful delivery advances the cursor
+    — while the backlog survives and delivers on reconnect."""
+    import logging
+
+    from gateway import kanban_watchers_notifier as notifier
+
+    db_path = tmp_path / "frozen-sub.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    monkeypatch.setattr(notifier, "_FROZEN_WARNED", set())
+
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="freeze me", assignee="worker")
+        kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.complete_task(conn, tid, summary="done once")
+    finally:
+        conn.close()
+
+    def frozen_warnings():
+        return [r for r in caplog.records if "frozen" in r.getMessage() and tid in r.getMessage()]
+
+    def tick(adapters):
+        runner = _make_runner(None)
+        runner.adapters = adapters
+        asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    # Telegram offline: another platform keeps the tick alive, the sub is skipped.
+    offline = {Platform.DISCORD: RecordingAdapter()}
+    with caplog.at_level(logging.WARNING, logger=notifier.logger.name):
+        tick(dict(offline))
+        tick(dict(offline))
+    assert len(frozen_warnings()) == 1 and frozen_warnings()[0].levelno == logging.WARNING
+    assert "adapter not connected" in frozen_warnings()[0].getMessage()
+
+    # The cursor never moved: the completed event is still pending behind it.
+    assert len(_unseen_terminal_events(tid)) == 1
+
+    # Reconnect: the frozen backlog delivers and the cursor advances.
+    telegram = RecordingAdapter()
+    reconnected = dict(offline)
+    reconnected[Platform.TELEGRAM] = telegram
+    tick(reconnected)
+    assert len(telegram.sent) == 1
+    assert _unseen_terminal_events(tid) == []
+
+    # A later freeze on the same row is heard again: the advanced cursor re-arms the warning.
+    conn = kbc.connect()
+    try:
+        kb._append_event(conn, tid, kind="blocked", payload={"reason": "needs a human"})
+    finally:
+        conn.close()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=notifier.logger.name):
+        tick(dict(offline))
+    assert len(frozen_warnings()) == 1

@@ -142,6 +142,42 @@ def _warn_anchorless_thread_sub_once(sub: dict, platform: str) -> None:
 _UNROUTABLE_WARNED: set[tuple] = set()
 
 
+_FROZEN_WARNED: set[tuple] = set()
+
+
+def _warn_frozen_sub_once(conn: Any, sub: dict, platform: str) -> None:
+    """A subscription whose platform is offline is skipped without advancing the
+    cursor, so with terminal events already queued the delivery freeze is silent
+    below DEBUG (#141866). Say so ONCE per (row, cursor) at WARNING — mirroring
+    ``_warn_anchorless_thread_sub_once` (#110919); the cursor in the key re-arms
+    the warning after a successful delivery advances it, so a later freeze on
+    the same row is heard again. The probe is read-only: the cursor stays put,
+    and the backlog delivers when the adapter reconnects."""
+    try:
+        cursor = int(sub.get("last_event_id") or 0)
+    except (TypeError, ValueError):
+        return
+    key = (sub.get("task_id"), platform, sub.get("chat_id"), sub.get("thread_id") or "", cursor)
+    if key in _FROZEN_WARNED:
+        return
+    try:
+        _, pending = _kbn().unseen_events_for_sub(
+            conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+        )
+    except Exception:
+        # A probe failure must never break the tick; the skip below stays DEBUG.
+        return
+    if not pending:
+        return
+    _FROZEN_WARNED.add(key)
+    logger.warning(
+        "kanban notifier: subscription for %s on %s is frozen behind %d terminal event(s) "
+        "(cursor %d); adapter not connected — pending events deliver once it reconnects",
+        sub.get("task_id"), platform or "<missing>", len(pending), cursor,
+    )
+
+
 def _warn_unroutable_sub_once(sub: dict, platform: Any, message: str, *extra_args: Any) -> None:
     """A routed subscription the credential gate fail-closes is a permanent dead-end: delivery
     rewinds every tick with only a DEBUG line. Say so ONCE per row at WARNING, mirroring
@@ -306,6 +342,7 @@ class _Collector:
         if platform not in self.active_platforms:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
+            _warn_frozen_sub_once(conn, sub, platform)
             return None
         from gateway.config import Platform
         if _adapter_for_subscription(self.runner, Platform(platform), sub, owner_profile or self.notifier_profile) is None:
