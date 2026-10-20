@@ -342,6 +342,8 @@ def _get_current_model() -> tuple:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
         return model_cfg.strip(), "https://openrouter.ai/api/v1"
+    if not isinstance(model_cfg, dict):
+        return None, None
     # Main Hermes config stores the model as model.default; keep the legacy
     # model.name spelling working for older configs.
     model_name = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
@@ -394,20 +396,38 @@ def _resolve_model_and_credentials(model, base_url, api_key):
             base_url = base_url_detected
     if not model:
         if model is None and base_url_detected is None:
-            return None, None, None, {
+            return (
+                None,
+                None,
+                None,
+                {
+                    "success": False,
+                    "error": "No model specified and couldn't read or parse config.yaml",
+                },
+            )
+        return (
+            None,
+            None,
+            None,
+            {
                 "success": False,
-                "error": "No model specified and couldn't read or parse config.yaml",
-            }
-        return None, None, None, {
-            "success": False,
-            "error": "No model specified: set model.default (or legacy model.name) in config.yaml, or pass model= explicitly",
-        }
+                "error": (
+                    "No model specified: set model.default (or legacy model.name) "
+                    "in config.yaml, or pass model= explicitly"
+                ),
+            },
+        )
     if not base_url:
         base_url = "https://openrouter.ai/api/v1"
     if not api_key:
         api_key = _get_api_key(base_url)
     if not api_key:
-        return None, None, None, {"success": False, "error": _missing_api_key_error(base_url)}
+        return (
+            None,
+            None,
+            None,
+            {"success": False, "error": _missing_api_key_error(base_url)},
+        )
     return model, base_url, api_key, None
 
 
@@ -505,7 +525,9 @@ def auto_jailbreak(model=None, base_url=None, api_key=None,
         return {"success": False, "error": "openai package not installed"}
 
     # 1. Detect model
-    model, base_url, api_key, startup_error = _resolve_model_and_credentials(model, base_url, api_key)
+    model, base_url, api_key, startup_error = _resolve_model_and_credentials(
+        model, base_url, api_key
+    )
     if startup_error:
         return startup_error
 

@@ -75,6 +75,11 @@ def test_current_model_non_mapping_document(config_path):
     assert auto_jailbreak_mod._get_current_model() == (None, None)
 
 
+def test_current_model_non_mapping_model_field(config_path):
+    config_path.write_text("model: 42\n", encoding="utf-8")
+    assert auto_jailbreak_mod._get_current_model() == (None, None)
+
+
 def test_current_model_readable_but_no_model_entry(config_path):
     config_path.write_text("agent: {}\n", encoding="utf-8")
     model, base_url = auto_jailbreak_mod._get_current_model()
