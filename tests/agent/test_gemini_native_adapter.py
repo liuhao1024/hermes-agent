@@ -706,6 +706,49 @@ def test_gemini_2x_does_not_embed_image_parts():
     assert "parts" not in fr
 
 
+_MP4_DATA_URL = (
+    "data:video/mp4;base64,"
+    "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDE="
+)
+
+
+def test_user_video_url_part_becomes_inline_data():
+    """A user-message ``video_url`` data: URL must reach Gemini as inlineData, not be dropped."""
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "describe this clip"},
+            {"type": "video_url", "video_url": {"url": _MP4_DATA_URL}},
+        ]}],
+        model="gemini-3-flash",
+        tools=[],
+        tool_choice=None,
+    )
+    parts = request["contents"][0]["parts"]
+    inline = [p for p in parts if "inlineData" in p]
+    assert inline, "video_url part must survive translation as inlineData"
+    assert inline[0]["inlineData"]["mimeType"] == "video/mp4"
+    assert inline[0]["inlineData"]["data"]
+    assert any(p.get("text") == "describe this clip" for p in parts)
+
+
+def test_remote_video_url_part_is_not_inlined():
+    """A ``video_url`` pointing at a remote URL stays out of inlineData (no silent base64 fetch)."""
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "describe this clip"},
+            {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+        ]}],
+        model="gemini-3-flash",
+        tools=[],
+        tool_choice=None,
+    )
+    assert all("inlineData" not in p for p in request["contents"][0]["parts"])
+
+
 def test_text_only_tool_result_has_no_parts():
     """Text-only Gemini 3.x tool result does not add empty parts."""
     from agent.gemini_native_adapter import build_gemini_request
