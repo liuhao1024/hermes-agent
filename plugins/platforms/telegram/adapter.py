@@ -6395,6 +6395,33 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         sender_id = getattr(sender, "id", None)
         return bot_id is None or sender_id is None or sender_id != bot_id
 
+    def _telegram_reply_expected(self, message: Message, msg_type: MessageType) -> Optional[bool]:
+        """``MessageEvent.reply_expected`` for an admitted message — the Telegram mirror of Slack's
+        ``_slack_reply_expected``. A bare silence marker may stand only when the group gate admitted an
+        unaddressed message (a free_response chat/topic, or ``require_mention`` off); every addressed
+        trigger (guest mention, reply to the bot, @mention incl. ``/cmd@botname``, a wake-word hit) and
+        every DM keeps ``True`` so the visible fallback stays (#142024)."""
+        if not self._is_group_chat(message):
+            return True
+        if msg_type == MessageType.COMMAND:
+            return True
+        # ``object.__new__``-built adapters (unit-test fixtures) may not carry the live-identity
+        # attributes; without a bot identity or compiled wake-word patterns no addressing check can
+        # run, so only the admission reasons decide (a missing attribute must not break the build).
+        if getattr(self, "_bot", None) is not None and (
+                self._is_guest_mention(message)
+                or self._is_reply_to_bot(message)
+                or self._message_mentions_bot(message)):
+            return True
+        if getattr(self, "_mention_patterns", None) and self._message_matches_mention_patterns(message):
+            return True
+        chat_id_str = self._chat_id_str(message)
+        if (chat_id_str in self._telegram_free_response_chats()
+                or self._telegram_is_free_response_topic(message)
+                or not self._telegram_require_mention()):
+            return False
+        return None
+
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
         """Apply Telegram group trigger rules: DMs unrestricted; group messages pass ``allowed_chats`` (hard gate; only
         the ``guest_mode`` @mention bypass crosses it) and then any of free_response chat/topic, ``require_mention``
@@ -7135,6 +7162,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             message_id=str(message.message_id), platform_update_id=update_id,
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
             channel_prompt=group_identity_prompt(self, message, channel_prompt),
+            reply_expected=self._telegram_reply_expected(message, msg_type),
             edit_revision=self._edit_revision(message, update_id), timestamp=message.date)
 
     @staticmethod
