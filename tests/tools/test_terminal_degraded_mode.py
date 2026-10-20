@@ -87,6 +87,39 @@ class TestExceptionClassification:
         with pytest.raises(EnvironmentConnectionError):
             docker_env._ensure_docker_available()
 
+    def test_docker_version_failure_hint_names_socket_mount(self, monkeypatch):
+        """A reachable CLI with an unreachable daemon must hint at the missing socket mount
+        (Hermes-in-container deployments per the Docker setup guide)."""
+        from tools.environments import docker as docker_env
+
+        monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+
+        def _refused(*a, **k):
+            return subprocess.CompletedProcess(
+                a[0] if a else [], 1, stdout="",
+                stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                       "Is the docker daemon running?\n")
+
+        monkeypatch.setattr(docker_env, "run_capture", _refused)
+        with pytest.raises(EnvironmentConnectionError) as exc:
+            docker_env._ensure_docker_available()
+        assert "/var/run/docker.sock" in exc.value.retry_hint
+
+    def test_docker_probe_unavailable_reason_names_container_socket(self, monkeypatch):
+        """The startup 'terminal disabled' reason must point container users at the socket mount."""
+        from tools import terminal_tool_backends as ttb
+
+        monkeypatch.setattr("tools.environments.docker.find_docker", lambda: "/usr/bin/docker")
+
+        def _refused(*a, **k):
+            return subprocess.CompletedProcess(
+                a[0] if a else [], 1, stdout="",
+                stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n")
+
+        monkeypatch.setattr(ttb.subprocess, "run", _refused)
+        assert not ttb._check_requirements("docker", {})
+        assert "/var/run/docker.sock" in (ttb.terminal_backend_unavailable_reason() or "")
+
 class TestDegradedToolResult:
     """terminal_tool returns structured degraded results in warn mode."""
 

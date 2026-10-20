@@ -387,6 +387,36 @@ Direct `-e` flags override values from `.env`. This is useful for CI/CD or secre
 This page covers running Hermes itself inside Docker. If you want Hermes to execute the agent's `terminal` / `execute_code` calls inside a Docker sandbox container (one long-lived container shared across Hermes processes — see issue #20561), that's a separate config block — `terminal.backend: docker` plus `terminal.docker_image`, `terminal.docker_volumes`, `terminal.docker_forward_env`, `terminal.docker_env`, `terminal.docker_run_as_host_user`, `terminal.docker_extra_args`, `terminal.docker_persist_across_processes`, and `terminal.docker_orphan_reaper`. See [Configuration → Docker Backend](configuration.md#docker-backend) for the full set including container-lifecycle rules.
 :::
 
+## Sandboxed terminal backend inside the container
+
+When the API server is network-accessible (`API_SERVER_HOST=0.0.0.0` + a published port), the gateway logs a startup warning recommending a sandboxed terminal backend (`terminal.backend: docker`) instead of `local`. Following that advice on a container deployed from this page fails out of the box: the image ships the Docker **CLI** but nothing in the documented `docker run` / Compose examples mounts the Docker daemon socket, so `docker version` cannot reach a daemon and the backend stays unavailable (`Docker backend selected but '/usr/bin/docker version' failed`, and the terminal/file toolsets are held back).
+
+To make the backend work, mount the host's Docker socket into the container:
+
+```sh
+docker run -d \
+  --name hermes \
+  --restart unless-stopped \
+  -v ~/.hermes:/opt/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 8642:8642 \
+  nousresearch/hermes-agent gateway run
+```
+
+or in Compose:
+
+```yaml
+    volumes:
+      - ~/.hermes:/opt/data
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+:::warning Mounting the socket is a host-level privilege grant
+The socket gives every process inside the Hermes container full control of the host's Docker daemon. The sandbox containers Hermes then starts are **siblings** of the Hermes container on the host daemon — not nested inside it — so the daemon (and therefore the agent, if it can reach the CLI) can run privileged containers or mount host paths directly. For an agent reachable through a network-exposed API server this largely reintroduces the host access the sandbox was meant to remove. Prefer the combination that keeps the surface small: firewall the published port to trusted networks, and if untrusted callers remain, drop the terminal toolset entirely with `agent.disabled_toolsets: ["terminal"]` instead of mounting the socket.
+:::
+
+On hosts where the socket is group-protected (common with a rootful Docker Engine), the non-root `hermes` user may additionally lack permission to talk to the mounted socket; that surfaces as the same `docker version` failure and is a host permission problem, not a Hermes one.
+
 ## Docker Compose example
 
 For persistent deployment with both the gateway and dashboard, a `docker-compose.yaml` is convenient:

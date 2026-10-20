@@ -355,7 +355,8 @@ _BACKEND_SPECS: dict[str, dict[str, Any]] = {
 
 
 _PROBE_FAILED_REASONS = {
-    "docker": "Docker is installed but the Docker daemon is not running",
+    "docker": "Docker is installed but the Docker daemon is not reachable "
+              "(if Hermes runs in a container, mount /var/run/docker.sock)",
     "singularity": "Apptainer/Singularity is installed but `--version` failed, so the install looks broken",
 }
 

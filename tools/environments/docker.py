@@ -536,6 +536,8 @@ def _ensure_docker_available() -> None:
             docker_exe, result.returncode, result.stderr.strip(),
             error="Docker command is available but 'docker version' failed. Check your Docker installation.",
             hint="Start Docker, or add your user to the docker group, then retry — "
+                 "if Hermes itself runs in a container, mount the Docker socket "
+                 "(-v /var/run/docker.sock:/var/run/docker.sock) — "
                  "or run `hermes setup terminal` to switch to Local.")
 
 

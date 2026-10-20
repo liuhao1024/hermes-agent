@@ -416,7 +416,7 @@ terminal:
 
 **`terminal.docker_network`** (default `true`; env: `TERMINAL_DOCKER_NETWORK`) — set to `false` to run the sandbox container with `--network=none`, cutting off all network egress from agent commands. This applies to the execution container used by `terminal`, `execute_code`, and the file tools. Because containers persist across Hermes processes, flipping this to `false` while an older networked container exists will remove that container and start a fresh air-gapped one (a warning is logged); background processes running inside it are lost. Prefer this key over passing `--network=none` through `docker_extra_args`.
 
-**Requirements:** Docker Desktop or Docker Engine installed and running. Hermes probes `$PATH` plus common macOS install locations (`/usr/local/bin/docker`, `/opt/homebrew/bin/docker`, Docker Desktop app bundle). Podman is supported out of the box: set `HERMES_DOCKER_BINARY=podman` (or the full path) to force it when both are installed.
+**Requirements:** Docker Desktop or Docker Engine installed and running. Hermes probes `$PATH` plus common macOS install locations (`/usr/local/bin/docker`, `/opt/homebrew/bin/docker`, Docker Desktop app bundle). Podman is supported out of the box: set `HERMES_DOCKER_BINARY=podman` (or the full path) to force it when both are installed. When Hermes itself runs in a container, "installed and running" additionally means the Docker socket is mounted into it (`-v /var/run/docker.sock:/var/run/docker.sock`) — see [Docker Setup → Sandboxed terminal backend](./docker.md#sandboxed-terminal-backend-inside-the-container) for the required mount and its security trade-offs.
 
 #### Container lifecycle
 
