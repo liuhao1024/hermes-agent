@@ -232,7 +232,7 @@ terminal:
   font_family: ""   # Desktop terminal font; e.g. "MesloLGS NF"
   timeout: 180      # Per-command timeout in seconds
   home_mode: auto   # auto | real | profile — subprocess HOME policy
-  env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
+  env_passthrough: []  # Env var names resolved from the profile's .env/scope and injected into terminal + execute_code children (local backend included)
   client_env_passthrough: []  # Extra non-secret toolchain names (e.g. GEM_HOME) a local CLI/TUI session's tools take from its launching shell
   sync_back_max_bytes: 2147483648  # Remote backends: refuse to extract a state archive larger than this (bytes)
   singularity_image: "docker://nousresearch/hermes-sandbox:desktop"  # Container image for Singularity backend

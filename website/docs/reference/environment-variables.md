@@ -6,7 +6,9 @@ description: "Complete reference of all environment variables used by Hermes Age
 
 # Environment Variables Reference
 
-Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here.
+Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. With a named profile the file lives in that profile's own home (`~/.hermes/profiles/<name>/.env`) and applies only to that profile. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here.
+
+`.env` populates the **agent process** environment — providers, plugins, and skills read it there. It is not a blanket environment for the `terminal` shell: what a shell command sees depends on how the profile is running and on the passthrough rules. See [`.env` and the terminal shell](#env-and-the-terminal-shell) below.
 
 ## LLM Providers
 
@@ -267,6 +269,17 @@ These variables configure the [Tool Gateway](../user-guide/features/tool-gateway
 | `SUDO_PASSWORD` | Enable sudo without interactive prompt |
 
 For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETIME_SECONDS` controls when Hermes cleans up an idle terminal session, and later resumes may recreate the sandbox rather than keep the same live processes running.
+
+### `.env` and the terminal shell {#env-and-the-terminal-shell}
+
+A `terminal` command does not inherit the agent process's environment wholesale — Hermes scrubs its managed credentials from every terminal child, and a profile that is *served* by another process keeps its `.env` out of that process entirely:
+
+- **Hermes-managed credentials** (provider API keys, bot tokens) are stripped from `terminal` and `execute_code` children on every backend.
+- **Profile launched directly** (`hermes -p <profile>`, or a gateway whose home is the profile's): non-secret `.env` values ride along in the process environment, so `terminal` commands see them.
+- **Profile served by another process** (a Desktop backend serving `?profile=`, a multiplexed gateway): the served profile's `.env` never enters the serving process's environment, so a `terminal` command starts with none of its variables — secret or not. List the names you need under `terminal.env_passthrough` in `config.yaml`: each listed name is resolved from the bound profile's scope and injected into `terminal` and `execute_code` children. This applies to the `local` backend too, not only sandboxes; Hermes provider-credential names are refused there by design (see [Environment Variable Passthrough](../user-guide/security.md#environment-variable-passthrough)).
+- For a one-off value, `export` it inside the command or pass it as an argument — the shell cannot observe whether a variable is "set in `.env` but not inherited".
+
+Variables the agent explicitly `export`s in a command carry over while the persistent shell is on ([Persistent Shell](#persistent-shell)); `.env` variables are not part of that set unless forwarded as above.
 
 ## SSH Backend
 
