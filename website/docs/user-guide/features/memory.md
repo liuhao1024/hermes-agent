@@ -330,12 +330,13 @@ for the configuration details.
 
 By default the agent saves memory freely — including from the background
 self-improvement review that runs after a turn. If you'd rather approve saves
-first, set `memory.write_approval: true`. It's a simple on/off gate applied to
-**both** foreground turns and the background review:
+first, set `memory.write_approval: true`. The gate covers foreground saves and
+the background review's `add`s; the review's `patch`/`remove` consolidations
+are staged for `/memory pending` even with the gate off:
 
 | `write_approval` | Behaviour |
 |------------------|-----------|
-| `false` (default) | Write freely — the gate is off (the pre-gate behaviour). |
+| `false` (default) | Write freely — the gate is off (the pre-gate behaviour), except that the background review's `patch`/`remove` (and any batch containing one) is always staged for `/memory pending`. |
 | `true` | Require approval before anything is saved. In the interactive CLI, foreground writes prompt you inline (entries are small enough to read in full). Everywhere else — messaging platforms, scripts, and the background self-improvement review — writes are **staged** for review with `/memory pending`. |
 
 > To turn memory off entirely (not just gate it), set both `memory_enabled: false` and `user_profile_enabled: false`. When both built-in stores are disabled, the built-in `memory` tool is automatically hidden.
