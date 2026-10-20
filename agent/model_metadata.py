@@ -20,6 +20,7 @@ import hermes_yaml as yaml
 from agent import model_metadata_http
 from agent.model_metadata_cache import _write_context_cache, locked_context_cache
 from agent.model_metadata_llamacpp import llamacpp_context
+from agent.model_metadata_ollama import _looks_like_ollama_show, _ollama_show_context
 
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname
 
@@ -564,29 +565,6 @@ def _longest_key_match(table: dict[str, int], model_lower: str) -> Optional[tupl
     for key, value in sorted(table.items(), key=lambda x: len(x[0]), reverse=True):
         if _catalog_key_matches(key, model_lower):
             return key, value
-    return None
-
-
-def _ollama_show_context(data: dict[str, Any], *, gguf_first: bool, minimum: Optional[int] = None) -> Optional[int]:
-    """Context length from an Ollama ``/api/show`` payload. ``parameters.num_ctx`` is the RUNTIME
-    window (Modelfile override), ``model_info.*.context_length`` the GGUF training max. Local users
-    control num_ctx (prefer it); hosted operators may cap it arbitrarily (``gguf_first``)."""
-    def _num_ctx():
-        for line in data.get("parameters", "").split("\n"):
-            parts = line.strip().split()
-            if "num_ctx" in line and len(parts) >= 2:
-                try:
-                    yield int(parts[-1])
-                except ValueError:
-                    continue
-    def _gguf():
-        for key, value in data.get("model_info", {}).items():
-            if "context_length" in key and isinstance(value, (int, float)):
-                yield int(value)
-    for reader in ((_gguf, _num_ctx) if gguf_first else (_num_ctx, _gguf)):
-        for ctx in reader():
-            if minimum is None or ctx >= minimum:
-                return ctx
     return None
 
 
@@ -1436,14 +1414,16 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     bare_model, server_url = _strip_provider_prefix(model), _server_root(base_url)
     if not _is_ollama_server(base_url, api_key):
         return None
+    # v2 namespace: v1 entries may hold a window served by a look-alike gateway — re-probe once
+    # through the shape gate below instead of serving the poisoned verdict forever (#142239).
     _disk_key = f"{server_url}|{bare_model}"
-    disk_hit = _local_probe_disk_get("ollama_num_ctx", _disk_key)
+    disk_hit = _local_probe_disk_get("ollama_num_ctx_v2", _disk_key)
     if isinstance(disk_hit, int) and disk_hit > 0:
         return disk_hit
     data = _ollama_show(server_url, api_key, bare_model)
-    ctx = _ollama_show_context(data, gguf_first=False) if data is not None else None
+    ctx = _ollama_show_context(data, gguf_first=False) if _looks_like_ollama_show(data) else None
     if ctx is not None:
-        _local_probe_disk_put("ollama_num_ctx", _disk_key, ctx)
+        _local_probe_disk_put("ollama_num_ctx_v2", _disk_key, ctx)
     return ctx
 
 

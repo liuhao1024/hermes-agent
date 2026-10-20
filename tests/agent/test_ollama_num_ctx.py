@@ -86,6 +86,54 @@ class TestQueryOllamaNumCtx:
         assert result == 32768
 
 
+class TestOllamaShowShapeGate:
+    """#142239: a local compatibility gateway answers /api/show 200 with flat look-alike keys;
+    only a payload positively carrying Ollama's dotted GGUF keys / details.format may yield num_ctx."""
+
+    def test_lookalike_gateway_payload_rejected(self):
+        """Flat model_info keys and details.context_length are not Ollama's shape — None."""
+        show_data = {
+            "details": {"context_length": 131072},
+            "model_info": {"context_length": 131072},
+        }
+        mock_ctx, _ = _mock_httpx_client(show_data)
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="ollama"):
+            import httpx
+            with patch.object(httpx, "Client", return_value=mock_ctx):
+                result = query_ollama_num_ctx("gemini-2.5-pro", "http://127.0.0.1:4321/v1")
+
+        assert result is None
+
+    def test_format_only_payload_yields_none(self):
+        """details.format without dotted model_info keys leaves nothing extractable — None."""
+        show_data = {"details": {"format": "gguf", "context_length": 65536}}
+        mock_ctx, _ = _mock_httpx_client(show_data)
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="ollama"):
+            import httpx
+            with patch.object(httpx, "Client", return_value=mock_ctx):
+                result = query_ollama_num_ctx("some-model", "http://127.0.0.1:4321/v1")
+
+        assert result is None
+
+    def test_dotted_model_info_still_accepted(self):
+        """Real Ollama nests GGUF keys (llama.context_length) — still extracted."""
+        show_data = {
+            "details": {"format": "gguf", "family": "llama"},
+            "model_info": {"llama.context_length": 131072},
+            "parameters": "",
+        }
+        mock_ctx, _ = _mock_httpx_client(show_data)
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="ollama"):
+            import httpx
+            with patch.object(httpx, "Client", return_value=mock_ctx):
+                result = query_ollama_num_ctx("llama3.1:8b", "http://localhost:11434/v1")
+
+        assert result == 131072
+
+
 
 
 class TestQueryOllamaSupportsVision:

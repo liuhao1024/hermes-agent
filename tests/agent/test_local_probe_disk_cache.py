@@ -90,7 +90,7 @@ class TestOllamaNumCtxDiskL2:
         _clear_in_proc()
         MM._local_probe_disk_put("server_type", "http://127.0.0.1:11434", "ollama")
         MM._local_probe_disk_put(
-            "ollama_num_ctx", "http://127.0.0.1:11434|llama3", 131072
+            "ollama_num_ctx_v2", "http://127.0.0.1:11434|llama3", 131072
         )
         with patch("httpx.Client") as mock_client:
             ctx = MM.query_ollama_num_ctx("llama3", "http://127.0.0.1:11434/v1")
@@ -113,6 +113,26 @@ class TestOllamaNumCtxDiskL2:
             ctx = MM.query_ollama_num_ctx("llama3", "http://127.0.0.1:11434/v1")
         assert ctx == 8192
         assert (
-            MM._local_probe_disk_get("ollama_num_ctx", "http://127.0.0.1:11434|llama3")
+            MM._local_probe_disk_get("ollama_num_ctx_v2", "http://127.0.0.1:11434|llama3")
             == 8192
         )
+
+    def test_v1_lookalike_entry_not_served(self):
+        """#142239: a v1 entry served by a look-alike gateway must not survive the v2 namespacing —
+        the re-probe goes through the /api/show shape gate and a look-alike payload yields None."""
+        _clear_in_proc()
+        MM._local_probe_disk_put("server_type", "http://127.0.0.1:4321", "ollama")
+        MM._local_probe_disk_put("ollama_num_ctx", "http://127.0.0.1:4321|gemini-2.5-pro", 131072)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {
+            "details": {"context_length": 131072},
+            "model_info": {"context_length": 131072},
+        }
+        client = MagicMock()
+        client.post.return_value = resp
+        client.__enter__ = lambda s: client
+        client.__exit__ = lambda s, *a: False
+        with patch("httpx.Client", return_value=client):
+            ctx = MM.query_ollama_num_ctx("gemini-2.5-pro", "http://127.0.0.1:4321/v1")
+        assert ctx is None
+        assert MM._local_probe_disk_get("ollama_num_ctx_v2", "http://127.0.0.1:4321|gemini-2.5-pro") is None
