@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- #142264: _scope_argv sources terminal.shell_init_files for background/foreground parity (+4 lines on an over-cap facade; the sibling split is a separate refactor)
 """Process Registry -- in-memory registry for background processes spawned via
 terminal(background=true): rolling 200KB output buffer, poll/log/wait/kill, JSON
 checkpoint for crash recovery, session-scoped tracking for gateway reset protection.
@@ -25,7 +26,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 # (not merely "not Windows") so macOS and other POSIX platforms never touch systemd.
 # See #70716.
 _IS_LINUX = platform.system() == "Linux"
-from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env
+from tools.environments.local import _find_shell, _prepend_shell_init, _resolve_safe_cwd, _resolve_shell_init_files, _sanitize_subprocess_env, _terminal_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
@@ -1111,6 +1112,10 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         sourced, user tools on PATH), wrapped in a transient systemd scope when we are
         the supervised gateway (own cgroup: an OOM kills only the worker, not the
         gateway and its messaging control plane)."""
+        # Source the configured terminal.shell_init_files like the foreground env
+        # snapshot (_run_bash(login=True)): without it a PATH set only in a custom
+        # init file applies to foreground calls but not background spawns (#142264).
+        safe_command = _prepend_shell_init(safe_command, _resolve_shell_init_files())
         argv = [_find_shell(), "-lic", f"set +m; {safe_command}"]
         # This applies to both pipe mode and the PTY path above. See #70716.
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()

@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- #142264: autouse _no_shell_init_files fixture keeps argv assertions deterministic regardless of the host's rc files
 """Tests for tools/process_registry.py — ProcessRegistry query methods, pruning, checkpoint."""
 
 import json
@@ -2141,6 +2142,15 @@ class TestSystemdCgroupIsolation:
         monkeypatch.setattr(
             "gateway.status.get_running_pid",
             lambda *, cleanup_stale=False: os.getpid(),
+        )
+
+    @pytest.fixture(autouse=True)
+    def _no_shell_init_files(self, monkeypatch):
+        """Keep the argv assertions below deterministic: _scope_argv sources
+        terminal.shell_init_files (#142264), which on a developer host resolve
+        to real rc files and would prepend source lines to every argv."""
+        monkeypatch.setattr(
+            "tools.process_registry._resolve_shell_init_files", list
         )
 
     def _fake_popen_capture(self):
