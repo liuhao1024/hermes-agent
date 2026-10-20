@@ -187,6 +187,42 @@ each operation's previous content reflects earlier operations in that batch.
 Older Hermes versions can omit `previous_content`. Providers that require exact
 identity should skip destructive mirroring when it is absent.
 
+### Prefetch timeout and optional earlier-turn recall
+
+The host waits up to `memory.external_prefetch_timeout` seconds for an external
+`prefetch()` call (default `8.0`; invalid/non-positive/non-finite config values
+fall back to that default). The underlying context-bound, gated worker continues
+after the wait times out; it is not cancelled. By default a late value replays
+only for the identical query and session, without another lookup on that replay.
+
+```yaml
+memory:
+  external_prefetch_timeout: 8.0
+  defer_prefetch_on_timeout: false  # set true to enable cross-question carry
+```
+
+With `defer_prefetch_on_timeout: true`, a successful nonempty late value can be
+claimed once by the next eligible question in the same nonempty session/profile,
+even if the question changed. It is labelled **earlier-turn recall for a previous
+question**, not current-topic evidence. The host still attempts fresh recall for
+that question when admission and local ownership permit; a fresh timeout, empty
+result or error does not erase the claimed earlier recall. Combined context uses
+the same spill policy described below.
+
+Each manager permits only one active host prefetch per external provider; a
+running lookup still fences duplicates after a timeout or interrupted wait. The
+process-wide per-home/provider gate and its concurrency across independent
+managers remain in force. There is one in-memory pending value, not a durable
+queue. Session changes, reset/rewind, compression, session end, profile rebinding
+and shutdown invalidate both ready values and in-flight eligibility. Empty session
+IDs cannot carry recall across questions. Trivial prompts skipped by the normal
+turn gate do not consume it. Injection remains in the current API user content;
+historical messages and the system prompt are not rewritten.
+
+These settings are captured at manager construction; restart Hermes to apply
+them. Built-in inline memory and provider-managed asynchronous recall/queues are
+unchanged: this option only changes the host's handling of a timed-out `prefetch()`.
+
 ### Oversized prefetch results
 
 External `prefetch()` results are returned in full by default, preserving the

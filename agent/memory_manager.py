@@ -26,6 +26,7 @@ from agent.memory_caller_scope import bound_scope, caller_scope, claim_instance,
 from agent.memory_context import StreamingContextScrubber, build_memory_context_block, sanitize_context
 from agent.memory_manager_tools import (inject_memory_provider_tools, memory_provider_tools_enabled,
                                         memory_provider_tools_exposed, normalize_tool_schema)
+from agent.memory_deferred_prefetch import _DeferredCall, _DeferredPrefetch
 from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION, ctx_bound, spawn_context_thread
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from hermes_constants import hermes_home_key
@@ -85,9 +86,11 @@ def resolve_external_prefetch_timeout(
 def memory_manager_from_config(
     mem_config: Optional[Mapping[str, Any]] = None,
 ) -> MemoryManager:
-    """Build a ``MemoryManager`` with the configured prefetch timeout."""
+    """Build a ``MemoryManager`` with the configured prefetch timeout and carry opt-in."""
     return MemoryManager(
         external_prefetch_timeout=resolve_external_prefetch_timeout(mem_config),
+        defer_prefetch_on_timeout=(isinstance(mem_config, Mapping)
+                                   and mem_config.get("defer_prefetch_on_timeout") is True),
     )
 
 
@@ -252,7 +255,9 @@ class MemoryManager:
     _PREFETCH_GATE = _StuckCallGate()
     _BACKGROUND_GATE = _StuckCallGate()
 
-    def __init__(self, *, external_prefetch_timeout: Optional[float] = None) -> None:
+    def __init__(self, *, external_prefetch_timeout: Optional[float] = None,
+                 defer_prefetch_on_timeout: bool = False) -> None:
+        self._deferred_prefetch = _DeferredPrefetch() if defer_prefetch_on_timeout is True else None
         self._providers: list[MemoryProvider] = []
         self._tool_to_provider: dict[str, MemoryProvider] = {}
         self._external_prefetch_spill_config: Optional[dict[str, Any]] = None
@@ -413,7 +418,11 @@ class MemoryManager:
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
         """Merge non-empty prefetch context from all providers (failures are non-fatal)."""
         clean_query = self._strip_skill_scaffolding(query)
-        if not clean_query or not self._owner_allows("prefetch"):
+        if not clean_query:
+            return ""
+        if not self._owner_allows("prefetch"):
+            if self._deferred_prefetch is not None:
+                self._invalidate_late_prefetch()
             return ""
         clean_query = _redact_for_provider(clean_query)
         parts = self._each_provider(
@@ -432,6 +441,8 @@ class MemoryManager:
         """
         if provider.name == "builtin":
             return provider.prefetch(query, session_id=session_id)
+        if self._deferred_prefetch is not None:
+            return self._deferred_prefetch.prefetch(self, provider, query, session_id)
 
         # A late result from a previously timed-out call replays only for the same
         # session and query; anything else it held is dropped here.
@@ -442,6 +453,11 @@ class MemoryManager:
                 late.value, session_id=session_id, provider_name=provider.name,
             )
 
+        return self._prefetch_external(provider, query, session_id=session_id)
+
+    def _prefetch_external(self, provider: MemoryProvider, query: str, *, session_id: str = "",
+                           deferred: Optional[_DeferredCall] = None) -> str:
+        """The shared gated worker; opt-in ownership never starts an alternative lookup path."""
         result_box: dict[str, str] = {}
         error_box: dict[str, Exception] = {}
         consumed = {"yes": False}
@@ -454,33 +470,44 @@ class MemoryManager:
             try:
                 result_box["value"] = provider.prefetch(query, session_id=session_id) or ""
             except Exception as exc:  # pragma: no cover - re-raised by caller
+                logger.debug("Memory provider '%s' prefetch worker failed", provider.name, exc_info=True)
                 error_box["value"] = exc
             finally:
-                late_raw = None
-                with self._late_prefetch_lock:
-                    if (
-                        abandoned["yes"]
-                        and not consumed["yes"]
-                        and "value" in result_box
-                        and generation == self._late_prefetch_generation
-                    ):
-                        late_raw = result_box["value"]
-                if late_raw:
-                    spilled = self._spill_external_prefetch(
-                        late_raw, session_id=session_id, provider_name=provider.name,
-                    )
+                try:
+                    late_raw = None
                     with self._late_prefetch_lock:
                         if (
-                            abandoned["yes"]
+                            deferred is None
+                            and abandoned["yes"]
                             and not consumed["yes"]
+                            and "value" in result_box
                             and generation == self._late_prefetch_generation
                         ):
-                            self._late_prefetch[provider.name] = _LatePrefetch(
-                                query, session_id, spilled,
-                            )
-                self._PREFETCH_GATE.leave(key, thread, ok="value" not in error_box)
+                            late_raw = result_box["value"]
+                    if late_raw:
+                        spilled = self._spill_external_prefetch(
+                            late_raw, session_id=session_id, provider_name=provider.name,
+                        )
+                        with self._late_prefetch_lock:
+                            if (
+                                abandoned["yes"]
+                                and not consumed["yes"]
+                                and generation == self._late_prefetch_generation
+                            ):
+                                self._late_prefetch[provider.name] = _LatePrefetch(
+                                    query, session_id, spilled,
+                                )
+                finally:
+                    try:
+                        if deferred is not None:
+                            self._deferred_prefetch.complete(self, provider.name, deferred, result_box.get("value", ""))
+                    finally:
+                        # Completion can block on spill I/O; keep the live worker counted until it settles.
+                        self._PREFETCH_GATE.leave(key, thread, ok="value" not in error_box)
 
         thread = spawn_context_thread(_run, name=f"memory-prefetch-{provider.name}")
+        if deferred is not None:
+            deferred.thread = thread
         with self._late_prefetch_lock:
             generation = self._late_prefetch_generation
         skipped = self._PREFETCH_GATE.enter(key, thread, self._external_prefetch_timeout)
@@ -490,9 +517,10 @@ class MemoryManager:
             return ""
         try:
             thread.start()
-        except RuntimeError:
+        except BaseException:
             # Never started, so its finally never runs: drop the entry or it would count forever.
-            self._PREFETCH_GATE.leave(key, thread, ok=False)
+            if thread.ident is None:
+                self._PREFETCH_GATE.leave(key, thread, ok=False)
             raise
 
         thread.join(self._external_prefetch_timeout)
@@ -502,14 +530,20 @@ class MemoryManager:
                 logger.warning(
                     "Memory provider '%s' prefetch timed out after %.1fs; the call keeps running "
                     "in the background and its late result is cached for the next turn with the "
-                    "same query. Set memory.external_prefetch_timeout in config.yaml if the "
+                    "%s. Set memory.external_prefetch_timeout in config.yaml if the "
                     "backend is routinely slower than %.1fs.", provider.name,
-                    self._external_prefetch_timeout, self._external_prefetch_timeout,
+                    self._external_prefetch_timeout,
+                    "same query" if deferred is None else "same session (earlier-turn recall)",
+                    self._external_prefetch_timeout,
                 )
                 return ""
             consumed["yes"] = True
+            if deferred is not None:
+                deferred.consumed = True
         if "value" in error_box:
             raise error_box["value"]
+        if deferred is not None:
+            return deferred.value
         result = result_box.get("value", "")
         return self._spill_external_prefetch(
             result, session_id=session_id, provider_name=provider.name,
@@ -733,6 +767,8 @@ class MemoryManager:
         self._each_provider("on_turn_start failed", _tick)
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
+        if self._deferred_prefetch is not None:
+            self._invalidate_late_prefetch()
         if not self._owner_allows("on_session_end"):
             return
         messages = _redact_messages_for_egress(messages or [])
@@ -969,6 +1005,8 @@ class MemoryManager:
 
     def shutdown_all(self) -> None:
         """Drain the background executor (bounded), then shut providers down in reverse order."""
+        if self._deferred_prefetch is not None:
+            self._invalidate_late_prefetch()
         self._drain_sync_executor()
         self._each_provider("shutdown failed", lambda p: p.shutdown(), level=logging.WARNING,
                             providers=self._providers[::-1])
@@ -1030,6 +1068,8 @@ class MemoryManager:
 
     def initialize_all(self, session_id: str, **kwargs) -> None:
         """Initialize all providers, injecting ``hermes_home`` so they resolve profile-scoped paths."""
+        if self._deferred_prefetch is not None:
+            self._invalidate_late_prefetch()
         if "hermes_home" not in kwargs:
             from hermes_constants import get_hermes_home
             kwargs["hermes_home"] = str(get_hermes_home())

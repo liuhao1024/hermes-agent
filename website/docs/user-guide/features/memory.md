@@ -291,6 +291,8 @@ memory:
   user_char_limit: 1375     # ~500 tokens
   write_approval: false     # false = write freely (default) | true = require approval
   prefetch_spill_enabled: false  # external recall stays intact unless explicitly enabled
+  external_prefetch_timeout: 8.0  # seconds to wait for external recall
+  defer_prefetch_on_timeout: false  # opt-in, once-only earlier-turn recall on a later question
 ```
 
 Setting **both** `memory_enabled` and `user_profile_enabled` to `false` turns the
@@ -307,6 +309,24 @@ it backs the profile store — but the system prompt swaps the full memory
 guidance for a narrower profile-only block. The tool schema advertises only the
 `user` target, and direct or staged writes to disabled `MEMORY.md` are rejected.
 The inverse configuration advertises only `memory` and rejects `USER.md` writes.
+
+### External recall timeout
+
+`memory.external_prefetch_timeout` bounds the host's wait for synchronous external
+recall (default 8 seconds). The lookup keeps running after timeout; by default its
+late result is used only if the identical question is asked in the same session.
+
+Set `memory.defer_prefetch_on_timeout: true` to let a successful nonempty late
+result appear once on the next eligible question in the same nonempty
+session/profile, even when the question changes. It is marked as earlier-turn
+recall for a previous question. Fresh recall is still attempted when no lookup is
+already running and the existing admission gate permits it; an empty/error/timeout
+from fresh recall does not erase ready earlier recall. Only one lookup and one
+pending value are owned per manager/provider. Session changes, reset/rewind,
+compression, profile rebinding, session end and shutdown invalidate pending recall,
+including results still running. Built-in memory and provider-managed async queues
+are unchanged. Restart Hermes to apply the setting.
+See [prefetch timeout and optional earlier-turn recall](../../developer-guide/memory-provider-plugin.md#prefetch-timeout-and-optional-earlier-turn-recall).
 
 ### External recall size
 
