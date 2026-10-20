@@ -421,7 +421,12 @@ def test_update_sync_survives_unreadable_secondary_profile(admission_env):
     workspace = Path(Facts(runtime_facts_path(core), strict=True).get("venv")["resolved_lock"]).parent
     assert "primary-dep" in (workspace / "pyproject.toml").read_text()
     assert broken.read_text(encoding="utf-8") == "plugins: [broken]\n"
-    assert str(broken.parent) in json.dumps(_latest_receipt(home).get("warnings"))
+    # Compare against the unescaped message strings: json.dumps would double the
+    # backslashes of a Windows path, so the substring check must not go through it.
+    assert any(
+        str(broken.parent) in w.get("message", "")
+        for w in _latest_receipt(home).get("warnings", [])
+    )
     assert venv_is_current(project_root=core) is True
 
 
