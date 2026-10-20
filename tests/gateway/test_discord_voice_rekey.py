@@ -13,6 +13,7 @@ websocket-hook trigger, and the DAVE unmapped-SSRC ciphertext drop.
 """
 
 import asyncio
+import contextlib
 import struct
 import sys
 import time
@@ -447,3 +448,125 @@ class TestTeardownHealthLine:
         assert "ok=10" in line
         assert "decrypt_failed=3" in line
         assert "dave_unmapped_dropped=2" in line
+
+
+class _FakeSocketReader:
+    """Test double for discord.voice_state.SocketReader — no thread, no select."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.callbacks = []
+        self.calls = []
+        self._alive = True
+
+    def start(self):
+        self.calls.append("start")
+
+    def register(self, callback):
+        self.callbacks.append(callback)
+
+    def unregister(self, callback):
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
+
+    def resume(self):
+        self.calls.append("resume")
+
+    def is_alive(self):
+        return self._alive
+
+
+def _make_conn_with_reader(*, alive=True):
+    """A conn whose add/remove_socket_listener delegate to its _socket_reader,
+    mirroring VoiceConnectionState.  The returned reader's liveness is scripted."""
+    reader = _FakeSocketReader(None)
+    reader._alive = alive
+
+    def add_socket_listener(cb):
+        conn._socket_reader.register(cb)
+
+    def remove_socket_listener(cb):
+        conn._socket_reader.unregister(cb)
+
+    conn = SimpleNamespace(
+        secret_key=KEY_A,
+        dave_session=None,
+        dave_protocol_version=0,
+        dave_downgraded=False,
+        dave_pending_transitions={},
+        ssrc=999,
+        hook=None,
+        ws=None,
+        _socket_reader=reader,
+        add_socket_listener=add_socket_listener,
+        remove_socket_listener=remove_socket_listener,
+    )
+    reader.conn = conn
+    return conn, reader
+
+
+class TestSocketReaderRearm:
+    """A full disconnect mid-reconnect (cleanup=True path in discord.py) stops
+    the SocketReader thread and clears its callbacks; the subsequent reconnect
+    succeeds but can never restart the dead thread, leaving the receiver deaf."""
+
+    @contextlib.contextmanager
+    def _patch_socket_reader(self, reader_cls):
+        # ``from discord.voice_state import SocketReader`` resolves through
+        # sys.modules first, so a stub module works under both the real
+        # library and the conftest MagicMock (which is not a package).
+        mod = types.ModuleType("discord.voice_state")
+        mod.SocketReader = reader_cls
+        with patch.dict(sys.modules, {"discord.voice_state": mod}):
+            yield
+
+    def test_refresh_rearms_dead_socket_reader(self):
+        conn, dead = _make_conn_with_reader(alive=False)
+        receiver = _make_receiver(conn)
+        with self._patch_socket_reader(_FakeSocketReader):
+            receiver.refresh_credentials("voice ws op 4")
+        replacement = conn._socket_reader
+        assert replacement is not dead
+        assert receiver._on_packet in replacement.callbacks
+        assert replacement.calls == ["start", "resume"]
+
+    def test_refresh_rearm_rotates_key_too(self):
+        conn, _dead = _make_conn_with_reader(alive=False)
+        receiver = _make_receiver(conn)
+        conn.secret_key = KEY_B
+        with self._patch_socket_reader(_FakeSocketReader):
+            receiver.refresh_credentials("voice ws op 4")
+        assert receiver._secret_key == KEY_B
+
+    def test_refresh_keeps_live_socket_reader(self):
+        conn, reader = _make_conn_with_reader(alive=True)
+        receiver = _make_receiver(conn)
+        with self._patch_socket_reader(_FakeSocketReader):
+            receiver.refresh_credentials("voice ws op 4")
+        assert conn._socket_reader is reader
+        assert reader.calls == []
+
+    def test_stop_removes_listener_from_replacement(self):
+        conn, _dead = _make_conn_with_reader(alive=False)
+        receiver = _make_receiver(conn)
+        with self._patch_socket_reader(_FakeSocketReader):
+            receiver.refresh_credentials("voice ws op 4")
+        replacement = conn._socket_reader
+        assert receiver._on_packet in replacement.callbacks
+        receiver.stop()
+        assert receiver._on_packet not in replacement.callbacks
+
+    def test_rearm_failure_is_nonfatal(self):
+        conn, dead = _make_conn_with_reader(alive=False)
+        receiver = _make_receiver(conn)
+        conn.secret_key = KEY_B
+
+        class _Boom:
+            def __init__(self, conn):
+                raise RuntimeError("boom")
+
+        with self._patch_socket_reader(_Boom):
+            receiver.refresh_credentials("voice ws op 4")  # must not raise
+        assert conn._socket_reader is dead
+        # credentials still refreshed despite the re-arm failure
+        assert receiver._secret_key == KEY_B

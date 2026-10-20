@@ -833,6 +833,7 @@ class VoiceReceiver:
         try:
             conn = self._vc._connection
             self._resolve_credentials(conn)
+            self._rearm_socket_reader(conn)
             self._nacl_fail_streak = 0
             logger.info(
                 "VoiceReceiver credentials refreshed (%s; bot_ssrc=%d, dave=%s)",
@@ -844,6 +845,52 @@ class VoiceReceiver:
             logger.warning(
                 "VoiceReceiver credential refresh failed (%s): %s", reason, e
             )
+
+    def _rearm_socket_reader(self, conn) -> None:
+        """Swap in a fresh socket reader when discord.py's killed ours.
+
+        ``VoiceConnectionState.voice_state_update`` treats a channel_id=None
+        update arriving while ``_expecting_disconnect`` is already consumed
+        (e.g. Discord clearing the bot's voice state while the voice
+        websocket sits in a reconnect backoff — verified against discord.py
+        2.7.1) as an external disconnect and runs the full ``disconnect()``
+        with ``cleanup=True``: the SocketReader thread is stopped and its
+        listener callbacks cleared.  The reconnect attempt afterwards still
+        succeeds — fresh websocket, fresh keys, the SPEAKING hook stays
+        live — but a finished ``threading.Thread`` cannot be restarted by
+        ``resume()``, so the packet listener bound at ``start()`` is gone
+        and voice input stays silently deaf until the bot leaves and
+        rejoins the channel.
+
+        This method runs on every event that ends a (re)connect (refresh
+        triggers), so a dead reader is noticed at the exact moment its
+        replacement has live state to read.
+        """
+        reader = getattr(conn, "_socket_reader", None)
+        if reader is None or reader.is_alive():
+            return
+        try:
+            from discord.voice_state import SocketReader
+
+            replacement = SocketReader(conn)
+            # add/remove_socket_listener delegate to conn._socket_reader, so
+            # the swap must happen before re-registering our listener.
+            conn._socket_reader = replacement
+            replacement.start()
+            conn.add_socket_listener(self._on_packet)
+            # A start_paused reader is not running yet and register() only
+            # auto-resumes an idle-paused one; callbacks are non-empty now.
+            replacement.resume()
+        except Exception as e:
+            logger.warning(
+                "VoiceReceiver could not re-arm the socket reader: %s", e, exc_info=True
+            )
+            return
+        logger.warning(
+            "VoiceReceiver socket reader was dead (full disconnect during a "
+            "reconnect); re-armed a fresh reader (bot_ssrc=%d)",
+            self._bot_ssrc,
+        )
 
     def stop(self):
         """Stop listening and clean up."""
