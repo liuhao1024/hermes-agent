@@ -83,6 +83,36 @@ class TestPlatformEnumDynamic:
         assert set(aliases.values()) <= names
         assert not (set(aliases) & names)
 
+    def test_core_ships_platform_reuses_the_process_cached_scan(self):
+        """core_ships_platform shares the _missing_ process cache, so repeated lookups never
+        rescan/reparse the bundled plugin manifests (#142152)."""
+        import gateway.config as gc
+        from gateway.platform_registry import core_ships_platform
+
+        gc._Platform__bundled_plugin_names = None
+        gc._Platform__bundled_plugin_aliases = None
+        original = gc.Platform.__dict__["_scan_bundled_plugin_platforms"]
+        scan = original.__func__
+        calls = []
+
+        def counting_scan(cls):
+            calls.append(1)
+            return scan(cls)
+
+        gc.Platform._scan_bundled_plugin_platforms = classmethod(counting_scan)
+        try:
+            assert core_ships_platform("telegram") is True  # static member: short-circuits
+            assert calls == []
+            assert core_ships_platform("a2a") is True  # bundled: populates the cache once
+            assert len(calls) == 1
+            assert core_ships_platform("a2a") is True
+            assert core_ships_platform("definitely-not-a-platform") is False
+            assert len(calls) == 1  # warm lookups never rescan
+        finally:
+            gc.Platform._scan_bundled_plugin_platforms = original
+            gc._Platform__bundled_plugin_names = None
+            gc._Platform__bundled_plugin_aliases = None
+
 
 # ── PlatformRegistry ──────────────────────────────────────────────────────
 
