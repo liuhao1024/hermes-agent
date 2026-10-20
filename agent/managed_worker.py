@@ -321,6 +321,26 @@ def tool_frame(call_id, name, args, *result):
     return json.loads(json.dumps(frame, default=str))
 
 
+def _preimport_windows_numpy():
+    """Windows CRT loader-deadlock guard (#142271): WorkerControls parks a buffered
+    ``sys.stdin.buffer.readline()`` (stdin is the owner's bootstrap/control pipe) on its
+    ``managed-controls`` thread; on piped stdin that read sits inside ucrtbase holding a CRT
+    stdio lock. ``_construct_agent`` next loads the memory provider, and numpy's
+    libscipy_openblas64_ DllMain touches stdio inside LdrLoadDll, deadlocking on that same
+    lock — the same race as the ACP stdio feeder (acp_adapter/entry.py). Import numpy while
+    no reader thread exists. POSIX has no CRT lock — Windows only; a missing numpy stays the
+    holographic provider's own degradation path.
+    """
+    if sys.platform != 'win32':
+        return
+    try:
+        import numpy
+    except Exception:
+        # The guard itself must never fail the worker; the holographic provider's own
+        # degradation path reports a missing numpy when it later fails to import it.
+        logger.debug('managed worker numpy pre-import unavailable', exc_info=True)
+
+
 def execute(frame, channel):
     # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
     # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
@@ -350,6 +370,8 @@ def execute(frame, channel):
     os.environ['HERMES_GATEWAY_SESSION'] = '1'
     from gateway.session_worker_construct import checkpoint_agent_kwargs, construct_kwargs, routing_agent_kwargs
     construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
+    # While no reader thread exists yet, before WorkerControls parks its buffered stdin readline.
+    _preimport_windows_numpy()
     controls = WorkerControls(channel, frame['route'])
     register_gateway_notify(frame['route'], controls.approval)
     agent = None
