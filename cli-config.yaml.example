@@ -1043,6 +1043,11 @@ memory:
   # of the provider appearing "parked" for the session.
   external_prefetch_timeout: 8.0
 
+  # Opt in to carrying late recall once to the next eligible question in the same
+  # nonempty session/profile, labelled as earlier-turn recall. Fresh recall is
+  # still attempted when no local lookup is running. Restart to apply changes.
+  defer_prefetch_on_timeout: false
+
 # =============================================================================
 # Session Continuity (Messaging Platforms)
 # =============================================================================
