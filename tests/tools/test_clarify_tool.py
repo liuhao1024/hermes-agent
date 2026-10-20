@@ -59,6 +59,30 @@ class TestClarifyToolChoicesValidation:
 
         assert len(choices_passed) == MAX_CHOICES
 
+    def test_object_wrapped_choices_are_unwrapped(self):
+        """#142215: some endpoints emit string arrays as single-string objects; the
+        {value|label|text|name} wrapping is unwrapped instead of failing the call."""
+        seen = []
+
+        def mock_callback(questions):
+            seen.extend(questions[0]["choices"] or [])
+            return _reply({"q0": "picked"})
+
+        result = _ask(mock_callback, [{
+            "question": "Pick one",
+            "choices": [{"value": "A — first"}, {"label": "B — second"}],
+        }])
+        assert "error" not in result
+        assert seen == ["A — first (Recommended)", "B — second"]
+
+    def test_choices_without_a_string_field_still_rejected(self):
+        """An object choice with no recognizable single-string field stays an error."""
+        result = _ask(lambda questions: _reply({}), [{
+            "question": "Pick one",
+            "choices": [{"value": 42}, {"other": "x"}],
+        }])
+        assert "error" in result and "list of strings" in result["error"]
+
 
 class TestClarifyToolCallbackHandling:
     """Tests for callback error handling."""

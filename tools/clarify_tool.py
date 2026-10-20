@@ -47,6 +47,20 @@ def _clean_answer(raw, multi: bool):
     return [strip_recommended(item) for item in raw if str(item).strip()]
 
 
+def _choice_label(choice) -> Optional[str]:
+    """Choices are plain strings on the wire; tolerate the single-string ``{value|label|text|name}``
+    wrapping some endpoints emit for string arrays. The generic arg coercion only repairs
+    JSON-encoded strings, not object-wrapped elements (#142215)."""
+    if isinstance(choice, str):
+        return choice
+    if isinstance(choice, dict):
+        for key in ("value", "label", "text", "name"):
+            candidate = choice.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    return None
+
+
 def _normalize_questions(questions) -> tuple:
     """Validate ``questions`` -> ``(normalized, error)``. Entries carry ``qid`` (stable wire id
     ``q<index>`` surfaces key answers by), ``question``, decorated ``choices``, bare
@@ -64,8 +78,15 @@ def _normalize_questions(questions) -> tuple:
             return None, f"questions[{index}].question must be non-empty text."
         choices = item.get("choices")
         if choices is not None:
-            if not isinstance(choices, list) or not all(isinstance(c, str) for c in choices):
+            if not isinstance(choices, list):
                 return None, f"questions[{index}].choices must be a list of strings."
+            labels = []
+            for choice in choices:
+                label = _choice_label(choice)
+                if label is None:
+                    return None, f"questions[{index}].choices must be a list of strings."
+                labels.append(label)
+            choices = labels
             for pos, choice in enumerate(choices):
                 if len(choice.strip()) > MAX_CHOICE_CHARS:
                     return None, (f"questions[{index}].choices[{pos}] is {len(choice.strip())} characters; the limit is "
