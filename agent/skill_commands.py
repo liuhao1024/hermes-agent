@@ -513,6 +513,43 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: dic
                          "skill_md_path": str(skill_md), "skill_dir": str(skill_md.parent)}
 
 
+def skill_command_unavailable_notes() -> list[str]:
+    """User-facing notes for skills whose slash command an unresolved name conflict dropped
+    (``/commands`` renders them next to the built-in-collision notes). A conflict is any second
+    catalog entry resolving under the same identifier — a duplicate ``name:``, an unnamed
+    directory falling back to its directory name, or a nested directory whose *directory name*
+    matches — so grepping for a duplicate ``name:`` can come up empty while the command is still
+    gone (#142136). Naming every conflicting copy (the catalog's ``conflicts``) tells the owner
+    which file to rename or remove; copies whose relative path is unique stay loadable via
+    ``/skill <relative-path>``."""
+    from tools.skills_tool import _skill_catalog
+    return [
+        f"skill '{entry['name']}' has no /{slugify_skill_name(str(entry['name']))} command — "
+        f"another entry also resolves as '{entry['name']}' (at {', '.join(entry['conflicts'])}); "
+        "rename one SKILL.md, remove the stale copy, or load it by its exact relative path"
+        for entry in _skill_catalog() if entry["status"] == "ambiguous"
+    ]
+
+
+# A name conflict's warning fires once per copy per process: the scan reruns on every reload,
+# and this log is how an owner learns why a /<name> vanished with no duplicate 'name:' to grep (#142136).
+_AMBIGUOUS_WARNED: set[str] = set()
+
+
+def _warn_ambiguous_skill(entry: dict[str, Any]) -> None:
+    """Warn once per copy that an unresolved name conflict dropped this skill's slash command."""
+    path = str(entry["path"])
+    if path in _AMBIGUOUS_WARNED:
+        return
+    _AMBIGUOUS_WARNED.add(path)
+    logger.warning("Skill %r at %s has no /%s command: another entry resolves under the same name "
+                   "at %s (a duplicate 'name:', an unnamed directory falling back to its directory "
+                   "name, or a nested directory named %r — grepping for a second 'name:' can miss it). "
+                   "Rename one SKILL.md, remove the stale copy, or load it by its exact relative path.",
+                   entry["name"], path, slugify_skill_name(str(entry["name"])),
+                   ", ".join(entry["conflicts"]), entry["name"])
+
+
 def scan_skill_commands() -> dict[str, dict[str, Any]]:
     """Scan skill dirs and return {"/skill-name": {name, description, skill_md_path, skill_dir}}.
     Builds a local map and publishes once at the end: writing straight into the
@@ -544,6 +581,8 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
                     _scan_skill_md(Path(entry["path"]), disabled, seen_names, commands)
                 except Exception:
                     continue
+            elif entry["status"] == "ambiguous":
+                _warn_ambiguous_skill(entry)
     except Exception:
         logger.debug("Skill command scan failed", exc_info=True)
     # Publish the scanned map atomically: a reader must see a consistent

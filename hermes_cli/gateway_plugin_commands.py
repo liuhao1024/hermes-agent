@@ -121,14 +121,15 @@ def skills(cli, *, notes=False):
 
 
 def skill_notes(cli):
-    """``/help skills`` notes (skills a built-in command shadows): the gateway's notice on its session,
-    else this process's own scan."""
+    """``/help skills`` notes (skills a built-in command shadows, and skills an unresolved name
+    conflict dropped): the gateway's notice on its session, else this process's own scan."""
     notice = skills(cli, notes=True)
     if notice is not None:
         return [notice] if notice else []
-    from agent.skill_commands import skill_command_collision_note
+    from agent.skill_commands import skill_command_collision_note, skill_command_unavailable_notes
     from tools.skills_tool import find_all_skills
-    return list(filter(None, (skill_command_collision_note(s["name"]) for s in find_all_skills())))
+    return list(filter(None, (skill_command_collision_note(s["name"]) for s in find_all_skills()))) \
+        + skill_command_unavailable_notes()
 
 
 def run_skill(cli, base_cmd, rest):

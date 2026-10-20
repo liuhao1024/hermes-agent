@@ -188,8 +188,9 @@ def _catalog_plugin_commands(cat: _Catalog, module_loader) -> None:
 
 def _catalog_skills(cat: _Catalog, skills: dict[str, dict], module_loader) -> str:
     """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (every consumer ranks by them).
-    Returns the one-line notice for skills whose name is a built-in command (no ``/<name>`` entry;
-    ``agent.skill_commands`` guard), ``""`` when none."""
+    Returns the one-line notice for skills the scan kept off the palette — a name a built-in command
+    owns, or an unresolved name conflict between two entries (``agent.skill_commands`` guards) —
+    ``""`` when none."""
     usage, origin_of = _skill_usage_lookup()
     sc = module_loader("agent.skill_commands")
     for k, info in sorted(sc.get_interactive_skill_commands().items()):
@@ -197,10 +198,16 @@ def _catalog_skills(cat: _Catalog, skills: dict[str, dict], module_loader) -> st
         name = str(info.get("name") or k.lstrip("/"))
         skills[k] = {"usage": usage(name), "origin": origin_of(name)}
     collision_note = getattr(sc, "skill_command_collision_note", None)
-    if collision_note is None:
+    unavailable_notes = getattr(sc, "skill_command_unavailable_notes", None)
+    if collision_note is None and unavailable_notes is None:
         return ""
-    names = sorted(s["name"] for s in module_loader("tools.skills_tool").find_all_skills())
-    return "; ".join(filter(None, map(collision_note, names)))
+    parts: list[str] = []
+    if collision_note is not None:
+        names = sorted(s["name"] for s in module_loader("tools.skills_tool").find_all_skills())
+        parts += [n for n in filter(None, map(collision_note, names))]
+    if unavailable_notes is not None:
+        parts += unavailable_notes()
+    return "; ".join(parts)
 
 
 def command_catalog(load_cfg=None, module_loader=import_module, scope=None) -> dict:

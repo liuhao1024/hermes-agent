@@ -11,6 +11,7 @@ from agent.skill_commands import (
     build_skill_invocation_message,
     resolve_skill_command_key,
     scan_skill_commands,
+    skill_command_unavailable_notes,
 )
 
 
@@ -332,6 +333,37 @@ class TestScanSkillCommands:
         # First-wins: the entry resolves to the first skill, not the shadowing one.
         assert result["/git-helper"]["name"] == "git_helper"
         assert result["/git-helper"]["skill_dir"] == str(first)
+
+    def test_nested_directory_name_drops_command_and_says_why(self, tmp_path, caplog):
+        """A nested directory named like a root skill's declared name drags that skill into
+        ambiguity (the nested copy enters the shared identifier via its *directory name*, not
+        its ``name:``), so the unique gate drops /<name> with no duplicate ``name:`` to grep.
+        The refusal stays, but the scan must say why — once per copy (#142136)."""
+        import agent.skill_commands as sc_mod
+
+        root_skill = _make_skill(tmp_path, "mipeso")
+        nested_dir = tmp_path / "archive" / "mipeso"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "SKILL.md").write_text(
+            "---\nname: archived-thing\ndescription: Different declared name.\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), \
+                patch.object(sc_mod, "_AMBIGUOUS_WARNED", set()), \
+                caplog.at_level("WARNING", logger="agent.skill_commands"):
+            first_scan = scan_skill_commands()
+            second_scan = scan_skill_commands()
+            notes = skill_command_unavailable_notes()
+
+        # The gate keeps refusing to guess a bare slug between same-tier copies.
+        assert "/mipeso" not in first_scan and "/mipeso" not in second_scan
+        warned = [r for r in caplog.records if "has no /mipeso command" in r.getMessage()]
+        assert len(warned) == 1  # warn-once across rescans
+        message = warned[0].getMessage()
+        assert str(root_skill / "SKILL.md") in message
+        assert "directory name" in message
+        assert len(notes) == 1
+        assert "mipeso" in notes[0] and "archive/mipeso" in notes[0]
 
 
     # -- concurrent scans (#74574) ------------------------------------------

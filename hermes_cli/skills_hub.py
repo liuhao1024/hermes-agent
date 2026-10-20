@@ -999,6 +999,11 @@ def do_list(source_filter: str = "all", enabled_only: bool = False,
                       _trust_cell(trust, source_display), status)
 
     c.print(table)
+    # Rows above are what skill_view loads, so a copy an unresolved name conflict dropped
+    # (no load_name) never made the table — its note goes below instead, naming every copy (#142136).
+    from agent.skill_commands import skill_command_unavailable_notes
+    for note in skill_command_unavailable_notes():
+        c.print(f"[yellow]⚠ {note}[/]")
     tail = (f"{enabled_count} enabled shown" if enabled_only
             else f"{enabled_count} enabled, {disabled_count} disabled")
     c.print(f"[dim]{counts['hub']} hub-installed, {counts['builtin']} builtin, "

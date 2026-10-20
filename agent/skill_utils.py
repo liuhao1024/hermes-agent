@@ -471,7 +471,8 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     annotated with what skill_view() resolves, using its aliases (declared name, directory name, path
     relative to the root) and :func:`pick_skill_candidate`. Adds ``relative_path`` and ``status``:
     ``unique`` (``load_name`` = name), ``ambiguous`` (``load_name`` = the exact relative path, or None
-    when even that is shared) or ``shadowed`` (a higher tier owns the name: hidden, warned once)."""
+    when even that is shared; ``conflicts`` lists the rival copies' paths) or ``shadowed`` (a higher
+    tier owns the name: hidden, warned once)."""
     out = [dict(e) for e in entries]
     owners: dict[str, list[int]] = {}
     for i, e in enumerate(out):
@@ -500,7 +501,14 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
         elif winner[name] == i:
             e.update(status="unique", load_name=name)
         else:
-            e.update(status="ambiguous", load_name=rel if winner[rel] == i else None)
+            # Name the other copies so an owner can see which file to rename or remove: the rival
+            # often has a different 'name:' and joined the shared identifier only via its directory
+            # name, so grepping for a duplicate 'name:' can come up empty (#142136).
+            multi_root = len({str(out[j]["root"]) for j in owners[name]}) > 1
+            e.update(status="ambiguous", load_name=rel if winner[rel] == i else None,
+                     conflicts=sorted(
+                         f"{out[j]['relative_path']}" + (f" (under {out[j]['root']})" if multi_root else "")
+                         for j in owners[name] if j != i))
     return out
 
 
