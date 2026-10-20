@@ -69,3 +69,17 @@ def test_category_only_stop_details_beats_summarized_thinking():
     assert verdict.action == "return"
     assert "provider refusal category: cyber" in verdict.result["error"]
     assert "phrase this next step" not in verdict.result["error"]
+
+
+def test_thinking_summary_still_serves_without_stop_details():
+    """No structured reason on the response: the thinking summary remains the fallback text (#113689)."""
+    response = SimpleNamespace(content=[], stop_reason="refusal", usage=None, model="claude")
+    agent = _agent()
+    agent._extract_reasoning.return_value = "I was planning the pairing store changes"
+    verdict = handle_content_policy_refusal(
+        agent, response, TurnRetryState(), thinking_spinner=None, messages=[], api_messages=[], api_kwargs={},
+        active_system_prompt=None, conversation_history=[], api_call_count=1, effective_task_id="t", turn_id="u",
+        api_request_id="r", api_start_time=0.0, retry_count=0, max_retries=0,
+    )
+    assert verdict.action == "return"
+    assert "pairing store" in verdict.result["error"]
