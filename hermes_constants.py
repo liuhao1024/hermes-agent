@@ -732,9 +732,10 @@ def _iter_real_home_candidates(env: dict[str, str] | None = None) -> list[str]:
     """Return likely OS-user home candidates in trust order."""
     env = env or {}
     candidates = [_env_get(env, "HERMES_REAL_HOME"), _env_get(env, "HOME")]
-    with contextlib.suppress(Exception):
-        import pwd
-        candidates.append(pwd.getpwuid(os.getuid()).pw_dir.strip())  # windows-footgun: ok — POSIX-only module inside try/except
+    if os.name != "nt":  # pwd is POSIX-only; skip the known-missing import rather than retry it per call
+        with contextlib.suppress(Exception):
+            import pwd
+            candidates.append(pwd.getpwuid(os.getuid()).pw_dir.strip())  # windows-footgun: ok — POSIX-only module inside try/except
     candidates.append(_env_get(env, "USERPROFILE"))
     drive, path = _env_get(env, "HOMEDRIVE"), _env_get(env, "HOMEPATH")
     if drive and path:

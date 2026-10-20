@@ -691,3 +691,45 @@ class TestProjectVenvDirOutOfTree:
         assert hermes_constants.project_venv_dir(other) is None
         (checkout / ".venv").mkdir()
         assert hermes_constants.project_venv_dir(checkout) == checkout / ".venv"
+
+
+class TestRealHomeCandidates:
+    """``_iter_real_home_candidates`` must stop retrying POSIX-only imports on Windows (#142151)."""
+
+    def test_pwd_probe_is_skipped_on_windows(self, monkeypatch):
+        """``pwd`` is POSIX-only; on native Windows the probe is known-missing and
+        must not retry the import (module-finder/import-lock work) per call."""
+        import builtins
+
+        attempts = []
+        real_import = builtins.__import__
+
+        def counting_import(name, *args, **kwargs):
+            if name == "pwd":
+                attempts.append(name)
+                raise ModuleNotFoundError(name, name=name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(hermes_constants.os, "name", "nt")
+        monkeypatch.setattr(builtins, "__import__", counting_import)
+        env = {"HERMES_REAL_HOME": "C:/real", "HOME": "C:/home", "USERPROFILE": "C:/Users/gin"}
+
+        for _ in range(3):
+            candidates = hermes_constants._iter_real_home_candidates(env)
+            assert candidates[:3] == ["C:/real", "C:/home", "C:/Users/gin"]
+
+        assert attempts == [], "known-missing POSIX import retried on Windows"
+
+    def test_pwd_probe_is_kept_on_posix(self, monkeypatch):
+        """The guard is Windows-only: POSIX keeps consulting the password database."""
+        import types
+
+        fake_pwd = types.ModuleType("pwd")
+        fake_pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir="/posix/account")
+        monkeypatch.setitem(sys.modules, "pwd", fake_pwd)
+
+        candidates = hermes_constants._iter_real_home_candidates(
+            {"HERMES_REAL_HOME": "/real", "HOME": "/home"}
+        )
+
+        assert candidates[:3] == ["/real", "/home", "/posix/account"]

@@ -95,6 +95,8 @@ def _open_fd_count() -> Optional[int]:
 
 def _fd_soft_limit() -> Optional[int]:
     """The process's soft RLIMIT_NOFILE, or None when there is no usable one."""
+    if os.name == "nt":  # resource is POSIX-only; retrying a known-missing import on every call burns the import lock
+        return None
     try:
         import resource
     except ImportError:

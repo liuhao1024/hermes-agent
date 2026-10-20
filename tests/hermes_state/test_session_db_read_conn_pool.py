@@ -616,6 +616,44 @@ def test_fd_soft_limit_fails_open_for_importable_resource_stub(monkeypatch):
     assert hermes_state_readpool._fd_headroom_ok() is True
 
 
+def test_fd_soft_limit_never_imports_resource_on_windows(monkeypatch):
+    """``resource`` is POSIX-only, so on native Windows the probe is known-missing:
+    returning None up front must not retry the import (and its module-finder/
+    import-lock work) on every call (#142151)."""
+    import builtins
+
+    attempts = []
+    real_import = builtins.__import__
+
+    def counting_import(name, *args, **kwargs):
+        if name == "resource":
+            attempts.append(name)
+            raise ModuleNotFoundError(name, name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(hermes_state_readpool.os, "name", "nt")
+    monkeypatch.setattr(builtins, "__import__", counting_import)
+
+    assert hermes_state_readpool._fd_soft_limit() is None
+    assert hermes_state_readpool._fd_soft_limit() is None
+    assert attempts == [], "known-missing POSIX import retried on Windows"
+
+
+def test_fd_soft_limit_still_probes_resource_on_posix(monkeypatch):
+    """The Windows guard must not widen: POSIX keeps reading the live rlimit
+    (never cached -- it can change at runtime), stub or no stub."""
+    import sys
+    import types
+
+    fake = types.ModuleType("resource")
+    fake.RLIMIT_NOFILE = 0
+    fake.RLIM_INFINITY = -1
+    fake.getrlimit = lambda which: (4096, 8192)
+    monkeypatch.setitem(sys.modules, "resource", fake)
+
+    assert hermes_state_readpool._fd_soft_limit() == 4096
+
+
 @pytest.mark.requires_wal
 def test_duplicate_handles_on_one_path_are_reported(db, caplog):
     """The one-shot warning must identify earlier holders, not just the last opener."""
