@@ -109,3 +109,58 @@ def test_a_tail_child_the_job_refuses_never_runs(tmp_path, monkeypatch):
     finally:
         lock.release()
     assert not started.exists(), "the tail child ran outside the update's job"
+
+
+_HOLDER_ORPHAN = """
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hermes_cli.update_lock import UpdateLock
+assert UpdateLock(path=Path(sys.argv[3]), install_root=sys.argv[2]).acquire()
+child = os.fork()
+if child == 0:
+    stop = Path(sys.argv[4])
+    while not stop.exists():  # holds the kernel lock until the test releases it, signal-free
+        time.sleep(0.05)
+    os._exit(0)
+print(f"held {child}", flush=True)
+os._exit(0)  # the recorded owner exits; the checkout lock stays held by the orphan
+"""
+
+
+@pytest.mark.platforms("posix")  # os.fork: the orphan outlives the recorded owner on POSIX
+def test_refusal_names_the_lock_holder_not_a_phantom_updater(tmp_path, monkeypatch):
+    """#141853: a tail refused by a held checkout keeps the holder context (a killed update's
+    completion child still holds it), instead of a bare message naming an updater which
+    does not exist."""
+    import pm
+
+    root = tmp_path / "checkout"
+    (root / ".git").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[project]\nname='example'\n", encoding="utf-8")
+    (root / "install-stamp.json").write_text('{"updateMechanism": "self"}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)  # an interrupted update's tree
+    finished = []
+    monkeypatch.setattr(venv_sync, "_finish_source_update", lambda *a, **k: finished.append(a))
+
+    stop = tmp_path / "stop-orphan"
+    holder = subprocess.Popen([sys.executable, "-c", _HOLDER_ORPHAN, str(REPO), str(root),
+                               str(tmp_path / "gone"), str(stop)],
+                              stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, encoding="utf-8")
+    try:
+        assert holder.stdout is not None
+        line = holder.stdout.readline().split()
+        assert line[:1] == ["held"], line
+        holder.wait()  # the recorded owner is dead; only its orphan holds the checkout lock
+        with pytest.raises(RuntimeError) as excinfo:
+            venv_sync.prepare_launch(root, [])
+        message = str(excinfo.value)
+        assert "an update is still running" in message
+        assert "its owner exited but a process it started still holds the checkout" in message, message
+        assert finished == [], "a second completion tail ran beside the live update tree"
+    finally:
+        stop.touch()  # the orphan exits on its own; no signal to a PID outside our subtree
+        holder.kill()
+        holder.wait()

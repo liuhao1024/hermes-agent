@@ -386,7 +386,7 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
 
     import pm
     from hermes_cli._launchers import resolve_store_python
-    from hermes_cli.update_lock import UpdateLock, read_live_update
+    from hermes_cli.update_lock import UpdateLock, describe_holder, read_live_update
 
     current = pm.venv_is_current(project_root=root)
     from pm.environments import owning_home_root
@@ -416,7 +416,10 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
         # keeps a dead update's marker (R6: refused as held, never reclaimed).
         lock = UpdateLock(install_root=root, checkout_first=False)
         if not lock.acquire():
-            raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
+            raise RuntimeError(
+                f"an update is still running ({describe_holder(lock.holder)}); "
+                "wait for it to exit, then relaunch Hermes"
+            )
         try:
             # Under the launching update's own claim (its pid is our ancestor) a process it
             # spawned owes no tail: that obligation is the updater's.
@@ -435,7 +438,10 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
                 # marker over a held checkout lock is a killed update whose tree (its completion
                 # child) still runs.
                 if not lock.acquire_checkout(root):
-                    raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
+                    raise RuntimeError(
+                        f"an update is still running ({describe_holder(lock.holder)}); "
+                        "wait for it to exit, then relaunch Hermes"
+                    )
                 _finish_source_update(root, current=current, pending=pending)
         finally:
             lock.release()
@@ -474,12 +480,15 @@ def _prepare_borrowed_launch(root: Path, owner: Path, *, current: bool) -> Path 
     import sys
     import pm
     from hermes_cli._launchers import resolve_store_python
-    from hermes_cli.update_lock import UpdateLock
+    from hermes_cli.update_lock import UpdateLock, describe_holder
 
     if not current:
         lock = UpdateLock(install_root=root, checkout_first=False)  # R6, as in prepare_launch
         if not lock.acquire():
-            raise RuntimeError("an update is still running; wait for it to exit, then relaunch Hermes")
+            raise RuntimeError(
+                f"an update is still running ({describe_holder(lock.holder)}); "
+                "wait for it to exit, then relaunch Hermes"
+            )
         try:
             _sync_source_dependencies(root, arm=False, borrowed_from=owner)
         finally:
