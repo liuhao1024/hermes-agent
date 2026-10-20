@@ -59,6 +59,35 @@ class TestCleanForDisplay:
         assert "[[audio_as_voice]]" not in result
         assert "MEDIA:" not in result
 
+    def test_markdown_image_tag_hidden(self):
+        """#141806: an extractable ![alt](url) tag is hidden from the streamed text —
+        the image is delivered as a native attachment post-stream instead."""
+        result = GatewayStreamConsumer._clean_for_display(
+            "Here you go:\n![meme](https://api.memegen.link/images/drake/a/b.png)"
+        )
+        assert result == "Here you go:"
+
+    def test_html_image_tag_hidden(self):
+        """#141806: <img src=...> tags share the markdown-tag contract."""
+        result = GatewayStreamConsumer._clean_for_display(
+            'Chart: <img src="https://example.com/a.png"></img>'
+        )
+        assert result == "Chart:"
+
+    def test_non_image_markdown_link_and_image_without_marker_stay_visible(self):
+        """Only tags extract_images would attach are hidden: a plain link and a
+        markdown image whose URL matches no image marker stay visible."""
+        text = "See [docs](https://example.com/docs) and ![icon](https://example.com/no-ext)."
+        assert GatewayStreamConsumer._clean_for_display(text) == text
+
+    def test_media_only_image_reply_hides_the_tag(self):
+        """#141806 repro shape: a reply that is ONLY a markdown image leaves no
+        stray '!alt' text behind."""
+        result = GatewayStreamConsumer._clean_for_display(
+            "![meme](https://api.memegen.link/images/drake/a/b.png)"
+        )
+        assert result == ""
+
 
 # ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
 

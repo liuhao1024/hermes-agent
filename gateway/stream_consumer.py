@@ -972,5 +972,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     # non-streaming paths share the same regex, so a tag is treated identically whichever path delivered the
     # text.
     def _clean_for_display(text: str) -> str:
-        """Hide MEDIA:<path> / [[audio_as_voice]] directives; media is delivered post-stream."""
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        """Hide MEDIA:<path> / [[audio_as_voice]] directives and extractable markdown/HTML image
+        tags; media is delivered post-stream."""
+        text = _BasePlatformAdapter.strip_media_directives_for_display(text)
+        # Same contract for markdown/HTML image tags (#141806): hide exactly what the post-stream
+        # pass attaches, by reusing extract_images itself (shared regex/markers) rather than a
+        # lookalike — the non-streamed final send would have attached the image natively, so a
+        # streamed reply must not leave "!alt" text behind.
+        _, text = _BasePlatformAdapter.extract_images(text)
+        return text

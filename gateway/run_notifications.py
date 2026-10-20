@@ -231,7 +231,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-            # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
+            # Extract markdown/HTML image URLs for native attachment delivery (parity with the
+            # non-streaming chain in _extract_response_content); no extract_local_files here.
+            # The streamed text already had these tags hidden (stream_consumer._clean_for_display),
+            # so this upload is the image's only delivery (#141806).
             # Do NOT deduplicate explicit MEDIA tags against prior turns here (#73771). This rescan is
             # already EXPLICIT-ONLY (see docstring): a MEDIA: directive in the final streamed reply is the
             # model deliberately attaching a file — including a user-requested resend. Stale auto-appended
@@ -239,7 +242,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # the same filter removal on the non-streaming path in gateway/platforms/base.py. Bare local
             # paths in an already-streamed reply are text the user has seen (or stale inspected content),
             # not an attachment request.
-            adapter.extract_images(cleaned)
+            image_urls, _ = adapter.extract_images(cleaned)
             _thread_meta = (
                 dict(thread_metadata)
                 if thread_metadata is not None
@@ -253,9 +256,11 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
 
             image_paths = [p for p, v in media_files if _is_photo(p, v)]
             non_image_media = [(p, v) for p, v in media_files if not _is_photo(p, v)]
-            if image_paths:
+            # Local MEDIA photos and markdown/HTML image URLs share the one batch call — same
+            # aggregate semantics as the non-streaming _send_image_batch.
+            images = [(f"file://{_quote(p)}", "") for p in image_paths] + list(image_urls)
+            if images:
                 try:
-                    images = [(f"file://{_quote(p)}", "") for p in image_paths]
                     await adapter.send_multiple_images(chat_id=chat_id, images=images, metadata=_thread_meta)
                 except Exception as e:
                     logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)

@@ -113,3 +113,43 @@ async def test_explicit_media_tag_still_delivers_post_stream(tmp_path, monkeypat
     assert str(media_file) in unquote(images_kwargs["images"][0][0])
 
 
+@pytest.mark.asyncio
+async def test_markdown_image_url_delivered_post_stream():
+    """#141806: the streamed text hides the ![alt](url) tag
+    (stream_consumer._clean_for_display), so the post-stream pass is the image's
+    only delivery — the URL must be attached natively with its alt text."""
+    adapter = _adapter()
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({}),
+        "Here you go:\n![meme](https://api.memegen.link/images/drake/a/b.png)",
+        _event(),
+        adapter,
+    )
+
+    adapter.send_multiple_images.assert_awaited_once()
+    images_kwargs = adapter.send_multiple_images.await_args.kwargs
+    assert images_kwargs["chat_id"] == "C123CHAN"
+    assert images_kwargs["images"] == [("https://api.memegen.link/images/drake/a/b.png", "meme")]
+
+
+@pytest.mark.asyncio
+async def test_media_file_and_markdown_image_share_the_batch(tmp_path, monkeypatch):
+    """#141806: local MEDIA photos and markdown image URLs go out in one
+    send_multiple_images batch, matching the non-streaming _send_image_batch shape."""
+    media_file = _allowed_media_path(tmp_path, monkeypatch, "chart.png")
+    adapter = _adapter()
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({}),
+        f"![meme](https://api.memegen.link/images/drake/a/b.png)\nMEDIA:{media_file}",
+        _event(),
+        adapter,
+    )
+
+    adapter.send_multiple_images.assert_awaited_once()
+    sent = adapter.send_multiple_images.await_args.kwargs["images"]
+    assert str(media_file) in unquote(sent[0][0])
+    assert sent[1] == ("https://api.memegen.link/images/drake/a/b.png", "meme")
+
+
