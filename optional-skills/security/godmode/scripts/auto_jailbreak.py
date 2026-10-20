@@ -19,6 +19,7 @@ import os
 import json
 import time
 from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 from pathlib import Path
 
 yaml = YAML(typ="safe", pure=True)
@@ -327,32 +328,87 @@ def _detect_model_family(model: str) -> str:
 
 def _get_current_model() -> tuple:
     """Read current model and provider from Hermes config.yaml.
-    Returns (model_str, base_url)."""
+    Returns (model_str, base_url); (None, None) means the file could not be
+    read or parsed, while ("", base_url) means it parsed but has no model."""
     if not CONFIG_PATH.exists():
         return None, None
     try:
         with open(CONFIG_PATH) as f:
             cfg = yaml.load(f) or {}
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, str):
-            return model_cfg, "https://openrouter.ai/api/v1"
-        model_name = model_cfg.get("name", "")
-        base_url = model_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        return model_name, base_url
-    except Exception:
+    except (OSError, YAMLError):
         return None, None
+    if not isinstance(cfg, dict):
+        return None, None
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, str):
+        return model_cfg.strip(), "https://openrouter.ai/api/v1"
+    # Main Hermes config stores the model as model.default; keep the legacy
+    # model.name spelling working for older configs.
+    model_name = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+    base_url = model_cfg.get("base_url", "https://openrouter.ai/api/v1")
+    return model_name, base_url
+
+
+def _api_key_var_for_base_url(base_url: str | None = None) -> str:
+    """Map a base_url to the env var this script's Chat Completions transport needs."""
+    if base_url and "openrouter" in base_url:
+        return "OPENROUTER_API_KEY"
+    if base_url and "anthropic" in base_url:
+        return "ANTHROPIC_API_KEY"
+    if base_url and "openai" in base_url:
+        return "OPENAI_API_KEY"
+    # Default to OpenRouter
+    return "OPENROUTER_API_KEY"
 
 
 def _get_api_key(base_url: str | None = None) -> str:
     """Get the appropriate API key."""
-    if base_url and "openrouter" in base_url:
-        return os.getenv("OPENROUTER_API_KEY", "")
-    if base_url and "anthropic" in base_url:
-        return os.getenv("ANTHROPIC_API_KEY", "")
-    if base_url and "openai" in base_url:
-        return os.getenv("OPENAI_API_KEY", "")
-    # Default to OpenRouter
-    return os.getenv("OPENROUTER_API_KEY", "")
+    return os.getenv(_api_key_var_for_base_url(base_url), "")
+
+
+def _missing_api_key_error(base_url: str | None = None) -> str:
+    """Explain which credential is missing instead of a bare "No API key found"."""
+    if base_url and ("chatgpt.com" in base_url or "codex" in base_url):
+        return (
+            f"No API key found: {base_url} serves an OAuth/subscription transport "
+            "(e.g. the openai-codex provider), which this script's plain Chat "
+            "Completions client cannot authenticate. Point model/base_url at an "
+            "API-key endpoint such as OpenRouter instead."
+        )
+    var_name = _api_key_var_for_base_url(base_url)
+    return (
+        f"No API key found: set {var_name} for {base_url or 'the OpenRouter default endpoint'} "
+        "(or pass api_key= explicitly)."
+    )
+
+
+def _resolve_model_and_credentials(model, base_url, api_key):
+    """Fill in model/base_url/api_key from config and the environment.
+
+    Returns (model, base_url, api_key, error_dict); error_dict is None when
+    startup can proceed, otherwise the pipeline's failure result to return.
+    """
+    if not model:
+        model, base_url_detected = _get_current_model()
+        if not base_url:
+            base_url = base_url_detected
+    if not model:
+        if model is None and base_url_detected is None:
+            return None, None, None, {
+                "success": False,
+                "error": "No model specified and couldn't read or parse config.yaml",
+            }
+        return None, None, None, {
+            "success": False,
+            "error": "No model specified: set model.default (or legacy model.name) in config.yaml, or pass model= explicitly",
+        }
+    if not base_url:
+        base_url = "https://openrouter.ai/api/v1"
+    if not api_key:
+        api_key = _get_api_key(base_url)
+    if not api_key:
+        return None, None, None, {"success": False, "error": _missing_api_key_error(base_url)}
+    return model, base_url, api_key, None
 
 
 def _test_query(client, model, messages, timeout=45):
@@ -449,18 +505,9 @@ def auto_jailbreak(model=None, base_url=None, api_key=None,
         return {"success": False, "error": "openai package not installed"}
 
     # 1. Detect model
-    if not model:
-        model, base_url_detected = _get_current_model()
-        if not base_url:
-            base_url = base_url_detected
-    if not model:
-        return {"success": False, "error": "No model specified and couldn't read config.yaml"}
-    if not base_url:
-        base_url = "https://openrouter.ai/api/v1"
-    if not api_key:
-        api_key = _get_api_key(base_url)
-    if not api_key:
-        return {"success": False, "error": "No API key found"}
+    model, base_url, api_key, startup_error = _resolve_model_and_credentials(model, base_url, api_key)
+    if startup_error:
+        return startup_error
 
     canary_query = canary or QUICK_CANARY
     family = _detect_model_family(model)
