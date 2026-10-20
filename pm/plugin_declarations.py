@@ -58,6 +58,8 @@ class PythonDeclaration:
     requirements: tuple[str, ...]
     manifest: dict
     requires_python: str | None = None
+    extras: tuple[str, ...] = ()
+    buildable: bool = False
 
     @property
     def external(self) -> bool:
@@ -69,7 +71,11 @@ class PythonDeclaration:
 
     @property
     def is_member(self) -> bool:
-        return not self.external and (self.pyproject is not None or bool(self.install_requirements))
+        """Membership is an install surface: requirements to resolve, an extra to sync,
+        or a package uv must build. A pyproject that only carries pytest/catalog metadata
+        joins nothing — it would hash the whole folder on every launch and copy it into
+        every generation."""
+        return not self.external and (bool(self.install_requirements) or bool(self.extras) or self.buildable)
 
     def python_error(self, version: str) -> str | None:
         """Why this member cannot join a workspace built for *version*; uv intersects every
@@ -141,10 +147,16 @@ def read_python_declaration(plugin_dir: Path) -> PythonDeclaration:
             specs = document.get("project", {}).get("dependencies", [])
             if not isinstance(specs, list) or any(not isinstance(v, str) for v in specs):
                 raise ValueError(f"invalid project.dependencies: {project}")
+            groups = document.get("project", {}).get("optional-dependencies", {})
+            if not isinstance(groups, dict) or any(not isinstance(v, list) for v in groups.values()):
+                raise ValueError(f"invalid project.optional-dependencies: {project}")
             requires_python = document.get("project", {}).get("requires-python")
             if requires_python is not None and not isinstance(requires_python, str):
                 raise ValueError(f"invalid project.requires-python: {project}")
-            return PythonDeclaration(tuple(files), project, tuple(specs), manifest, requires_python)
+            extras = tuple(name for name, values in groups.items() if values)
+            buildable = ("build-system" in document
+                         or document.get("tool", {}).get("uv", {}).get("package") is True)
+            return PythonDeclaration(tuple(files), project, tuple(specs), manifest, requires_python, extras, buildable)
     specs = []
     for key in ("pip_dependencies", "python_dependencies"):
         values = manifest.get(key, [])

@@ -98,3 +98,33 @@ def test_invalid_requirement_refused_at_declaration_boundary(tmp_path, modern):
     with pytest.raises(ValueError):
         read_python_declaration(tmp_path)
     assert path.read_bytes() == before
+
+
+def test_dependency_less_pyproject_stays_out_of_the_workspace(tmp_path, monkeypatch):
+    """#141981: a pyproject that exists for pytest config and the catalog layout
+    declared no install surface, yet still joined the uv workspace — hashing its
+    whole folder on every launch and copying it into every generation."""
+    home = tmp_path / "home"
+    plugin = home / "plugins" / "tern"
+    plugin.mkdir(parents=True)
+    (home / "config.yaml").write_text("plugins:\n  enabled: [tern]\n", encoding="utf-8")
+    (plugin / "plugin.yaml").write_text("name: tern\n", encoding="utf-8")
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname = "tern"\nversion = "1.0.0"\ndependencies = []\n'
+        '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n', encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    declaration = read_python_declaration(plugin)
+    assert declaration.pyproject is not None
+    assert declaration.is_member is False
+    assert enabled_member_dirs() == []
+
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname = "tern"\nversion = "1.0.0"\ndependencies = []\n'
+        '[project.optional-dependencies]\nmem0 = ["mem0ai"]\ntest = []\n', encoding="utf-8",
+    )
+    declaration = read_python_declaration(plugin)
+    assert declaration.extras == ("mem0",), "an empty group is metadata, not an install surface"
+    assert declaration.is_member is True, "uv sync --extra resolves against the member"
+    assert enabled_member_dirs() == [plugin]

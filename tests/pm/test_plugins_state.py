@@ -166,10 +166,10 @@ def test_member_discovery_uses_real_enabled_config(homes):
     from pm.workspace import enabled_member_dirs
     home, _ = homes
     manifests = {
-        "modern/pyproject.toml": "[project]\n",
+        "modern/pyproject.toml": "[project]\ndependencies=[\"missing-other-python; python_version < '3.0'\"]\n",
         "legacy/plugin.yaml": 'name: legacy\npip_dependencies: ["requests>=2"]\n',
         "plain/plugin.yaml": "name: plain\n",
-        "orphan/pyproject.toml": "[project]\n",
+        "orphan/pyproject.toml": "[project]\ndependencies=[\"missing-other-python; python_version < '3.0'\"]\n",
     }
     for relative, body in manifests.items():
         path = home / "plugins" / relative
