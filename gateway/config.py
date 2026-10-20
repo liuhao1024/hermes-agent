@@ -249,12 +249,10 @@ class Platform(Enum):
         value = value.strip().lower()
         if value in cls._value2member_map_:
             return cls._value2member_map_[value]
-        global _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases
-        if _Platform__bundled_plugin_names is None:
-            _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases = cls._scan_bundled_plugin_platforms()
-        registered = value in _Platform__bundled_plugin_names
+        names, aliases = cls._bundled_plugin_scan()
+        registered = value in names
         if not registered:
-            alias = _Platform__bundled_plugin_aliases.get(value)
+            alias = aliases.get(value)
             if alias is not None:
                 # A bundled platform whose plugin.yaml ``name:`` differs from its directory (e.g. dir
                 # "a2a", name "a2a-platform") is configured under the manifest name — ``plugins
@@ -265,6 +263,16 @@ class Platform(Enum):
                 from gateway.platform_registry import platform_registry
                 registered = platform_registry.is_registered(value)
         return cls._add_pseudo_member(value) if registered else None
+
+    @classmethod
+    def _bundled_plugin_scan(cls) -> tuple[set, dict]:
+        """Process-cached ``(names, aliases)`` from the bundled-plugin scan: bundled plugins are
+        fixed for the life of the process, so callers (``_missing_``, ``core_ships_platform``)
+        share one scan instead of reparsing unchanged plugin YAML on every lookup."""
+        global _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases
+        if _Platform__bundled_plugin_names is None:
+            _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases = cls._scan_bundled_plugin_platforms()
+        return _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases
 
     @classmethod
     def _add_pseudo_member(cls, value: str) -> "Platform":
