@@ -844,6 +844,22 @@ def _live_writer_holds_db(db_path: Path) -> bool:
     return _state_holders.live_writer_holds_db(db_path, connect_repair_durable=_connect_repair_durable)
 
 
+def _in_process_live_connection_holds_db(db_path: Path) -> bool:
+    """True when another connection in THIS process still holds ``db_path`` open.
+
+    Neither admission authority of :func:`_live_writer_holds_db` sees this holder: the foreign-holder
+    scan inspects only other OS processes, and an idle connection takes no POSIX lock (no active
+    transaction; a DELETE-mode reader never takes more than SHARED), so the SQLite probe passes too.
+    Yet its page cache and schema view go stale the moment surgery rewrites the file underneath, and
+    a write through such a stale handle re-corrupts the just-repaired store — the in-process repair
+    race of #142077, where one gateway PID held six state.db descriptors and turned a single repair
+    into a corruption loop. The tracked-connection registry is the only authority for this process's
+    own descriptors, so repair fails closed on it. Called at a point where this function's own probe
+    connections are all closed, so a live count only ever names foreign holders."""
+    from hermes_cli.sqlite_safe_read import has_live_connection
+    return has_live_connection(db_path)
+
+
 def _repair_skip(report: dict[str, Any], verb: str, error: str, exc: Optional[BaseException] = None) -> dict[str, Any]:
     """Record *error* on *report* and log it as ``state.db repair <verb>``. An
     *exc* proving deterministic corruption consumes the persistent repair budget
@@ -902,6 +918,13 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> dict[str, A
         # this process waited.
         if _persistent_repair_attempts_exhausted(db_path):
             _repair_skip(report, "skipped", _persistent_repair_exhausted_error(db_path))
+        # In-process preflight, before the WAL-holder one: an idle same-process connection is invisible to
+        # both the foreign-holder scan and the SQLite lock probe, yet a stale handle re-corrupts the store
+        # surgery just rewrote (#142077).
+        elif _in_process_live_connection_holds_db(db_path):
+            _repair_skip(report, "skipped", "another connection in this process still holds state.db open; "
+                         "skipped schema surgery to avoid racing this process's own stale handles. Close the "
+                         "remaining state.db handles (stop the gateway) and retry.")
         # WAL-holder preflight: fail closed for active readers before a backup is taken. Not the race defence — the
         # exclusive guard in the locked routine excludes writers through promotion and sees DELETE-mode readers too.
         elif _live_writer_holds_db(db_path):

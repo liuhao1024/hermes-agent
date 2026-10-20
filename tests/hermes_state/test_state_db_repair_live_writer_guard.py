@@ -31,6 +31,7 @@ import pytest
 import hermes_state
 import hermes_state_repair
 import hermes_state_holders
+from hermes_cli.sqlite_safe_read import connect_tracked
 from hermes_state import SessionDB
 from hermes_state_repair import repair_state_db_schema
 
@@ -395,6 +396,44 @@ conn.close()
         except subprocess.TimeoutExpired:
             holder.kill()
             holder.wait(timeout=10)
+
+
+def test_repair_refuses_while_an_idle_in_process_connection_stays_open(tmp_path, monkeypatch):
+    """Neither admission check can see a same-process idle connection.
+
+    The foreign-holder scan only inspects other OS processes, and the SQLite
+    probe cannot see an idle connection: with no active transaction it holds no
+    POSIX lock, and a ``journal_mode=DELETE`` store never gives one up. Yet its
+    page cache and schema view go stale the moment surgery rewrites the file
+    underneath — the in-process repair race of #142077, where a live gateway's
+    several state.db handles turned one repair into a corruption loop. The
+    tracked-connection registry is the only authority for this process's own
+    descriptors, so repair must fail closed on it before any surgery."""
+    db = _make_wal_db(tmp_path)
+    # A DELETE-mode store is the probe's true blind spot (no WAL-index DMS the
+    # exclusive probe would contend with), so this exercises the registry leg,
+    # not the lock probe the WAL test above covers. The foreign-holder scan is
+    # cleared for the same reason: this test isolates the in-process leg, not
+    # the cross-process one.
+    mode_flipper = sqlite3.connect(str(db))
+    mode_flipper.execute("PRAGMA journal_mode=DELETE")
+    mode_flipper.close()
+    monkeypatch.setattr(
+        hermes_state_holders, "foreign_state_db_holders", lambda _path: []
+    )
+
+    holder = connect_tracked(db)
+    try:
+        report = repair_state_db_schema(db, backup=False)
+    finally:
+        holder.close()
+
+    assert report["repaired"] is False
+    assert "this process" in (report["error"] or "").lower()
+
+    # Control: once the last in-process handle closes, the guard stops blocking.
+    report_after = repair_state_db_schema(db, backup=False)
+    assert "this process" not in (report_after["error"] or "").lower()
 
 
 def test_repair_proceeds_once_the_database_is_quiescent(tmp_path):
