@@ -89,6 +89,17 @@ def test_explanation_for_max_iterations_reached_prefix_match():
     assert "iteration" in out.lower()
 
 
+def test_explanation_for_interrupted_by_system_prefix_match():
+    """``interrupted_by_system(<issuer>)`` — e.g. a lost session turn lease (#142161) —
+    must explain why the turn stopped instead of rendering as a normal turn end."""
+    out = AIAgent._format_turn_completion_explanation(
+        "interrupted_by_system(session_turn_lease_lost)"
+    )
+    lower = out.lower()
+    assert "interrupted" in lower
+    assert "continue" in lower
+
+
 
 
 

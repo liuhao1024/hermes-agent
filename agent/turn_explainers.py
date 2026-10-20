@@ -44,9 +44,10 @@ _EXIT_REASON_EXPLANATIONS: dict[str, str] = {
 }
 
 # Parameterised reasons (``max_iterations_reached(3/3)`` …) matched by prefix.
-# ``interrupted_during_api_call(<issuer>)`` names a system watchdog (#112647).
+# ``interrupted_during_api_call(<issuer>)`` names a system watchdog (#112647);
+# ``interrupted_by_system(<issuer>)`` a system-issued stop such as a lost session turn lease (#142161).
 _EXIT_REASON_PREFIX_EXPLANATIONS = tuple(
-    (prefix, f"explainer.exit.{prefix}") for prefix in ("interrupted_during_api_call", "max_iterations_reached", "error_near_max_iterations", "repeated_outer_errors")
+    (prefix, f"explainer.exit.{prefix}") for prefix in ("interrupted_during_api_call", "interrupted_by_system", "max_iterations_reached", "error_near_max_iterations", "repeated_outer_errors")
 )
 
 # ``session_persistence_failed`` refined by the classified cause (lock contention ≠ disk full).
