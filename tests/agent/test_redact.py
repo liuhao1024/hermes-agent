@@ -531,6 +531,38 @@ class TestApiKeyHeaders:
         result = redact_sensitive_text(text)
         assert "anotherOpaqueSecret" not in result
 
+    def test_braced_shell_variable_value_not_masked(self):
+        # Regression for #141960: a header value that is entirely a shell
+        # variable reference carries no secret bytes of its own — masking it
+        # (and swallowing the closing quote) corrupted echoed curl commands
+        # into syntax errors.
+        text = 'curl -H "api-key: ${K}" http://x'
+        assert redact_sensitive_text(text) == text
+
+    def test_named_shell_variable_value_not_masked(self):
+        text = 'curl -H "x-api-key: $TOKEN" http://x'
+        assert redact_sensitive_text(text) == text
+
+    def test_command_substitution_value_not_masked(self):
+        text = 'curl -H "api-key: $(cat k.txt)" http://x'
+        result = redact_sensitive_text(text)
+        assert "cat k.txt" in result
+        assert result.count('"') == 2, result
+
+    def test_literal_value_keeps_closing_quote(self):
+        # Even a genuine literal credential must not eat the surrounding quote
+        # (mirrors the Authorization-header fix for #43083).
+        text = 'curl -H "api-key: sk-local-VERYsecret-999888"'
+        result = redact_sensitive_text(text)
+        assert "VERYsecret" not in result
+        assert result.count('"') == 2, result
+        assert result.endswith('"'), result
+
+    def test_non_reference_dollar_values_still_masked(self):
+        # ``$1abc`` (positional) and a bare ``$`` are not variable references.
+        assert "1abc" not in redact_sensitive_text("api-key: $1abc")
+        assert redact_sensitive_text("api-key: $") == "api-key: ***"
+
 
 class TestTelegramTokens:
     def test_bot_token(self):

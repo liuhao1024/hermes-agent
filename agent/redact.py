@@ -507,9 +507,24 @@ _AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s
 
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
+# The value class excludes quotes for the same reason as _AUTH_HEADER_RE above:
+# pulling a closing quote into the mask turns value corruption into SYNTAX
+# corruption (unterminated quote → shell EOF / SyntaxError). See #141960.
 SECRET_HEADER_NAME_LIST = ("x-api-key", "x-goog-api-key", "api-key", "apikey", "x-api-token", "x-auth-token", "x-access-token")
 _SECRET_HEADER_NAMES = rf"(?:{'|'.join(SECRET_HEADER_NAME_LIST)})"
-_SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNORECASE)
+_SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)([^\s\"']+)", re.IGNORECASE)
+
+
+def _secret_header_sub(m: "re.Match[str]") -> str:
+    # A value that is entirely a shell reference — ``$VAR``/``${VAR}`` via _SHELL_VAR_REF,
+    # or a ``$(…)`` command substitution head (the value token stops at whitespace, so only
+    # the ``$(cmd`` prefix is visible) — names where the secret lives, it carries no secret
+    # bytes itself. Masking it corrupted echoed curl commands into syntax errors (#141960).
+    # Junk like ``$1abc`` or a bare ``$`` still masks; literal credentials stay fully masked.
+    value = m.group(2)
+    if value.startswith("$(") or re.fullmatch(_SHELL_VAR_REF, value):
+        return m.group(0)
+    return m.group(1) + _mask_token(value)
 
 # Telegram bot tokens: [bot]<digits>:<token>, token >= 30 chars. The lookbehind
 # anchors the id at the start of its digit run: without it, a long run of digits
@@ -964,7 +979,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
 
     if ":" in text:
-        text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
+        text = _SECRET_HEADER_RE.sub(_secret_header_sub, text)
         text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
 
     if "BEGIN" in text and "-----" in text:
