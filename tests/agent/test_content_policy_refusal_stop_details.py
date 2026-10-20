@@ -32,3 +32,40 @@ def test_empty_refusal_reports_stop_details_explanation():
     )
     assert verdict.action == "return"
     assert "classifier halt" in verdict.result["error"]
+
+
+def test_stop_details_explanation_beats_summarized_thinking():
+    """A classifier halt after a thinking block leaves content empty but reasoning populated;
+    the structured stop_details reason is the refusal reason, not the thinking summary (#142213)."""
+    agent = _agent()
+    agent._extract_reasoning.return_value = "The reset reply would include session info that's too verbose"
+    response = SimpleNamespace(
+        content=[], stop_reason="refusal", usage=None, model="claude",
+        stop_details={"type": "refusal", "category": "cyber",
+                      "explanation": "This request triggered restrictions on violative cyber content."},
+    )
+    verdict = handle_content_policy_refusal(
+        agent, response, TurnRetryState(), thinking_spinner=None, messages=[], api_messages=[], api_kwargs={},
+        active_system_prompt=None, conversation_history=[], api_call_count=1, effective_task_id="t", turn_id="u",
+        api_request_id="r", api_start_time=0.0, retry_count=0, max_retries=0,
+    )
+    assert verdict.action == "return"
+    assert "violative cyber content" in verdict.result["error"]
+    assert "session info" not in verdict.result["error"]
+
+
+def test_category_only_stop_details_beats_summarized_thinking():
+    agent = _agent()
+    agent._extract_reasoning.return_value = "I'm thinking about how to phrase this next step"
+    response = SimpleNamespace(
+        content=[], stop_reason="refusal", usage=None, model="claude",
+        stop_details={"type": "refusal", "category": "cyber"},
+    )
+    verdict = handle_content_policy_refusal(
+        agent, response, TurnRetryState(), thinking_spinner=None, messages=[], api_messages=[], api_kwargs={},
+        active_system_prompt=None, conversation_history=[], api_call_count=1, effective_task_id="t", turn_id="u",
+        api_request_id="r", api_start_time=0.0, retry_count=0, max_retries=0,
+    )
+    assert verdict.action == "return"
+    assert "provider refusal category: cyber" in verdict.result["error"]
+    assert "phrase this next step" not in verdict.result["error"]

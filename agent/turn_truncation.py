@@ -720,15 +720,17 @@ def handle_content_policy_refusal(
 
     _refusal_result = normalize_response_for_agent(agent, response)
     _refusal_text = (getattr(_refusal_result, "content", None) or "").strip()
-    if not _refusal_text:
-        _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
     # Anthropic stop_reason=refusal carries its reason on stop_details (category + optional explanation),
-    # not in a content block — without it a classifier halt reads as "(no text)" (#113689).
+    # not in a content block — without it a classifier halt reads as "(no text)" (#113689). The structured
+    # reason outranks summarized thinking: a classifier halt after a thinking block leaves content empty
+    # but reasoning populated, and that thinking is not a refusal reason (#142213).
     _stop_details = (getattr(_refusal_result, "provider_data", None) or {}).get("stop_details")
     if not _refusal_text and isinstance(_stop_details, dict):
         _refusal_text = str(_stop_details.get("explanation") or "").strip() or (
             f"provider refusal category: {_stop_details['category']}" if _stop_details.get("category") else ""
         )
+    if not _refusal_text:
+        _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
 
     agent._invoke_api_request_error_hook(
         task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
