@@ -461,19 +461,30 @@ def _scaffold_header(
 _SCAN_SKIP_PARTS = {'.git', '.github', '.hub', '.archive', '.locks'}
 
 
-def skill_command_collision_note(name: str) -> Optional[str]:
-    """User-facing note when *name*'s slash slug is a core command (name or alias), else None.
+def skill_command_collision_note(name: str, *, registered: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Optional[str]:
+    """User-facing note when *name*'s slash slug can't be its command, else None: the slug is a
+    core command (name or alias), or another skill already registered it — names that differ only
+    by slug normalization ("Mipeso", "mipe so", "mipe+so" → ``/mipeso``) collide invisibly to a
+    content grep (#142136).
 
     The single source of the collision predicate: ``scan_skill_commands`` uses it to skip
     auto-registration (the shadowing guard from 370ebf2d3 — the skill map is consulted before
     built-in handlers), and the ``/skills`` listing plus the command palette render the note so
-    the skipped skill is explained where the user looks, not only in the log.
+    the skipped skill is explained where the user looks, not only in the log. *registered* is the
+    command map to dedup against: the scan passes its in-progress map (calling the published one
+    from inside a scan would re-enter it); surfaces pass None to read the published map.
     """
     from hermes_cli.commands import resolve_command
     cmd_name = slugify_skill_name(name)
-    if not cmd_name or resolve_command(cmd_name) is None:
+    if not cmd_name:
         return None
-    return f"slash command /{cmd_name} unavailable — name taken by built-in; use /skill {name}"
+    if resolve_command(cmd_name) is not None:
+        return f"slash command /{cmd_name} unavailable — name taken by built-in; use /skill {name}"
+    owner = (get_skill_commands() if registered is None else registered).get(f"/{cmd_name}")
+    if owner is not None and owner["name"] != name:
+        return (f"slash command /{cmd_name} unavailable — slug taken by skill '{owner['name']}'; "
+                f"use /skill {name}")
+    return None
 
 
 def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: dict[str, dict[str, Any]]) -> None:
@@ -496,11 +507,11 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: dic
     cmd_name = slugify_skill_name(name)
     if not cmd_name:
         return
-    # A collision with a core command (name or alias) skips auto-registration; the skill stays
-    # loadable via /skill <name>. The same predicate feeds the /skills + palette notes.
-    if skill_command_collision_note(name) is not None:
-        logger.warning("Skill %r generates slash command '/%s' which collides with a core Hermes command; "
-                       "skipping auto-registration. Use '/skill %s' instead.", name, cmd_name, name)
+    # A collision with a core command, or with another skill whose name normalizes to the same
+    # slug, skips auto-registration; the skill stays loadable via /skill <name>. The same
+    # predicate feeds the /skills + palette notes.
+    if note := skill_command_collision_note(name, registered=commands):
+        logger.warning("Skill %r: %s (skipping auto-registration).", name, note)
         return
     # Dedup on the slug too: "git_helper" and "git-helper" normalize the same.
     # First-wins preserves project > local > external precedence.
@@ -702,7 +713,9 @@ def _scan_plugin_skill_commands(manager, metadata: list, tag: tuple) -> dict[str
         if not (skill_matches_platform(parsed) and skill_matches_environment(parsed) and skill_matches_apps(parsed)):
             continue
         key = f"/{qualified.lower()}"
-        if skill_command_collision_note(qualified) is not None or key in commands:
+        # registered={}: plugin keys keep their qualified "ns:name" form, so the inter-skill
+        # slug dedup has nothing to look up here — this stays the built-in-command check.
+        if skill_command_collision_note(qualified, registered={}) is not None or key in commands:
             logger.warning("Plugin skill %r collides with an existing slash command; skipping", qualified)
             continue
         commands[key] = {

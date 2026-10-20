@@ -11,10 +11,17 @@ from rich.console import Console
 from hermes_constants import get_hermes_home
 
 NOTE = "slash command /handoff unavailable — name taken by built-in; use /skill handoff"
+SLUG_NOTE = "slash command /mipeso unavailable — slug taken by skill 'MipeSo'; use /skill mipeso"
 
 
 def _write_skill(name: str) -> None:
     skill_dir = get_hermes_home() / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill.\n---\n# {name}\n", encoding="utf-8")
+
+
+def _write_skill_dir(dirname: str, name: str) -> None:
+    skill_dir = get_hermes_home() / "skills" / dirname
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill.\n---\n# {name}\n", encoding="utf-8")
 
@@ -76,3 +83,38 @@ def test_catalog_discovery_failure_warning_outranks_the_collision_note(monkeypat
     catalog = server._methods["commands.catalog"](1, {})["result"]
     assert catalog["warning"] == "quick_commands discovery unavailable: config.yaml unreadable"
     assert "/tidy-notes" in catalog["skills"]
+
+
+def test_slug_normalization_collision_is_visible_on_every_listing_surface(monkeypatch):
+    """Names differing only by slug normalization ("Mipeso" vs "mipeso") keep the first-wins
+    scan behaviour, but the dropped twin now gets a note naming the winner and its escape
+    hatch — a frontmatter grep cannot find this collision because the declared names
+    differ, so the command vanished with no visible trace (#142136)."""
+    import cli
+    from agent.skill_commands import scan_skill_commands
+    from tools import skills_tool
+    from hermes_cli.skills_hub import do_list
+    from tui_gateway import server
+
+    _write_skill_dir("aaa-twin", "MipeSo")  # sorts first: claims /mipeso
+    _write_skill("mipeso")  # the user's skill: its command is dropped
+    monkeypatch.setattr(skills_tool, "_SKILLS_CACHE", {})
+    monkeypatch.setattr(cli, "_skill_commands", None)
+
+    commands = scan_skill_commands()
+    assert commands["/mipeso"]["name"] == "MipeSo"  # first-wins behaviour unchanged
+
+    sink = io.StringIO()
+    do_list(console=Console(file=sink, force_terminal=False, color_system=None, width=200))
+    skills_table = sink.getvalue()
+    assert SLUG_NOTE in skills_table
+    assert skills_table.count("unavailable") == 1  # the winner itself carries no note
+
+    catalog = server._methods["commands.catalog"](1, {})["result"]
+    assert catalog["warning"] == SLUG_NOTE
+    assert "/mipeso" in catalog["skills"]
+
+    from hermes_cli.slash_exec import CommandContext, _exec_commands
+
+    gateway_commands = _exec_commands(CommandContext(args="", options={"page_size": 500})).text
+    assert f"⚠ {SLUG_NOTE}" in gateway_commands
