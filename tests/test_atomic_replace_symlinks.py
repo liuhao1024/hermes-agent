@@ -295,6 +295,24 @@ def test_atomic_replace_copy_fallback_preserves_symlink(
 
 
 
+def test_atomic_replace_estale_uses_copy_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub #142011 — overlayfs renames report ESTALE (errno 116 on Linux); the
+    copy fallback re-resolves both paths so the setup write still lands instead
+    of propagating and killing the whole .env save."""
+    real = tmp_path / ".env"
+    real.write_text("old\n", encoding="utf-8")
+    tmp = _write_tmp(tmp_path, "new\n")
+
+    def fail_replace(src: str, dst: str) -> None:
+        raise OSError(errno.ESTALE, os.strerror(errno.ESTALE), src, None, dst)
+
+    monkeypatch.setattr("utils.os.replace", fail_replace)
+
+    assert Path(atomic_replace(tmp, real)) == real
+    assert real.read_text(encoding="utf-8") == "new\n"
+    assert not tmp.exists()
+
+
 def test_atomic_replace_real_cross_device(tmp_path: Path) -> None:
     shm = Path("/dev/shm")
     if os.name != "posix" or not os.access(shm, os.W_OK):

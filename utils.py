@@ -136,7 +136,10 @@ _WINDOWS_CONTENDED_REPLACE_ERRORS = frozenset({5, 32, 33})
 _REPLACE_RETRY_ATTEMPTS = 4
 _REPLACE_RETRY_BASE_DELAY_S = 0.02
 _REPLACE_RETRY_MAX_DELAY_S = 0.1
-_CROSS_DEVICE_ERRNOS = (errno.EXDEV, errno.EBUSY)
+# Renames that will never succeed on retry: cross-device, bind-mount, busy — and ESTALE, which
+# overlayfs/NFS can report for a same-directory rename (GitHub #142011) when the resolved file
+# handle goes stale. The copy fallback re-resolves both paths, so the write still lands.
+_CROSS_DEVICE_ERRNOS = (errno.EXDEV, errno.EBUSY, errno.ESTALE)
 
 
 def _is_contended_windows_replace_error(exc: OSError) -> bool:
@@ -180,10 +183,10 @@ def atomic_replace(tmp_path: str | Path, target: str | Path) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
     Resolves a symlink first so ``os.replace`` writes the real file in place and the symlink
-    survives. Otherwise identical to ``os.replace`` unless the rename fails with EXDEV/EBUSY
-    (cross-device, bind-mount, busy file: copy/fsync/unlink immediately — these never clear on
-    retry) or a Windows rename contended by another open handle (winerror 5/32/33: bounded retry,
-    then in-place rewrite).
+    survives. Otherwise identical to ``os.replace`` unless the rename fails with EXDEV/EBUSY/ESTALE
+    (cross-device, bind-mount, busy or stale-handle renames: copy/fsync/unlink immediately — these
+    never clear on retry) or a Windows rename contended by another open handle (winerror 5/32/33:
+    bounded retry, then in-place rewrite).
     """
     target_str = str(target)
     real_path = _publish_path(target_str)
