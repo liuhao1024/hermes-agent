@@ -282,3 +282,34 @@ def test_nested_dist_travels_but_root_dist_stays_out(tmp_path):
 
     assert (destination / "plugins/kanban/dashboard/dist/index.js").read_text(encoding="utf-8") == "ENTRY\n"
     assert not (destination / "dist").exists(), "root build output never enters the snapshot"
+
+
+def test_member_runtime_data_stays_out_of_the_workspace_snapshot(tmp_path):
+    """A plugin's live state (its sqlite store, traces, migration backups) is not a
+    build input: copying it into every generation multiplied a 360 MB db across all
+    sandbox environments (#142278)."""
+    plugin = tmp_path / "mneme"
+    plugin.mkdir()
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname="mneme"\nversion="1"\nrequires-python=">=3.11"\n', encoding="utf-8",
+    )
+    (plugin / "mneme_pkg").mkdir()
+    (plugin / "mneme_pkg/__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (plugin / "db").mkdir()
+    (plugin / "db/plugin.db").write_bytes(b"live sqlite bytes")
+    (plugin / "db/plugin.db-wal").write_bytes(b"live wal bytes")
+    (plugin / "trace.jsonl").write_text("{}\n", encoding="utf-8")
+    (plugin / "state.bak").write_bytes(b"migration backup")
+
+    stamp = workspace.members_stamp([plugin])
+    member = workspace._workspace_member(plugin, tmp_path / "stage", identity=plugin)
+
+    assert (member / "mneme_pkg/__init__.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (member / "db").exists(), "the live sqlite store is state, not a build input"
+    assert not (member / "trace.jsonl").exists()
+    assert not (member / "state.bak").exists()
+    # The stamp hashes build inputs only: runtime-data writes must not churn it into
+    # regenerating generations on every background review.
+    (plugin / "db/plugin.db").write_bytes(b"changed live bytes")
+    (plugin / "trace.jsonl").write_text("{}\n{}\n", encoding="utf-8")
+    assert workspace.members_stamp([plugin]) == stamp

@@ -21,10 +21,15 @@ from pm.package import InstallError
 from pm.plugin_declarations import read_python_declaration, manifest_version_error
 
 _MEMBER_EXCLUDE = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
+# A plugin's runtime data is state, not a build input: its live sqlite store, traces and
+# migration backups otherwise land in every generation's workspace copy (#142278).
+_MEMBER_EXCLUDE_NAMES = _MEMBER_EXCLUDE | {"db", "trace.jsonl"}
+_MEMBER_EXCLUDE_SUFFIXES = (".egg-info", ".db", ".db-shm", ".db-wal", ".bak")
 
 
 def _member_ignored(directory, names):
-    return [name for name in names if name in _MEMBER_EXCLUDE or name.endswith(".egg-info")]
+    return [name for name in names
+            if name in _MEMBER_EXCLUDE_NAMES or name.endswith(_MEMBER_EXCLUDE_SUFFIXES)]
 
 
 # The uv failure classifier lives beside the uv runner (stdlib-only imports): the bootstrap
