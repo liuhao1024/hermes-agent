@@ -227,6 +227,9 @@ class _TurnCallbacks:
     approval_cb: Any = None
     edit_approval_requester: Any = None
     streamed: bool = False
+    # Concatenation of the deltas already sent under the streamed messageId, so the
+    # turn tail can tell an appending ``transform_llm_output`` rewrite from a deeper one.
+    streamed_text: str = ""
     tool_call_ids: Any = None
     tool_call_meta: Any = None
 
@@ -877,7 +880,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 state.current_prompt_text = ""
             return PromptResponse(stop_reason="end_turn")
 
-        return await self._finish_turn(state, session_id, conn, result, pre_turn_hermes_id, cbs.streamed)
+        return await self._finish_turn(
+            state, session_id, conn, result, pre_turn_hermes_id, cbs.streamed, cbs.streamed_text
+        )
 
     def _flush_turn_tool_calls(
         self, cbs: _TurnCallbacks, session_id: str, conn: Any, loop: asyncio.AbstractEventLoop
@@ -918,6 +923,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
             def stream_delta_cb(text: str) -> None:
                 cbs.streamed = cbs.streamed or bool(text)
+                if text:
+                    cbs.streamed_text += text
                 message_cb(text)
 
             cbs.stream_delta_cb = stream_delta_cb
@@ -944,7 +951,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
     async def _finish_turn(
         self, state: SessionState, session_id: str, conn: Any, result: dict, pre_turn_hermes_id: Any,
-        streamed_message: bool,
+        streamed_message: bool, streamed_text: str = "",
     ) -> PromptResponse:
         """Persist, emit provenance/final text, drain queued prompts, report usage."""
         try:
@@ -974,16 +981,33 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             suppress = interrupted and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
             # Send the final text unless already streamed — or if a plugin hook transformed it after.
             if final_response and conn and not suppress and (not streamed_message or result.get("response_transformed")):
-                update = acp.update_agent_message_text(final_response)
-                if state.message_ids is not None:
-                    # A plugin-rewritten reply replaces the streamed bubble (same id); an
-                    # unstreamed final response opens its own.
-                    if streamed_message and result.get("response_transformed"):
-                        update.message_id = state.message_ids.last() or state.message_ids.current()
+                # ACP clients append same-id chunks into one message, so a plugin-rewritten
+                # reply must not re-send the full text under the streamed id — the client
+                # would render the whole reply twice (#141919). An appending transform sends
+                # only the suffix; a deeper rewrite opens a fresh id so the corrected text
+                # renders as its own bubble instead of being concatenated.
+                text_out = final_response
+                fresh_id = False
+                if streamed_message and result.get("response_transformed"):
+                    if streamed_text and final_response.startswith(streamed_text):
+                        text_out = final_response[len(streamed_text):]
                     else:
-                        update.message_id = state.message_ids.current()
+                        fresh_id = True
+                if text_out:
+                    update = acp.update_agent_message_text(text_out)
+                    if state.message_ids is not None:
+                        if fresh_id:
+                            state.message_ids.close()
+                        if streamed_message and not fresh_id:
+                            update.message_id = state.message_ids.last() or state.message_ids.current()
+                        else:
+                            update.message_id = state.message_ids.current()
+                        state.message_ids.close()
+                    await conn.session_update(session_id, update)
+                elif state.message_ids is not None:
+                    # Nothing new to paint; still end the active message so the next
+                    # turn's deltas open a fresh bubble.
                     state.message_ids.close()
-                await conn.session_update(session_id, update)
 
         finally:
             # Go idle before draining so recursive prompt() calls can acquire the session.
