@@ -693,3 +693,84 @@ def test_prune_owner_lookup_survives_symlinked_scratch_and_drops_orphaned_mcp_he
             helper.kill()
             helper.wait(timeout=10)
 
+
+def test_scans_do_not_walk_behind_a_windows_junction(tmp_path, monkeypatch):
+    """A junction (``mklink /J``) answers ``is_symlink() == False``, so every scan used to
+    walk through it into the target tree — twice per prune, on every session start (#142086).
+    The idle scan, the size count and the worktree release must all stop at the link."""
+    import hermes_constants_scratch
+
+    root = tmp_path / "scratch"
+    root.mkdir()
+    junction_path = str(root / "proj-junction")
+    payload = tmp_path / "payload"  # stands in for a file at the junction's target
+    payload.write_text("y" * 100, encoding="utf-8")
+    ancient = time.time() - 48 * 3600
+    os.utime(payload, (ancient, ancient))
+    os.utime(root, (ancient, ancient))
+
+    class JunctionEntry:
+        """os.DirEntry shape of a Windows junction: a directory that is not a symlink."""
+
+        def __init__(self) -> None:
+            self.name = "proj-junction"
+            self.path = junction_path
+
+        def stat(self, **_kwargs):
+            return os.stat(payload)
+
+        def is_dir(self, **_kwargs):
+            return True
+
+        def is_file(self, **_kwargs):
+            return False
+
+        def is_symlink(self):
+            return False
+
+        def is_junction(self):
+            return True
+
+    real_scandir = os.scandir
+
+    def scandir(path):
+        assert path != junction_path, "a scan walked into the junction target"
+        if path == str(root):
+            class Scan:
+                def __enter__(self):
+                    return iter([JunctionEntry()])
+
+                def __exit__(self, *_args):
+                    return False
+            return Scan()
+        return real_scandir(path)
+
+    monkeypatch.setattr(hermes_constants_scratch.os, "scandir", scandir)
+    cutoff = time.time() - 24 * 3600
+    assert hermes_constants_scratch.subtree_touched_since(root, cutoff) is False
+    assert hermes_constants_scratch._tree_bytes(root) == os.lstat(root).st_size + 100
+    assert hermes_constants_scratch._linked_worktree_repos(root) == set()
+
+
+def test_prune_removes_a_windows_junction_without_recursing_behind_it(tmp_path, monkeypatch):
+    """An idle junction is taken down with ``rmdir`` — the link itself, never the target tree
+    behind it. ``rmtree`` refuses to recurse into a junction, so pruning one used to log
+    "could not fully remove" on every session start and leave it behind forever (#142086)."""
+    import hermes_constants_scratch
+
+    scratch = get_scratch_dir(tmp_path, prune=False)
+    entry = scratch / "proj-junction"
+    entry.mkdir()  # stands in for the junction link itself
+    ancient = time.time() - 30 * 3600
+    os.utime(entry, (ancient, ancient))
+    monkeypatch.setattr(hermes_constants_scratch, "reap_processes_rooted_in", lambda *_: 0)
+    monkeypatch.setattr(hermes_constants_scratch, "_is_junction", lambda path: path == entry)
+    rmtree_called = []
+    monkeypatch.setattr(
+        hermes_constants_scratch.shutil, "rmtree",
+        lambda *args, **kwargs: rmtree_called.append(args),
+    )
+    assert prune_scratch_dir(scratch) == 1
+    assert not entry.exists()  # the junction itself is gone
+    assert rmtree_called == []  # and nothing was recursed behind it
+

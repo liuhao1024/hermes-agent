@@ -77,13 +77,22 @@ def _open_prune_log(log_file: Path | None) -> logging.Logger:
     return audit
 
 
+def _is_junction(path: Path | os.DirEntry) -> bool:
+    """Windows directory junction: ``is_symlink()`` is False for one while ``is_dir()`` follows
+    it into the target, so a link check must ask ``is_junction`` as well. It only exists on
+    Python >= 3.12 — where the attribute is absent (POSIX, 3.11) the answer is always no."""
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
 def _tree_bytes(path: Path) -> int:
-    """Apparent size of *path* and everything under it, symlinks not followed."""
+    """Apparent size of *path* and everything under it, symlinks and junctions not followed."""
     try:
         total = os.lstat(path).st_size
     except OSError:
         return 0
-    stack = [str(path)] if path.is_dir() and not path.is_symlink() else []
+    descend = path.is_dir() and not path.is_symlink() and not _is_junction(path)
+    stack = [str(path)] if descend else []
     while stack:
         try:
             with os.scandir(stack.pop()) as it:
@@ -92,7 +101,7 @@ def _tree_bytes(path: Path) -> int:
                         total += child.stat(follow_symlinks=False).st_size
                     except OSError:
                         continue
-                    if child.is_dir(follow_symlinks=False):
+                    if child.is_dir(follow_symlinks=False) and not _is_junction(child):
                         stack.append(child.path)
         except OSError:
             continue
@@ -108,9 +117,10 @@ def subtree_touch_state(path: Path, cutoff: float) -> str:
     """Tri-state form of :func:`subtree_touched_since`: ``touched`` (recent write seen),
     ``scan-failed`` (unreadable — idle cannot be established, so the entry is kept, but
     a failed scan is not activity and is never reported as such), or ``idle``.
-    Same walk, same stop-at-first-recent shortcut, same symlink rules. A hardlinked file
-    (``st_nlink > 1``) does not count either: its mtime is the inode's, and
-    ``git clone --local`` hardlinks packs that git freshens from the source repo."""
+    Same walk, same stop-at-first-recent shortcut, same symlink and junction
+    rules. A hardlinked file (``st_nlink > 1``) does not count either: its mtime
+    is the inode's, and ``git clone --local`` hardlinks packs that git freshens
+    from the source repo."""
     return _scan_subtree(path, cutoff)[0]
 
 
@@ -120,7 +130,7 @@ def _scan_subtree(path: Path, cutoff: float) -> tuple[str, str | None]:
     try:
         if os.lstat(path).st_mtime >= cutoff:
             return _TOUCHED, None
-        if not path.is_dir() or path.is_symlink():
+        if not path.is_dir() or path.is_symlink() or _is_junction(path):
             return _IDLE, None
     except OSError:
         return _SCAN_FAILED, None
@@ -136,7 +146,7 @@ def _scan_subtree(path: Path, cutoff: float) -> tuple[str, str | None]:
                         return _SCAN_FAILED, current if stuck.is_permission_error(exc) else None
                     if st.st_mtime >= cutoff and not (st.st_nlink > 1 and child.is_file(follow_symlinks=False)):
                         return _TOUCHED, None
-                    if child.is_dir(follow_symlinks=False):
+                    if child.is_dir(follow_symlinks=False) and not _is_junction(child):
                         stack.append(child.path)
         except OSError as exc:
             return _SCAN_FAILED, current if stuck.is_permission_error(exc) else None
@@ -147,8 +157,9 @@ def subtree_touched_since(path: Path, cutoff: float) -> bool:
     """True when *path* or anything beneath it has an mtime at or after *cutoff*.
 
     Stops at the first recent entry, so a live tree costs one hit and only a truly idle
-    tree pays for the full walk (once, right before it is deleted). Symlinks are never
-    followed: a link into the repo would make the target's activity keep the entry alive.
+    tree pays for the full walk (once, right before it is deleted). Symlinks and junctions
+    are never followed: a link into the repo would make the target's activity keep the
+    entry alive.
     An unreadable entry is kept: an incomplete scan cannot establish that it is idle —
     so True here means "touched **or** uninspectable", and callers that need to tell the
     two apart (the mid-prune audit) use :func:`subtree_touch_state` instead.
@@ -327,7 +338,8 @@ def _linked_worktree_repos(entry: Path) -> set[str]:
                             # <repo>/.git/worktrees/<name> -> <repo>
                             if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
                                 repos.add(str(gitdir.parent.parent.parent))
-                    elif child.is_dir(follow_symlinks=False) and depth < _GIT_FILE_MAX_DEPTH \
+                    elif child.is_dir(follow_symlinks=False) and not _is_junction(child) \
+                            and depth < _GIT_FILE_MAX_DEPTH \
                             and child.name not in ("node_modules", ".venv", "venv"):
                         stack.append((child.path, depth + 1))
         except OSError:
@@ -401,7 +413,7 @@ def _prune_idle_entries(
         # Worktree scan first: a registration whose tree an earlier pass (or hand)
         # removed is stale even in a rescued entry, and the re-check below sits as
         # close to the delete as the loop allows.
-        if entry.is_dir() and not entry.is_symlink():
+        if entry.is_dir() and not entry.is_symlink() and not _is_junction(entry):
             repos |= _linked_worktree_repos(entry)
         # Last-moment re-validation (#132401 C1/F1): ``doomed`` is a snapshot from
         # before the reap ran, and a writer whose cwd is outside scratch — invisible
@@ -443,8 +455,11 @@ def _prune_idle_entries(
             continue
         denied: list[str] = []
         try:
-            if entry.is_dir() and not entry.is_symlink():
+            if entry.is_dir() and not entry.is_symlink() and not _is_junction(entry):
                 denied = stuck.rmtree_collecting_permission_errors(entry)
+            elif _is_junction(entry):
+                # rmdir takes the junction down itself; the tree it points at is not ours.
+                entry.rmdir()
             else:
                 entry.unlink()
         except OSError as exc:
