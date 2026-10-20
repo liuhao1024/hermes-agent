@@ -337,7 +337,8 @@ def _pid_alive(pid: Optional[int]) -> bool:
                             return False
                         break
         except (FileNotFoundError, PermissionError, OSError):
-            # proc entry gone → already reaped; treat as dead.
+            # Secondary probe unreadable → keep the kill(0) answer: a probe
+            # failure is not death (#141758).
             pass
     elif sys.platform == "darwin":
         try:
@@ -349,8 +350,10 @@ def _pid_alive(pid: Optional[int]) -> bool:
                 timeout=1,
                 check=False,
             )
-            if proc.returncode != 0:
-                return False
+            # ``ps`` answers only the zombie question here. A non-zero exit or
+            # a timeout under load is ``ps`` failing, not proof the pid is gone
+            # — existence was already established above, and one transient
+            # probe failure must not book a live worker as crashed (#141758).
             if "Z" in (proc.stdout or "").strip():
                 return False
         except (OSError, subprocess.SubprocessError, TimeoutError):
@@ -395,24 +398,46 @@ def _worker_alive(pid: Optional[int], started_at) -> bool:
 
 
 def _pid_recycled(pid: Optional[int], started_at) -> bool:
-    """True when a live ``pid`` is NOT the process fingerprinted at spawn (or the fingerprint can no
-    longer be read). Signalling it would hit a stranger. ``None`` fingerprint = legacy row, never
-    recycled; the UNVERIFIED marker is always foreign. An integer fingerprint (rows written before the
-    boot witness was added) compares the start time only."""
+    """True when a live ``pid`` is NOT the process fingerprinted at spawn. ``None`` fingerprint =
+    legacy row, never recycled; the UNVERIFIED marker is always foreign. An integer fingerprint
+    (rows written before the boot witness was added) compares the start time only.
+
+    An UNREADABLE identity is unknown, not foreign (#141758): under load the start-time read
+    itself can fail transiently, and treating that as a recycle let one failed probe book a
+    live worker as crashed. Callers that must not act on an unknown identity (signalling) use
+    ``_fingerprint_unreadable`` to refuse instead.
+    """
     if started_at is None or not pid:
         return False
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
+        current = _process_fingerprint(int(pid))
+        if current is None:
+            return False
+        return current != started_at
     from gateway.status import _start_times_agree, get_process_start_time
     current = get_process_start_time(int(pid))
     if current is None:
-        return True
+        return False
     try:
         return not _start_times_agree(current, started_at)
     except (TypeError, ValueError):
+        # Junk recorded value (not a transient probe): a value we cannot even
+        # compare is foreign — signalling it would hit a stranger.
         return True
+
+
+def _fingerprint_unreadable(pid: Optional[int], started_at) -> bool:
+    """True when a LIVE ``pid``'s spawn identity cannot be read right now (#141758). A failed
+    read is unknown, not foreign: this is the signal-path refusal — ``_pid_recycled`` answers
+    False for the same state so a crash sweep never books a dead worker on a probe failure."""
+    if not pid or started_at is None or started_at == UNVERIFIED_WORKER_FINGERPRINT:
+        return False
+    from gateway.status import get_process_start_time
+    if isinstance(started_at, str) and "|" in started_at:
+        return _process_fingerprint(int(pid)) is None
+    return get_process_start_time(int(pid)) is None
 
 
 def _kill_fn(signal_fn) -> Optional[Callable[[int, int], None]]:
@@ -474,6 +499,11 @@ def _terminate_reclaimed_worker(
         # Never signal by bare number: a dead PID is "gone" (reclaim proceeds), a live one is held.
         info["signal_refused"] = True
         info["terminated"] = not _kb._pid_alive(pid)
+        return info
+    if _kb._pid_alive(pid) and _fingerprint_unreadable(pid, started_at):
+        # Probe failure is unknown, not foreign: never signal an identity we
+        # could not read. The evidence stays for a later tick (#141758).
+        info["signal_refused"] = True
         return info
     if _kb._pid_alive(pid) and _pid_recycled(pid, started_at):
         info["terminated"] = True
