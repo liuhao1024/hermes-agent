@@ -1,14 +1,17 @@
 /**
  * Screen auto-raise contract: a live screen-tool call on an opted-in bot raises
  * its Screen tab once; a manual Close holds through the burst; no opt-in, a
- * foreign profile, or a non-screen tool never raises.
+ * foreign profile, a non-screen tool, or a host that cannot serve a screen
+ * never raises.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RosterRow } from './types'
 
 const opened: string[] = []
+const prefetched: string[] = []
 let meta: Record<string, { screenAutoOpen?: boolean }> = {}
+let screenCache: Record<string, { status?: { supported: boolean } | null; unavailable?: boolean }> = {}
 
 vi.mock('@hermes/plugin-sdk', () => ({ host: { onEvent: () => () => undefined } }))
 vi.mock('./data', () => ({
@@ -29,6 +32,13 @@ vi.mock('./screen-open', () => ({
   },
   screenPaneId: (bot: RosterRow) => `screen:${bot.name}`
 }))
+vi.mock('./screen-state', () => ({
+  $screenState: { get: () => screenCache },
+  prefetchBotScreenStatus: (bot: RosterRow) => {
+    prefetched.push(bot.name)
+  },
+  screenStateFor: (all: Record<string, unknown>, bot: RosterRow) => all[bot.name] ?? null
+}))
 
 const roster = [
   { name: 'parker', sourceScoped: true },
@@ -41,7 +51,9 @@ const toolStart = (profile: string, name: string, connectionId?: string) =>
 describe('screen auto-raise', () => {
   beforeEach(async () => {
     opened.length = 0
+    prefetched.length = 0
     meta = { parker: { screenAutoOpen: true }, alfred: {} }
+    screenCache = {}
     const mod = await import('./screen-autoraise')
     mod.resetScreenAutoRaise()
   })
@@ -80,5 +92,33 @@ describe('screen auto-raise', () => {
     // Same profile name on a different source is a different bot.
     expect(handleScreenToolStart(toolStart('parker', 'computer_use', 'ssh-box'), 5)).toBe(false)
     expect(opened).toEqual([])
+  })
+
+  it('never raises for a host the cached display status says cannot serve a screen', async () => {
+    const { handleScreenToolStart } = await import('./screen-autoraise')
+
+    // A settled "no screen on this host" gates the wake: the tab could only paint the
+    // unsupported empty state (#142221).
+    screenCache.parker = { status: { supported: false } }
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 5)).toBe(false)
+
+    // An older backend without display.* is the same dead-tab answer.
+    screenCache.parker = { unavailable: true }
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 6)).toBe(false)
+
+    // A host the cache says CAN serve a screen keeps raising.
+    screenCache.parker = { status: { supported: true } }
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 7)).toBe(true)
+    expect(opened).toEqual(['parker'])
+  })
+
+  it('triggers the one-shot status fetch for a bot whose display status is not cached yet', async () => {
+    const { handleScreenToolStart } = await import('./screen-autoraise')
+
+    // No cached status: this wake still follows the existing rules, but the fetch it
+    // triggers means the next one is decided on real data instead of raising blind.
+    expect(handleScreenToolStart(toolStart('parker', 'computer_use'), 5)).toBe(true)
+    expect(prefetched).toEqual(['parker'])
+    expect(opened).toEqual(['parker'])
   })
 })

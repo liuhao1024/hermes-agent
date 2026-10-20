@@ -78,6 +78,7 @@ import {
   workerActiveAt
 } from './row-helpers'
 import { openBotScreen } from './screen-open'
+import { prefetchBotScreenStatus } from './screen-state'
 import type { GroupMember, RosterRow, SidebarRowLabels } from './types'
 import {
   $botSections,
@@ -339,6 +340,13 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
               .then(current => {
                 const next = !current.screenAutoOpen
                 void saveBotMeta(bot, { screenAutoOpen: next })
+
+                // Opting in on a host that cannot serve a screen would only ever raise the
+                // unsupported empty state: fetch the flag now so auto-raise can skip it (#142221).
+                if (next) {
+                  prefetchBotScreenStatus(bot)
+                }
+
                 host.notify({
                   kind: 'info',
                   message: next

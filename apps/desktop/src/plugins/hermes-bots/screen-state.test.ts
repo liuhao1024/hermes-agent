@@ -2,6 +2,10 @@
  * Lease ordering: `display.lease` events and `display.status` replies race on
  * the wire. A slower status reply describing an OLDER lease must never roll
  * back the newer event — the backend's monotonic `epoch` is the tiebreak.
+ *
+ * Prefetch: `prefetchBotScreenStatus` settles `display.status` once per bot so
+ * cache-only readers (screen auto-raise) can gate on the supported flag without
+ * opening anything (#142221).
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +15,25 @@ import type { RosterRow } from './types'
 
 vi.mock('./data', () => ({ botSelectionKey: (bot: RosterRow) => bot.name }))
 
-import { $screenState, beginScreenStatusRequest, screenStateFor, setScreenLease, setScreenStatus } from './screen-state'
+const { displayRequest } = vi.hoisted(() => ({ displayRequest: vi.fn() }))
+
+/** The marker `isDisplayUnavailable` is mocked to recognise as method-not-found. */
+const UNAVAILABLE = { code: -32601 }
+
+vi.mock('./screen-connection', () => ({
+  displayRequest,
+  isDisplayUnavailable: (error: unknown) => error === UNAVAILABLE
+}))
+
+import {
+  $screenState,
+  beginScreenStatusRequest,
+  prefetchBotScreenStatus,
+  resetScreenStatePrefetch,
+  screenStateFor,
+  setScreenLease,
+  setScreenStatus
+} from './screen-state'
 
 const bot: RosterRow = { name: 'ops' }
 
@@ -33,7 +55,11 @@ const statusWith = (lease: DisplayLease): DisplayStatus => ({
   lease
 })
 
-beforeEach(() => $screenState.set({}))
+beforeEach(() => {
+  $screenState.set({})
+  resetScreenStatePrefetch()
+  displayRequest.mockReset()
+})
 
 describe('lease epoch ordering', () => {
   it('a status reply carrying an older epoch does not roll back a newer lease event', () => {
@@ -81,5 +107,39 @@ describe('status request ordering', () => {
     setScreenStatus(bot, statusWith(agent))
     setScreenStatus(bot, { ...statusWith(agent), running: false }, inFlight)
     expect(screenStateFor($screenState.get(), bot)?.status?.running).toBe(true)
+  })
+})
+
+describe('status prefetch', () => {
+  it('fetches once and lands the reply in the cache', async () => {
+    displayRequest.mockResolvedValue(statusWith(agent))
+
+    prefetchBotScreenStatus(bot)
+    prefetchBotScreenStatus(bot)
+
+    await vi.waitFor(() => expect(screenStateFor($screenState.get(), bot)?.status?.supported).toBe(true))
+    expect(displayRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('a method-not-found answer settles unavailable instead of refetching', async () => {
+    displayRequest.mockRejectedValue(UNAVAILABLE)
+
+    prefetchBotScreenStatus(bot)
+
+    await vi.waitFor(() => expect(screenStateFor($screenState.get(), bot)?.unavailable).toBe(true))
+    prefetchBotScreenStatus(bot)
+    expect(displayRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('a transient failure forgets the prefetch so the next trigger retries', async () => {
+    displayRequest.mockRejectedValueOnce(new Error('bot offline'))
+    displayRequest.mockResolvedValue(statusWith(agent))
+
+    prefetchBotScreenStatus(bot)
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    prefetchBotScreenStatus(bot)
+    await vi.waitFor(() => expect(screenStateFor($screenState.get(), bot)?.status?.running).toBe(true))
+    expect(displayRequest).toHaveBeenCalledTimes(2)
   })
 })

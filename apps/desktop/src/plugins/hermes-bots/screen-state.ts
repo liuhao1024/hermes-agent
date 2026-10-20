@@ -7,7 +7,13 @@
 import { atom } from 'nanostores'
 
 import { botSelectionKey } from './data'
-import type { DisplayLease, DisplayStatus, ScreenViewer } from './screen-connection'
+import {
+  type DisplayLease,
+  displayRequest,
+  type DisplayStatus,
+  isDisplayUnavailable,
+  type ScreenViewer
+} from './screen-connection'
 import type { RosterRow } from './types'
 
 export interface BotScreenState {
@@ -75,6 +81,42 @@ export function setScreenUnavailable(bot: RosterRow): void {
   }
 
   $screenState.set({ ...current, [key]: { status: null, lease: null, viewer: null, unavailable: true } })
+}
+
+/** Bots whose `display.status` has been fetched by `prefetchBotScreenStatus` (settled once per run). */
+const prefetchedScreenStatus = new Set<string>()
+
+/**
+ * Fetch `display.status` for `bot` into the cache once. The supported flag is
+ * constant per host, so a single read lets surfaces that only consult the cache
+ * (screen auto-raise) decide instead of opening a tab that can never show
+ * anything (#142221).
+ */
+export function prefetchBotScreenStatus(bot: RosterRow): void {
+  const key = botSelectionKey(bot)
+
+  if (prefetchedScreenStatus.has(key)) {
+    return
+  }
+
+  prefetchedScreenStatus.add(key)
+  const request = beginScreenStatusRequest(bot)
+
+  void displayRequest<DisplayStatus>(bot, 'display.status')
+    .then(next => setScreenStatus(bot, next, request))
+    .catch((error: unknown) => {
+      if (isDisplayUnavailable(error)) {
+        setScreenUnavailable(bot)
+      } else {
+        // A transient failure (an offline bot) is not an answer: allow a retry on the next trigger.
+        prefetchedScreenStatus.delete(key)
+      }
+    })
+}
+
+/** Test seam. */
+export function resetScreenStatePrefetch(): void {
+  prefetchedScreenStatus.clear()
 }
 
 export function setScreenLease(bot: RosterRow, lease: DisplayLease): void {

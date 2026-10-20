@@ -13,6 +13,10 @@
  *
  * Fencing rules, in order:
  *   - the tab is already open → nothing (never re-front over what you moved to)
+ *   - the cached `display.status` says this host cannot serve a screen (non-Linux,
+ *     or an older backend without `display.*`) → nothing: the tab could only ever
+ *     paint the unsupported empty state, so auto-raise stays as hidden as the
+ *     portal and hero already are (#142221)
  *   - a manual Close holds until the NEXT fresh screen use, never re-raises
  *     mid-burst: a user closing the tab while the bot clicks around has said
  *     "not now", and the next tool.start of the same run must respect that
@@ -27,6 +31,7 @@ import type { RpcEvent } from '@hermes/plugin-sdk'
 import { $botMeta, $lastRoster, botSelectionKey } from './data'
 import { botRosterMeta, resolveBotConnectionRoute } from './routing'
 import { openBotScreen, screenPaneId } from './screen-open'
+import { $screenState, prefetchBotScreenStatus, screenStateFor } from './screen-state'
 import type { RosterRow } from './types'
 
 /** Tools whose first call means the bot is now using its screen. Browser tools count:
@@ -88,9 +93,16 @@ export function shouldAutoRaise(
   now: number,
   state: RaiseState | undefined,
   tabOpen: boolean,
-  meta = $botMeta.get()
+  meta = $botMeta.get(),
+  screen = screenStateFor($screenState.get(), bot)
 ): boolean {
   if (!botRosterMeta(bot, meta)?.screenAutoOpen || tabOpen) {
+    return false
+  }
+
+  // Same condition the portal and hero hide on: a settled "no screen here" (a non-Linux
+  // host, or an older backend without display.*) can only raise the empty state (#142221).
+  if (screen?.unavailable || (screen?.status && !screen.status.supported)) {
     return false
   }
 
@@ -131,6 +143,10 @@ export function handleScreenToolStart(event: RpcEvent, now = Date.now()): boolea
   }
 
   const key = botSelectionKey(bot)
+
+  // The decision reads the cached supported flag: make sure a bot whose status was never
+  // fetched (no pane or portal opened yet) gets the one-shot fetch instead of raising blind.
+  prefetchBotScreenStatus(bot)
 
   if (!shouldAutoRaise(bot, now, raiseState.get(key), openTabs.has(key))) {
     return false
