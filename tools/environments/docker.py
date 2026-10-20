@@ -617,6 +617,29 @@ def _container_mount_taken(volume_args: list[str], mount: str) -> bool:
     return False
 
 
+def _precreate_nested_mount_points(run_args: list[str], binds: list[tuple[str, str]]) -> None:
+    """Create the host side of bind targets nested inside the sandbox binds before ``docker run``.
+
+    dockerd auto-creates a missing mount point as root inside the user-owned ``<sandbox>/home``
+    bind, and the ownership handback walk prunes every nested mount point, so those root-owned
+    directories would make the profile impossible to delete without sudo (#141911)."""
+    for i, arg in enumerate(run_args[:-1]):
+        if arg != "-v":
+            continue
+        parsed = _split_volume_spec(run_args[i + 1])
+        if not parsed:
+            continue
+        container_path = parsed[1].rstrip("/")
+        for bind_point, host_root in binds:
+            if container_path == bind_point or not container_path.startswith(bind_point + "/"):
+                continue
+            nested = container_path[len(bind_point):].lstrip("/")
+            try:
+                os.makedirs(os.path.join(host_root, nested), exist_ok=True)
+            except OSError as e:
+                logger.debug("Docker: could not pre-create nested mount point %s: %s", container_path, e)
+
+
 def _existing_host_mount(volume_args: list[str], host_cwd_abs: str) -> str | None:
     """Container path if a user volume already bind-mounts this host directory."""
     want = _host_path_key(host_cwd_abs)
@@ -772,6 +795,13 @@ class DockerEnvironment(BaseEnvironment):
         self._image_pinned = image_pinned
         self._image_uses_s6_init = image_uses_s6_init
         self._all_run_args = all_run_args
+
+        # Only the persistent sandbox binds leak nested mount points onto the host; a tmpfs
+        # root lives and dies with the container. Must run before the container is created.
+        if self._persistent:
+            _precreate_nested_mount_points(all_run_args, [
+                bind for bind in (("/root", self._home_dir), ("/workspace", self._workspace_dir))
+                if bind[1]])
 
         reused = persist_across_processes and self._attach_existing_container(
             task_label, profile_name, egress_label, network)
