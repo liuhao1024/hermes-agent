@@ -168,6 +168,20 @@ class TestStore:
         assert store.get_suggestion("findable")["id"] == rec["id"]
         assert store.get_suggestion("nope") is None
 
+    def test_title_lookup_prefers_pending_over_resolved(self, store):
+        # A resolved record is retained for its dedup_key latch, so a suggestion
+        # re-offered under a new dedup_key with the same title must be reachable
+        # by title instead of hitting the older resolved record.
+        old = _add(store, key="demo:1", title="daily-brief")
+        store.dismiss_suggestion(old["id"])
+        new = _add(store, key="demo:2", title="daily-brief")
+        assert store.get_suggestion("daily-brief")["id"] == new["id"]
+
+    def test_title_lookup_falls_back_to_resolved_when_no_pending(self, store):
+        old = _add(store, key="solo:1", title="daily-brief")
+        store.dismiss_suggestion(old["id"])
+        assert store.get_suggestion("daily-brief")["id"] == old["id"]
+
     def test_clear_resolved_drops_accepted_only(self, store):
         _add(store, key="a")
         _add(store, key="b")

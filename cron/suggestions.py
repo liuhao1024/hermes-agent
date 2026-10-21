@@ -140,10 +140,13 @@ def get_suggestion(ref: str) -> Optional[dict[str, Any]]:
         idx = int(ref) - 1
         if 0 <= idx < len(pending):
             return pending[idx]
-    for s in suggestions:
-        if s.get("title", "").lower() == ref.lower():
+    matches = [s for s in suggestions if s.get("title", "").lower() == ref.lower()]
+    # Resolved records are retained for their dedup_key latch, so a title re-offered
+    # under a new dedup_key must resolve to the pending record, not the older one.
+    for s in matches:
+        if s.get("status") == _STATUS_PENDING:
             return s
-    return None
+    return matches[0] if matches else None
 
 
 def _set_status(suggestion_id: str, status: str) -> bool:
