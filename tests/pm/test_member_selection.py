@@ -149,3 +149,91 @@ def test_buildable_member_without_a_version_gets_one_and_keeps_its_name(tmp_path
     member = _workspace_member(plugin, root, identity=plugin)
     project = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project == {"name": "noversion-plugin", "version": "0.0.0"}
+
+
+def test_duplicate_buildable_names_across_homes_are_demoted_to_unique_members(tmp_path):
+    """The same buildable plugin installed in the shared home and a profile home
+    declares one [project].name twice; uv aborts the lock ("Two workspace members
+    are both named …") and every profile sharing the environment loses its plugins.
+    Demote the colliding members to metadata-only ones named by their unique key —
+    the snapshot is loaded by path, so nothing loses the build (#142712)."""
+    import tomllib
+
+    from pm.workspace import _duplicate_member_names, _workspace_member
+
+    plugins = []
+    for home in ("home-a", "home-b"):
+        plugin = tmp_path / home / "plugins" / "replay"
+        plugin.mkdir(parents=True)
+        (plugin / "pyproject.toml").write_text(
+            '[project]\nname = "replay-plugin"\nversion = "1.0"\n'
+            '[build-system]\nrequires = []\nbuild-backend = "backend"\n',
+            encoding="utf-8",
+        )
+        plugins.append(plugin)
+    duplicates = _duplicate_member_names([(plugin, plugin) for plugin in plugins])
+    assert duplicates == frozenset({"replay-plugin"})
+
+    root = tmp_path / "gen"
+    root.mkdir()
+    members = [_workspace_member(plugin, root, identity=plugin, duplicate_names=duplicates)
+               for plugin in plugins]
+    names = [tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+             for member in members]
+    assert all(name.startswith("hermes-plugin-replay-") for name in names), names
+    assert names[0] != names[1]
+    for member in members:
+        document = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))
+        assert document["tool"]["uv"]["package"] is False
+
+
+def test_duplicate_scan_ignores_metadata_only_and_lone_buildable_members(tmp_path):
+    """Only buildable members can collide: a metadata-only member is born renamed to
+    its unique key, and a single buildable one owns its declared name."""
+    from pm.workspace import _duplicate_member_names
+
+    virtual = tmp_path / "home" / "plugins" / "hindsight"
+    virtual.mkdir(parents=True)
+    (virtual / "pyproject.toml").write_text(
+        '[project]\nname = "shared-name"\nversion = "1"\ndependencies = []\n', encoding="utf-8")
+    buildable = tmp_path / "home" / "profiles" / "p" / "plugins" / "replay"
+    buildable.mkdir(parents=True)
+    (buildable / "pyproject.toml").write_text(
+        '[project]\nname = "lone-plugin"\nversion = "1"\n'
+        '[build-system]\nrequires = []\nbuild-backend = "backend"\n', encoding="utf-8")
+    assert _duplicate_member_names([(virtual, virtual), (buildable, buildable)]) == frozenset()
+
+
+def test_generate_pyproject_demotes_duplicate_buildable_names(tmp_path):
+    """The generation path itself must demote the colliding copies, or the shared
+    workspace root still names two members alike and `uv lock` exits 2."""
+    import tomllib
+
+    from pm.workspace import _generate_pyproject
+
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "pyproject.toml").write_text(
+        '[project]\nname = "hermes-agent"\nversion = "1.0"\n', encoding="utf-8")
+    plugins = []
+    for home in ("home-a", "home-b"):
+        plugin = tmp_path / home / "plugins" / "replay"
+        plugin.mkdir(parents=True)
+        (plugin / "pyproject.toml").write_text(
+            '[project]\nname = "replay-plugin"\nversion = "1.0"\n'
+            '[build-system]\nrequires = []\nbuild-backend = "backend"\n', encoding="utf-8")
+        plugins.append(plugin)
+
+    root = tmp_path / "gen"
+    _generate_pyproject(plugins, root, source=core)
+    document = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    members = sorted(document["tool"]["uv"]["workspace"]["members"])
+    assert len(members) == 2
+    assert all(member.startswith("plugin-sources/replay-") for member in members), members
+    names = []
+    for member in members:
+        member_document = tomllib.loads((root / member / "pyproject.toml").read_text(encoding="utf-8"))
+        assert member_document["project"]["name"].startswith("hermes-plugin-replay-")
+        assert member_document["tool"]["uv"]["package"] is False
+        names.append(member_document["project"]["name"])
+    assert names[0] != names[1]

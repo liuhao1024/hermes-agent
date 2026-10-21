@@ -119,9 +119,12 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
     core_pyproject = source / "pyproject.toml"
     core_text = core_pyproject.read_text(encoding="utf-8-sig")
 
-    members = [_workspace_member(source, root, identity=identity).relative_to(root).as_posix()
-               for identity, source in member_sources(plugin_dirs).items()
-               if _is_member_candidate(source)]
+    selected = [(identity, plugin_dir) for identity, plugin_dir in member_sources(plugin_dirs).items()
+                if _is_member_candidate(plugin_dir)]
+    duplicate_names = _duplicate_member_names(selected)
+    members = [_workspace_member(plugin_dir, root, identity=identity,
+                                 duplicate_names=duplicate_names).relative_to(root).as_posix()
+               for identity, plugin_dir in selected]
 
     if members:
         import tomllib
@@ -234,10 +237,42 @@ def _member_key(identity: Path) -> str:
     return f"{name}-{digest}"
 
 
-def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
+def _duplicate_member_names(selected: list[tuple[Path, Path]]) -> frozenset[str]:
+    """Canonical ``[project].name`` values more than one buildable member declares.
+
+    A name two members keep aborts ``uv lock`` ("Two workspace members are both
+    named …"), and the same plugin installed in the shared home and a profile home
+    is the normal way to get there (#142712); a buildable member cannot simply be
+    renamed while it is still built, so those members are demoted to metadata-only
+    in ``_workspace_member``.
+    """
+    from collections import Counter
+
+    import tomllib
+
+    from packaging.utils import canonicalize_name
+
+    counts: Counter[str] = Counter()
+    for _identity, plugin_dir in selected:
+        declaration = read_python_declaration(plugin_dir)
+        if declaration.pyproject is None:
+            continue  # manifest-only members are born renamed to their unique key
+        document = tomllib.loads(declaration.pyproject.read_text(encoding="utf-8-sig"))
+        if "build-system" not in document and document.get("tool", {}).get("uv", {}).get("package") is not True:
+            continue  # metadata-only members already carry the unique key in their name
+        name = document.get("project", {}).get("name")
+        if isinstance(name, str) and name.strip():
+            counts[canonicalize_name(name)] += 1
+    return frozenset(name for name, count in counts.items() if count > 1)
+
+
+def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path,
+                      duplicate_names: frozenset[str] = frozenset()) -> Path:
     """Keep workspace members with their generation, not a temporary install clone."""
     import json
     import tomllib
+
+    from packaging.utils import canonicalize_name
 
     key = _member_key(identity)
     declaration = read_python_declaration(plugin_dir)
@@ -255,6 +290,12 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
         # package metadata its backend produces.
         # tool.uv.package = true opts into uv package mode: real build metadata, so buildable.
         virtual = "build-system" not in document and document.get("tool", {}).get("uv", {}).get("package") is not True
+        declared = document.get("project", {}).get("name")
+        # A declared name another member of this generation also keeps cannot survive
+        # one lock, and the snapshot is loaded by path, so nothing needs it built:
+        # demote to metadata-only under the unique key, as the manual workaround in
+        # #142712 does, instead of failing every profile that shares the environment.
+        demoted = isinstance(declared, str) and declared.strip() and canonicalize_name(declared) in duplicate_names
         changed = declaration.install_requirements != declaration.requirements
         if changed:
             document["project"]["dependencies"] = list(declaration.install_requirements)
@@ -270,8 +311,13 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
                     continue  # The referenced tree was copied with this member.
                 spec["path"] = (identity / relative).resolve().as_posix()
                 changed = True
-        if virtual:
+        if virtual or demoted:
             document.setdefault("project", {})["name"] = f"hermes-plugin-{key}"
+        if demoted:
+            # uv builds any member with a build backend unless told otherwise; the
+            # renamed member must be metadata-only, or uv rejects the name its
+            # backend reports ("Package metadata name … does not match given name").
+            document.setdefault("tool", {}).setdefault("uv", {})["package"] = False
         project = document.get("project")
         # uv rejects any [project] table whose version is neither set nor dynamic, at
         # parse time and for buildable members too, so a version-less member would abort
@@ -281,7 +327,7 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
         if project is not None and "version" not in project and "version" not in project.get("dynamic", ()):
             project["version"] = "0.0.0"
             changed = True
-        if virtual or changed:
+        if virtual or demoted or changed:
             import tomli_w
 
             (member / "pyproject.toml").write_text(tomli_w.dumps(document), encoding="utf-8")
