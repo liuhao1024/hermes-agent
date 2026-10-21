@@ -707,6 +707,144 @@ class TestOwnTabPreamble:
         ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
 
 
+class TestOwnTabPreambleLifecycle:
+    """Replay the preamble inside a simulated harness daemon (stub cdp()/switch_tab(),
+    fake ``browser_harness`` pid file, markers scoped to tmp_path). A daemon restart
+    must retire the dead predecessor's pinned tab and stale marker instead of leaking
+    one about:blank tab (and one marker file) per restart (#142484)."""
+
+    # Above any default pid_max (Linux 2**22, macOS 99999): always ESRCH/dead.
+    DEAD_PID = "10000000"
+
+    def _marker_path(self, tmp_path, name, pid):
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        return tmp_path / f"hermes-bu-owntab-{uid}-{name}-{pid}"
+
+    def _run(
+        self, tmp_path, monkeypatch, cdp, daemon_pid, name="r7k2", pid_file_body=None
+    ):
+        import sys as _sys
+        import tempfile as _tempfile
+        import types as _types
+
+        monkeypatch.setenv("BU_NAME", name)
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        fake_pkg = _types.ModuleType("browser_harness")
+        fake_pkg._ipc = _types.SimpleNamespace(
+            pid_path=lambda n: tmp_path / f"pidfile-{n}"
+        )
+        monkeypatch.setitem(_sys.modules, "browser_harness", fake_pkg)
+        (tmp_path / f"pidfile-{name}").write_text(
+            pid_file_body if pid_file_body is not None else str(daemon_pid)
+        )
+        switches = []
+        # Replayed exactly as the harness daemon runs it: the preamble string is
+        # a module constant here, with cdp()/switch_tab() injected as builtins.
+        exec(bu_cli._OWN_TAB_PREAMBLE, {"cdp": cdp, "switch_tab": switches.append})
+        return switches
+
+    @staticmethod
+    def _cdp(fail=()):
+        calls = []
+
+        def cdp(method, **kwargs):
+            calls.append((method, kwargs))
+            if method in fail:
+                raise RuntimeError(f"cdp rejected {method}")
+            return {"targetId": "tid-new"} if method == "Target.createTarget" else {}
+
+        return cdp, calls
+
+    def test_first_daemon_creates_and_records_tab(self, tmp_path, monkeypatch):
+        cdp, calls = self._cdp()
+
+        switches = self._run(tmp_path, monkeypatch, cdp, daemon_pid=111)
+
+        assert [m for m, _ in calls] == ["Target.createTarget"]
+        assert switches == ["tid-new"]
+        # the marker now records the pinned target id for the next daemon to retire
+        assert self._marker_path(tmp_path, "r7k2", 111).read_text() == "tid-new"
+
+    def test_existing_marker_short_circuits(self, tmp_path, monkeypatch):
+        self._marker_path(tmp_path, "r7k2", 111).write_text("tid-old")
+        cdp, calls = self._cdp()
+
+        switches = self._run(tmp_path, monkeypatch, cdp, daemon_pid=111)
+
+        assert calls == [] and switches == []
+
+    def test_restart_retires_dead_daemons_tab_and_marker(self, tmp_path, monkeypatch):
+        stale = self._marker_path(tmp_path, "r7k2", self.DEAD_PID)
+        stale.write_text("tid-old")
+        cdp, calls = self._cdp()
+
+        switches = self._run(tmp_path, monkeypatch, cdp, daemon_pid=222)
+
+        assert ("Target.closeTarget", {"targetId": "tid-old"}) in calls
+        assert ("Target.createTarget", {"url": "about:blank"}) in calls
+        assert switches == ["tid-new"]
+        assert not stale.exists()  # stale marker swept, not accumulated
+        assert self._marker_path(tmp_path, "r7k2", 222).read_text() == "tid-new"
+
+    def test_live_daemons_marker_and_tab_left_alone(self, tmp_path, monkeypatch):
+        """A marker whose pid still exists (a live sibling daemon, or plain pid
+        reuse) owns its tab — only definitely-dead daemons leak theirs to us."""
+        live = self._marker_path(tmp_path, "r7k2", os.getpid())
+        live.write_text("tid-live")
+        cdp, calls = self._cdp()
+
+        self._run(tmp_path, monkeypatch, cdp, daemon_pid=222)
+
+        assert ("Target.closeTarget", {"targetId": "tid-live"}) not in calls
+        assert live.exists()
+
+    def test_pre_fix_empty_marker_removed_without_close(self, tmp_path, monkeypatch):
+        """Markers written by the pre-fix preamble are empty: no target to close,
+        but the file itself must stop accumulating."""
+        stale = self._marker_path(tmp_path, "r7k2", self.DEAD_PID)
+        stale.write_text("")
+        cdp, calls = self._cdp()
+
+        self._run(tmp_path, monkeypatch, cdp, daemon_pid=222)
+
+        assert not [m for m, _ in calls if m == "Target.closeTarget"]
+        assert not stale.exists()
+
+    def test_close_failure_never_blocks_repin_or_cleanup(self, tmp_path, monkeypatch):
+        """closeTarget erroring (target already gone) is swallowed: the marker is
+        still retired and the new tab still pinned."""
+        stale = self._marker_path(tmp_path, "r7k2", self.DEAD_PID)
+        stale.write_text("tid-old")
+        cdp, _ = self._cdp(fail={"Target.closeTarget"})
+
+        switches = self._run(tmp_path, monkeypatch, cdp, daemon_pid=222)
+
+        assert not stale.exists()
+        assert switches == ["tid-new"]
+
+    def test_garbage_marker_suffix_is_swept(self, tmp_path, monkeypatch):
+        """A corrupted marker name (non-numeric pid tail) is garbage: swept so it
+        stops accumulating, never trusted to steer anything."""
+        garbage = self._marker_path(tmp_path, "r7k2", "not-a-pid")
+        garbage.write_text("tid-garbage")
+        cdp, _ = self._cdp()
+
+        self._run(tmp_path, monkeypatch, cdp, daemon_pid=222)
+
+        assert not garbage.exists()
+
+    def test_tainted_pid_file_cannot_steer_marker_path(self, tmp_path, monkeypatch):
+        """The daemon pid file is external state: a non-numeric (e.g. path-laden)
+        payload must fall back to "0" instead of steering the marker path."""
+        cdp, _ = self._cdp()
+
+        self._run(
+            tmp_path, monkeypatch, cdp, daemon_pid=222, pid_file_body="../../evil"
+        )
+
+        assert self._marker_path(tmp_path, "r7k2", 0).exists()
+
+
 class TestProviderPickerIntegration:
     """The `hermes tools` Browser Automation picker row (browser_backend
     marker) must enter/leave CLI mode cleanly and highlight correctly."""

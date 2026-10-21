@@ -50,7 +50,7 @@ _LOCAL_FALLBACK_SENTINEL = "_HERMES_BU_LOCAL_FALLBACK"
 _OWN_TAB_PREAMBLE = """\
 # hermes: pin this named session to its own tab (once per daemon process)
 def _hermes_ensure_own_tab():
-    import os as _os, tempfile as _tf
+    import errno as _errno, glob as _glob, os as _os, tempfile as _tf
     _name = _os.environ.get("BU_NAME", "default")
     try:
         # Key the marker by the daemon's pid so a daemon restart (which
@@ -60,28 +60,85 @@ def _hermes_ensure_own_tab():
         _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
     except Exception:
         _dpid = "0"
+    if not _dpid.isdigit():
+        _dpid = "0"  # the pid file is external state; never let it steer paths
     _uid = _os.getuid() if hasattr(_os, "getuid") else 0
-    _marker = _os.path.join(
-        _tf.gettempdir(), "hermes-bu-owntab-%s-%s-%s" % (_uid, _name, _dpid)
+    _tmpdir = _tf.gettempdir()
+    _prefix = _os.path.join(
+        _tmpdir, "hermes-bu-owntab-%s-%s-" % (_uid, _name)
     )
+    _marker = _prefix + _dpid
     if _os.path.exists(_marker):
         return
+    _own_tid = None
+
+    def _pid_gone(pid):
+        # Only a definitely-dead daemon's pinned tab is ours to retire: a pid
+        # that still exists (sibling daemon, or plain pid reuse) keeps its tab.
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return True
+        if _os.name == "nt":
+            import ctypes as _ctypes
+            _h = _ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not _h:
+                return True
+            _ctypes.windll.kernel32.CloseHandle(_h)
+            return False
+        try:
+            _os.kill(pid, 0)
+        except OSError as _e:
+            return _e.errno == _errno.ESRCH
+        except Exception:
+            return False
+        return False
+
+    # Restart hygiene: the previous daemon of this session name pinned a tab
+    # that nothing ever closed (one leaked about:blank + one stale marker per
+    # restart). Close that tab and drop its marker; both are keyed to this
+    # name and its pid is dead by the time a new daemon pins.
+    _prefix_len = len(_os.path.basename(_prefix))
+    for _old in _glob.glob(_prefix + "*"):
+        _base = _os.path.basename(_old)
+        # Fail-closed marker hygiene: only files directly inside the tempdir
+        # (normalized, so no ../ or symlinked walk-ups) and named after this
+        # exact session's marker prefix are ever read or removed.
+        if _os.path.dirname(_os.path.abspath(_old)) != _os.path.abspath(_tmpdir):
+            continue
+        if not _base.startswith(_os.path.basename(_prefix)):
+            continue
+        try:
+            if not _pid_gone(_base[_prefix_len:]):
+                continue
+        except Exception:
+            continue
+        try:
+            _tid = open(_old).read().strip()
+            if _tid:
+                cdp("Target.closeTarget", targetId=_tid)
+        except Exception:
+            pass  # best-effort: an already-closed target just errors
+        try:
+            _os.unlink(_old)
+        except OSError:
+            pass
     try:
         # Force a fresh target: new_tab() would REUSE a blank current tab,
         # which is exactly the tab a sibling daemon may also hold.
-        _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
-        if _tid:
-            switch_tab(_tid)
+        _own_tid = cdp("Target.createTarget", url="about:blank").get("targetId")
+        if _own_tid:
+            switch_tab(_own_tid)
     except Exception:
         pass  # best-effort: worst case is pre-fix behavior
     try:
-        open(_marker, "w").close()
+        with open(_marker, "w") as _f:
+            _f.write(_own_tid or "")
     except OSError:
         pass
 _hermes_ensure_own_tab()
 del _hermes_ensure_own_tab
 """
-
 _DEFAULT_TIMEOUT_S = 300
 _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 1800
