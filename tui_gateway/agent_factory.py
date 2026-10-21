@@ -55,6 +55,16 @@ def _config_model_target() -> tuple[str, str]:
 def _resolve_startup_runtime() -> tuple[str, str | None]:
     model = _resolve_model()
     if explicit_provider := os.environ.get("HERMES_TUI_PROVIDER", "").strip():
+        # `--provider <custom>` without `-m` uses that entry's default_model, else the global
+        # default goes to the custom endpoint and every surface records the wrong model.
+        # Explicit `-m` still wins — same rule as the CLI path (#86978).
+        if not _env_model_seed():
+            with contextlib.suppress(Exception):
+                from hermes_cli.runtime_provider import _get_named_custom_provider
+                provider_default = str((_get_named_custom_provider(
+                    explicit_provider, resolve_credentials=False) or {}).get("model") or "").strip()
+                if provider_default:
+                    model = provider_default
         return model, explicit_provider
     if not (explicit_model := _env_model_seed()):
         return model, None

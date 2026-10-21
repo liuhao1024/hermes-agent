@@ -206,3 +206,33 @@ def test_oneshot_and_tui_qualified_model_never_reaches_default_provider(tmp_path
     choice = _resolve_model_and_provider(cfg, None, None)
     assert (choice.provider, choice.model) == ("custom:jetson-vllm", "nemotron-nano-30b")
     assert tui_server._resolve_startup_runtime() == ("nemotron-nano-30b", "custom:jetson-vllm")
+
+
+def test_tui_provider_without_flag_model_uses_entry_default_model(tmp_path, monkeypatch):
+    """``hermes --tui --provider <custom>`` without ``-m`` resolves the session's model to the
+    named entry's ``default_model``, not the global ``model.default`` (#142472: every surface
+    recorded the default provider's model name while the custom endpoint silently served the
+    traffic — same owner as the CLI's ``--provider`` rule, #86978)."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n  default: qwen3.8-flash-gufo\n"
+        "providers:\n  gpu2:\n    base_url: http://127.0.0.1:8080/v1\n"
+        "    api_key: EMPTY\n    api_mode: chat_completions\n    default_model: qwen3.8-27b\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from tui_gateway import server as tui_server  # binds the config path at import: after HERMES_HOME
+    # The server bakes its launch home at import; a later test's HERMES_HOME must still steer it.
+    monkeypatch.setattr(tui_server, "_hermes_home", str(home))
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "gpu2")
+    assert tui_server._resolve_startup_runtime() == ("qwen3.8-27b", "gpu2")
+    # Explicit `-m` still wins over the entry's default_model.
+    monkeypatch.setenv("HERMES_INFERENCE_MODEL", "explicit-flag-model")
+    assert tui_server._resolve_startup_runtime() == ("explicit-flag-model", "gpu2")
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    # A built-in provider has no ``providers:`` entry, so the global default stays.
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "nous")
+    assert tui_server._resolve_startup_runtime() == ("qwen3.8-flash-gufo", "nous")
