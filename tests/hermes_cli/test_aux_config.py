@@ -116,3 +116,46 @@ def test_delegation_cfg_as_task_projection():
     assert _format_aux_current(shaped) == "nous · Hermes-4.5"
     # Non-dict delegation section must not crash
     assert _format_aux_current(_delegation_cfg_as_task({"delegation": "bogus"})) == "auto"
+
+
+# ── Dead-slot removal: skills_hub (#142403) ─────────────────────────────────
+
+def test_skills_hub_slot_removed_from_all_surfaces():
+    """The skills_hub slot never had a consumer, so no surface may offer it.
+
+    Mirrors the web_extract / session_search removal: the defaults and every
+    picker stop advertising the dead slot; leftover user blocks stay loadable
+    (see the test below) but nothing reads them.
+    """
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    from hermes_cli.main_provider_setup import _AUX_TASKS
+    from hermes_cli.web_server_config import _AUX_TASK_SLOTS
+
+    assert "skills_hub" not in DEFAULT_CONFIG["auxiliary"]
+    assert "skills_hub" not in _AUX_TASK_SLOTS
+    assert all(key != "skills_hub" for key, _name, _desc in _AUX_TASKS)
+
+def test_leftover_skills_hub_block_in_user_config_is_ignored(tmp_path, monkeypatch):
+    """A user config that still pins auxiliary.skills_hub must keep loading.
+
+    Same contract as the removed web_extract / session_search slots: the
+    leftover block is merged verbatim and ignored, never an error.
+    """
+    from pathlib import Path
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".hermes").mkdir(exist_ok=True)
+    (tmp_path / ".hermes" / "config.yaml").write_text(
+        "model:\n"
+        "  provider: gemini\n"
+        "auxiliary:\n"
+        "  skills_hub:\n"
+        "    provider: gemini\n"
+        "    model: gemini-flash-lite-latest\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+    assert cfg["model"]["provider"] == "gemini"
+    assert cfg["auxiliary"]["skills_hub"]["model"] == "gemini-flash-lite-latest"
