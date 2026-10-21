@@ -523,3 +523,43 @@ class TestPeriodicOrphanReap:
             bt._cleanup_running = orig_running
 
         assert len(reap_calls) > 1, "startup-only reap would give exactly 1"
+
+
+class TestRealProfileExitCleanup:
+    """_close_real_profile_lane_on_exit (#142654): the shared attach daemon never
+    self-exits (its idle timer is dropped because Chrome is Hermes-launched, not the
+    daemon's) and the exit reaper skips a tracked session whose owner is this
+    still-alive process — so the process that launched the lane's Chrome must close
+    the daemon and its socket dir itself; a process that only reused another owner's
+    browser leaves the daemon alone."""
+
+    def _run_exit(self):
+        killed = {}
+        terminated = {"n": 0}
+        with patch("tools.browser_tool_lifecycle._kill_verified_daemon",
+                   side_effect=lambda sd, sn: killed.setdefault(sn, sd)), \
+             patch("tools.browser_tool_real_profile._terminate_real_profile_chrome",
+                   side_effect=lambda: terminated.__setitem__("n", terminated["n"] + 1)):
+            bt_lifecycle._close_real_profile_lane_on_exit()
+        return killed, terminated
+
+    def test_exit_kills_daemon_and_dir_when_chrome_was_launched_here(self, fake_tmpdir):
+        import tools.browser_tool as bt
+        d = _make_socket_dir(fake_tmpdir, bt._REAL_PROFILE_SESSION, pid=4242)
+        bt._real_profile_chrome_procs.append(object())
+        try:
+            killed, terminated = self._run_exit()
+        finally:
+            bt._real_profile_chrome_procs.clear()
+        assert killed.get(bt._REAL_PROFILE_SESSION)
+        assert not d.exists()
+        assert terminated["n"] == 1
+
+    def test_exit_leaves_daemon_alone_when_no_chrome_was_launched_here(self, fake_tmpdir):
+        import tools.browser_tool as bt
+        d = _make_socket_dir(fake_tmpdir, bt._REAL_PROFILE_SESSION, pid=4242)
+        assert not bt._real_profile_chrome_procs
+        killed, terminated = self._run_exit()
+        assert killed == {}
+        assert d.exists()
+        assert terminated["n"] == 1

@@ -68,6 +68,22 @@ def _stop_all_lightpanda() -> None:
     stop_all_lightpanda()
 
 
+def _close_real_profile_lane_on_exit() -> None:
+    """Exit sweep for the real-profile lane: the process that launched the lane's Chrome
+    owns its attach daemon too. The daemon never self-exits (its idle timer is dropped
+    because Chrome is Hermes-launched, not the daemon's) and the orphan reaper skips a
+    tracked session whose owner is this still-alive process, so without this the daemon
+    and its socket dir outlive a one-shot process (#142654). A process that only REUSED
+    another owner's browser (no Chrome of its own) leaves the daemon alone."""
+    if _bt._real_profile_chrome_procs:
+        socket_dir = os.path.join(_bt._socket_safe_tmpdir(),
+                                  f"agent-browser-{_bt._REAL_PROFILE_SESSION}")
+        if os.path.exists(socket_dir):
+            _kill_verified_daemon(socket_dir, _bt._REAL_PROFILE_SESSION)
+            shutil.rmtree(socket_dir, ignore_errors=True)
+    _real_profile._terminate_real_profile_chrome()
+
+
 def _emergency_cleanup_all_sessions():
     """atexit: close this process's sessions, then sweep orphans left by crashed
     hermes processes — every clean exit reaps accumulated orphans, not only
@@ -84,7 +100,7 @@ def _emergency_cleanup_all_sessions():
     # Own sessions first so their owner_pid files are gone before the reaper scans.
     # Real-profile Chrome is launched directly (not by agent-browser), so the
     # session cleanup never reaps it.
-    _best_effort("Real-profile chrome cleanup on exit", _real_profile._terminate_real_profile_chrome)
+    _best_effort("Real-profile lane cleanup on exit", _close_real_profile_lane_on_exit)
     if _bt._active_sessions:
         _bt.logger.info("Emergency cleanup: closing %s active session(s)...", len(_bt._active_sessions))
         try:

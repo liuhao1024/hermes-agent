@@ -100,6 +100,22 @@ def _agent_browser_get_cdp(session_name: str) -> Optional[str]:
     return f"http://127.0.0.1:{m.group(1)}" if m else None
 
 
+def _real_profile_daemon_running() -> bool:
+    """True when the shared attach daemon is already running. A live ``get cdp-url`` CLI
+    call would START a daemon (and its throwaway temp-profile browser) when none exists —
+    the reuse probe must never be the thing that launches what it is probing for (#142654)."""
+    _bt = _origin()
+    pid_file = os.path.join(_bt._socket_safe_tmpdir(), f"agent-browser-{_bt._REAL_PROFILE_SESSION}",
+                            f"{_bt._REAL_PROFILE_SESSION}.pid")
+    try:
+        with open(pid_file, encoding="utf-8-sig") as fh:
+            pid = int(fh.read().strip())
+    except (ValueError, OSError):
+        return False
+    from gateway.status import _pid_exists
+    return _pid_exists(pid)
+
+
 def _read_devtools_port(data_dir: str) -> Optional[str]:
     """First line of Chrome's ``DevToolsActivePort`` in ``data_dir`` (None when unreadable)."""
     try:
@@ -316,7 +332,10 @@ def _real_profile_cdp() -> tuple:
         # Cookies / Login Data) must NOT run while a live copy-browser (maybe from a previous
         # hermes process) holds the user-data-dir open — that corrupts the databases.
         copy_dir = real_profile_copy_dir(browser)
-        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        # Reuse probe only under a LIVE daemon: with none running, the probing CLI call
+        # itself would start one (plus a throwaway browser) — so go straight to the
+        # surviving-Chrome check instead (#142654).
+        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION) if _real_profile_daemon_running() else None
         if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None
