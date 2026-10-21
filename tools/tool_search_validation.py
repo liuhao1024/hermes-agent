@@ -169,7 +169,7 @@ def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, An
             return [], f"tool_call calls[{position}] must be an object with 'name' and 'arguments'"
         name = str(raw.get("name") or "").strip()
         if not name:
-            return [], f"tool_call calls[{position}] requires a 'name'"
+            return [], _missing_name_error(position, raw)
         if name in BRIDGE_TOOL_NAMES:
             return [], f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
         raw_args = raw.get("arguments")
@@ -191,6 +191,32 @@ def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, An
 
 
 _ECHO_ARGS_MAX_CHARS = 1500
+
+
+def _missing_name_error(position: int, raw: dict[str, Any]) -> str:
+    """Rejection for a batch entry that carries no 'name'. Echoes the entry's own
+    arguments (bounded) and restates the canonical shape: small models re-send the
+    identical entry when told only the constraint — the same doctrine as
+    ``local_batch_error``. Purely a JSON-shape correction: the name is never guessed
+    out of ``arguments`` (#142677)."""
+    raw_args = raw.get("arguments")
+    try:
+        args = json.dumps(raw_args, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        args = "{}"
+    marker = ""
+    if len(args) > _ECHO_ARGS_MAX_CHARS:
+        args, marker = args[:_ECHO_ARGS_MAX_CHARS] + "…", " (truncated)"
+    nested = isinstance(raw_args, dict) and any(
+        key in raw_args for key in ("name", "tool", "tool_call"))
+    hint = (" The tool name belongs in the entry's 'name' key — a tool_call envelope must "
+            "not be nested inside 'arguments'." if nested else "")
+    return (
+        f"tool_call calls[{position}] requires a 'name'. The tool was NOT invoked. "
+        f"Your entry's arguments were: {args}{marker}. Retry it as "
+        '"{"calls":[{"name":"<the exact deferred tool name>","arguments":{...}}]}".'
+        f"{hint}"
+    )
 
 
 def local_batch_error(entries: list[dict[str, Any]]) -> str:

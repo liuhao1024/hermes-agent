@@ -155,6 +155,40 @@ def test_normalize_rejects_malformed_batches(bad, expected_fragment):
     assert expected_fragment in (err or "")
 
 
+def test_missing_name_refusal_echoes_the_entry_and_the_shape():
+    """#142677: a nameless entry gets the corrective doctrine of local_batch_error — its
+    own arguments echoed plus the canonical shape restated — not the bare constraint the
+    model re-sends byte-identical."""
+    entries, err = normalize_tool_call_entries(
+        {"calls": [{"arguments": {"adapter": "playwright"}}]})
+    assert entries == []
+    assert "requires a 'name'" in err
+    assert '"adapter":"playwright"' in err
+    assert '{"calls":[{"name":' in err
+    assert "NOT invoked" in err
+
+
+def test_missing_name_refusal_bounds_the_echo_with_a_marker():
+    """The echo is bounded with an explicit truncation marker so a huge payload cannot
+    bury the correction (#142677)."""
+    big = {"blob": "y" * 2000 + "TAILMARKER" + "z" * 2000}
+    entries, err = normalize_tool_call_entries({"calls": [{"arguments": big}]})
+    assert entries == []
+    assert "(truncated)" in err
+    assert "TAILMARKER" not in err
+
+
+def test_missing_name_refusal_calls_out_a_nested_envelope():
+    """An entry whose arguments carry the tool name (a tool_call envelope nested inside
+    arguments) is told where the name belongs — the correction names the actual
+    malformation instead of a generic one (#142677)."""
+    entries, err = normalize_tool_call_entries(
+        {"calls": [{"arguments": {"name": "browser_exec", "url": "https://x.example"}}]})
+    assert entries == []
+    assert "entry's 'name' key" in err
+    assert "nested inside 'arguments'" in err
+
+
 # ---------------------------------------------------------------------------
 # dispatch_tool_search: remote merge
 # ---------------------------------------------------------------------------
