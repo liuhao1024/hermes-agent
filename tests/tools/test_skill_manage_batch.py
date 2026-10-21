@@ -121,6 +121,24 @@ class TestSkillManageBatch(unittest.TestCase):
         self.assertFalse(r["success"])
         self.assertIn("capped", r["error"])
 
+    def test_unparseable_string_op_names_the_parse_error(self):
+        # #142567: an unparseable JSON-encoded operations string rides in as [raw]
+        # after coerce_tool_args' wrap fallback; grading it "needs an 'action'" points
+        # at a field the model never omitted, so it retries the same shape in a loop.
+        raw = '[{"action":"create","content":"body"}'  # missing closing ]
+        r = json.loads(self.smt.skill_manage(action="", name="", operations=[raw]))
+        self.assertFalse(r["success"])
+        self.assertIn("not valid JSON", r["error"])
+        self.assertNotIn("needs an 'action'", r["error"])
+
+    def test_parseable_json_string_op_is_named_as_such(self):
+        # A double-encoded emission (one op object as a JSON string) is a string,
+        # not an op that happens to be missing its 'action'.
+        raw = json.dumps({"action": "create", "content": SK.format(n="x"), "name": "x"})
+        r = json.loads(self.smt.skill_manage(action="", name="", operations=[raw]))
+        self.assertFalse(r["success"])
+        self.assertIn("JSON-encoded string", r["error"])
+
     def test_intra_batch_conflict_guard(self):
         """Same-file double writes and post-edit full rewrites are always
         a confused plan under last-wins sequencing — rejected BEFORE any

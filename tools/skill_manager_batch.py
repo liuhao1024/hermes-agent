@@ -91,6 +91,18 @@ def _validate_batch_ops(operations, default_name, tool_error):
         return None, tool_error(f"operations[{i}]{msg}", success=False)
     names = []
     for i, op in enumerate(operations):
+        if isinstance(op, str):
+            # An unparseable JSON-encoded operations string arrives wrapped as [raw]
+            # by coerce_tool_args' fallback; grading it "needs an 'action'" points at
+            # a field the model never omitted and it retries the same shape in a
+            # loop (#142567). Name the real defect so the retry can fix it.
+            try:
+                json.loads(op)
+                return fail(i, " is a JSON-encoded string — emit the op object itself, "
+                               "not a string.")
+            except ValueError as exc:
+                return fail(i, f" is a string that is not valid JSON ({exc}). "
+                               f"Pass operations as a JSON array of op objects.")
         if not isinstance(op, dict) or not op.get("action"):
             return fail(i, " needs an 'action'.")
         act = op["action"]
