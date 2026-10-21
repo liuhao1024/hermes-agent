@@ -2698,7 +2698,11 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """The profile owner executes; this subprocess only waits for its receipt."""
     import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    # ``-m`` would prepend the child's cwd — the card workspace — to ``sys.path``,
+    # so a helper named like a stdlib module there (``inspect.py``…) shadows the
+    # stdlib and kills the worker on import (#142358). ``-P`` drops that prepend;
+    # the install root still arrives via the PYTHONPATH pin below.
+    return [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
 
 
 def _open_worker_log(task: Task, board: Optional[str]):

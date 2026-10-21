@@ -205,3 +205,65 @@ def test_worker_toolsets_come_from_the_assignee_profile_not_the_parent_config(tm
         build_kanban_policy(SimpleNamespace(authority=SimpleNamespace(profile_id=str(other_profile)),
                                             actor=actor, native_owner=True), params, root_only_kanban)
     assert json.loads(policy.kanban_json)["profile"] == "elias"
+
+
+def test_default_spawn_workspace_stdlib_shadow_stays_off_sys_path(monkeypatch, tmp_path):
+    """A card workspace file named like a stdlib module must not kill the worker.
+
+    The dispatcher spawns the worker with ``cwd=workspace``; the ``-m`` form
+    would prepend that cwd to ``sys.path``, so a helper named ``inspect.py``
+    (or any stdlib name) shadowed the stdlib and every worker died on import
+    within seconds (#142358). ``-P`` must stay in the module argv, and the
+    interpreter semantics it relies on are proven against a real shadow
+    planted in the workspace cwd.
+    """
+    import sys
+    from pathlib import Path
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # A shadow that fails loudly if it is ever imported instead of the stdlib.
+    (workspace / "json.py").write_text("raise SystemExit(3)\n")
+
+    # Prove the interpreter behavior the flag relies on before any Popen mock:
+    # with -P, ``-m`` does not put the cwd on ``sys.path``, so the planted
+    # shadow never wins.
+    r = subprocess.run(
+        [sys.executable, "-P", "-m", "json.tool"],
+        input="{}", capture_output=True, text=True, timeout=60, cwd=str(workspace),
+        check=False,
+    )
+    assert r.returncode == 0, f"-P -m still ate the cwd shadow: rc={r.returncode} err={r.stderr[:200]!r}"
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = kwargs.get("cwd")
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    task = _make_task(kb, assignee="coder")
+    task = kb.Task(
+        **{**task.__dict__, "status": "ready", "workspace_path": str(workspace)},
+    )
+    kbd._default_spawn(task, str(workspace))
+    assert captured["cwd"] == str(workspace)
+    argv = captured["cmd"]
+    assert "-P" in argv[:3], f"worker argv lost -P: {argv}"
+    assert argv[argv.index("-P") + 1 : argv.index("-P") + 3] == ["-m", "hermes_cli.kanban_worker_client"]
