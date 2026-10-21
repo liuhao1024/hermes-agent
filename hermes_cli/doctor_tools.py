@@ -415,7 +415,7 @@ def _plural(n: int) -> str:
 
 
 def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual_issues: list[str]) -> None:
-    """Run one `npm audit --json` and report; any failure is silently skipped.
+    """Run one `npm audit --json` and report; an audit that never completed is never read as clean.
 
     Every row here audits a tree whose versions come from a COMMITTED lockfile
     (`npm ci` in `_run_npm_install_deterministic` reifies exactly that state on
@@ -427,13 +427,29 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual
     """
     import json
     from hermes_constants import with_hermes_node_path
+
+    def _incomplete() -> None:
+        # A killed/timed-out/registry-failed audit must not print a clean bill (#142635).
+        check_warn(f"{label} deps", "(audit did not complete — findings unknown)")
+        manual_issues.append(f"{label} npm audit did not complete — findings unknown; re-run `hermes doctor`")
+
     try:
         # Resolved absolute path so Windows can execute npm.cmd (CreateProcessW can't run bare .cmd names).
         audit_result = subprocess.run([npm_bin, "audit", "--json", *audit_extra], cwd=str(npm_dir),
-                                      capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
+                                      capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60,
                                       env=with_hermes_node_path(), check=False)
-        audit_data = json.loads(audit_result.stdout) if audit_result.stdout.strip() else {}
-        counts = audit_data.get("metadata", {}).get("vulnerabilities", {})
+        # Only a payload carrying a counts block counts as completed. A non-zero exit does NOT mean
+        # failure here: npm exits 1 when it finds vulnerabilities while stdout stays valid JSON.
+        parsed_ok = False
+        try:
+            audit_data = json.loads(audit_result.stdout) if audit_result.stdout.strip() else {}
+            parsed_ok = isinstance(audit_data.get("metadata", {}).get("vulnerabilities"), dict)
+        except json.JSONDecodeError:
+            audit_data = {}
+        if not parsed_ok:
+            _incomplete()
+            return
+        counts = audit_data["metadata"]["vulnerabilities"]
         critical, high, moderate = (counts.get(k, 0) for k in ("critical", "high", "moderate"))
         total = critical + high + moderate
         workspace_scoped = bool(audit_extra) and audit_extra[0] == "--workspace"
@@ -454,6 +470,8 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], manual
             )
         else:
             check_ok(f"{label} deps", f"({moderate} moderate {_plural(moderate)})")
+    except subprocess.TimeoutExpired:
+        _incomplete()
     except Exception:
         pass
 
