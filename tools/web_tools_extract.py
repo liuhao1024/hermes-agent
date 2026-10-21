@@ -46,11 +46,28 @@ def _disabled_plugin_error(capability: str, disabled_key: str) -> str:
     )
 
 
+def _failed_plugin_error(capability: str, failed_key: str, load_error: str) -> str:
+    """Error text when the configured backend's bundled plugin failed to load in this process.
+
+    The configuration is correct — a fresh process registers the provider — so the
+    recovery is a restart, never a reconfiguration (issue #142577)."""
+    vendor = failed_key.split("/", 1)[-1]
+    return (
+        f"web.{capability}_backend is set to '{vendor}', but its plugin ('{failed_key}') failed "
+        f"to load in this process: {load_error}. Restart Hermes to retry loading it."
+    )
+
+
 def _no_provider_error(capability: str, fallback: str) -> str:
-    """Error when no provider resolved: point at a disabled bundled plugin if that is the real cause."""
-    from agent.web_search_registry import _disabled_web_plugin_for
+    """Error when no provider resolved: point at a disabled/failed bundled plugin if that is the real cause."""
+    from agent.web_search_registry import _disabled_web_plugin_for, _failed_web_plugin_for
     disabled_key = _disabled_web_plugin_for(capability=capability)
-    return _disabled_plugin_error(capability, disabled_key) if disabled_key else fallback
+    if disabled_key:
+        return _disabled_plugin_error(capability, disabled_key)
+    failed = _failed_web_plugin_for(capability=capability)
+    if failed:
+        return _failed_plugin_error(capability, *failed)
+    return fallback
 
 
 def _strict_selection_error(capability: str, backend: str) -> str:

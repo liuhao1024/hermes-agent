@@ -509,3 +509,73 @@ class TestDisabledPluginDiagnostic:
         finally:
             restore()
 
+
+class TestFailedPluginDiagnostic:
+    """#142577: when the configured web backend's bundled plugin FAILED TO LOAD in
+    this process (registration swept, ``enabled`` False, ``error`` set to the
+    exception text), the dispatcher used to fall through to the generic
+    strict-selection error that sends the user to ``hermes tools`` to fix a
+    configuration that is actually correct. The error must name the load
+    failure and the recovery (restart), not a reconfiguration."""
+
+    _clear_registry = TestDisabledPluginDiagnostic._clear_registry
+    _FakeLoaded = TestDisabledPluginDiagnostic._FakeLoaded
+    _patch_manager = TestDisabledPluginDiagnostic._patch_manager
+
+    def test_failed_web_plugin_for_names_load_error(self, monkeypatch):
+        from agent.web_search_registry import _disabled_web_plugin_for, _failed_web_plugin_for
+
+        self._patch_manager(monkeypatch, {
+            "web/firecrawl": self._FakeLoaded(False, "dictionary changed size during iteration"),
+        })
+        assert _failed_web_plugin_for("firecrawl") == (
+            "web/firecrawl", "dictionary changed size during iteration",
+        )
+        # A failed load is not a config-disabled plugin; that diagnostic stays unchanged.
+        assert _disabled_web_plugin_for("firecrawl") is None
+        # Enabled plugins never match.
+        self._patch_manager(monkeypatch, {
+            "web/ddgs": self._FakeLoaded(True, None),
+        })
+        assert _failed_web_plugin_for("ddgs") is None
+
+    def test_extract_error_names_failed_plugin_load(self, monkeypatch):
+        from tools.web_tools_extract import _resolve_extract_provider
+
+        restore = self._clear_registry()
+        try:
+            import agent.web_search_registry as wsr
+            monkeypatch.setattr(
+                wsr, "_read_config_key",
+                lambda *path: "firecrawl" if path == ("web", "extract_backend") else None,
+            )
+            self._patch_manager(monkeypatch, {
+                "web/firecrawl": self._FakeLoaded(False, "dictionary changed size during iteration"),
+            })
+            _, error_json = _resolve_extract_provider("firecrawl")
+            err = json.loads(error_json)["error"]
+            assert "failed to load" in err
+            assert "web/firecrawl" in err
+            assert "dictionary changed size during iteration" in err
+            assert "Restart" in err
+            # The misleading reconfiguration advice must be gone.
+            assert "to change it" not in err
+        finally:
+            restore()
+
+    def test_search_error_names_failed_plugin_load(self, monkeypatch):
+        from tools.web_tools_extract import _no_provider_error
+
+        import agent.web_search_registry as wsr
+        monkeypatch.setattr(
+            wsr, "_read_config_key",
+            lambda *path: "firecrawl" if path == ("web", "search_backend") else None,
+        )
+        self._patch_manager(monkeypatch, {
+            "web/firecrawl": self._FakeLoaded(False, "dictionary changed size during iteration"),
+        })
+        err = _no_provider_error("search", "No web search provider configured.")
+        assert "failed to load" in err
+        assert "web/firecrawl" in err
+        assert "No web search provider configured." not in err
+
