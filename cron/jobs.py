@@ -2334,15 +2334,34 @@ def note_fire_forward_failure(job_id: str, detail: str) -> bool:
     return _with_job(job_id, apply, False)
 
 
+def _manual_request_pending(job: dict[str, Any]) -> bool:
+    """True when a ``hermes cron run`` request postdates the dispatch of the run now completing:
+    the request arrived while that run was already in flight, so the run cannot have consumed it.
+    The claim's ``since`` stamp is the dispatch instant (heartbeat refreshes only rewrite ``at``);
+    claims minted before ``since`` existed fall back to their never-refreshed ``at``."""
+    manual_run_at = job.get("manual_run_at")
+    if not manual_run_at:
+        return False
+    claim = job.get("fire_claim")
+    if not isinstance(claim, dict):
+        return False  # no claim context (legacy record / direct path): the run consumed the request
+    manual_dt = _parse_aware(str(manual_run_at))
+    claim_dt = _parse_aware(str(claim.get("since") or claim.get("at")))
+    return manual_dt is not None and claim_dt is not None and manual_dt > claim_dt
+
+
 def _record_run_outcome(
     job: dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
     status: Optional[str], now: str,
 ) -> None:
     """Stamp one completed run onto *job*: status fields, failure streak, alert markers, claims."""
     job["last_run_at"] = now
-    job.pop("manual_run_at", None)
-    # The transient manual-run context is single-fire: the run that just completed consumed it.
-    job.pop("manual_run_prompt", None)
+    # The transient manual-run context is single-fire: the run that just completed consumed it —
+    # unless the request arrived after that run was dispatched (#142659); _advance_after_run then
+    # pins the next tick to it instead of burying the request until the next natural occurrence.
+    if not _manual_request_pending(job):
+        job.pop("manual_run_at", None)
+        job.pop("manual_run_prompt", None)
     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
     job["last_status"] = status or (
         "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
@@ -2399,9 +2418,22 @@ def _advance_after_run(job: dict[str, Any], now: str, *, ladder_rung: bool = Fal
         if finite and completed >= times:
             # Limit reached: retain a terminal record instead of popping it, so the status just
             # written stays inspectable in `cronjob list`; the retention sweep prunes it later.
+            # A run-now requested mid-run cannot be honored past terminal completion.
+            job.pop("manual_run_at", None)
+            job.pop("manual_run_prompt", None)
             _complete_job_record(job)
             return
 
+    # A manual_run_at still present here survived _record_run_outcome: a deferred run-now.
+    pending_manual_at = job.get("manual_run_at")
+    if pending_manual_at and kind in {"cron", "interval"}:
+        # The deferred request fires on the very next tick; the natural occurrence follows it.
+        # One-shots are exempt: a past-due marker would trip the 120s grace retire gate before
+        # the next tick could fire it, retiring the job instead of honoring the request.
+        job["next_run_at"] = pending_manual_at
+        if job.get("state") != "paused":
+            job["state"] = "scheduled"
+        return
     job["next_run_at"] = compute_next_run(job["schedule"], now)
     if job["next_run_at"] is not None:
         if job.get("state") != "paused":
@@ -2419,6 +2451,9 @@ def _advance_after_run(job: dict[str, Any], now: str, *, ladder_rung: bool = Fal
             "leaving enabled and marking state=error so the job is not silently disabled.",
             job.get("name", job.get("id", "?")), kind)
     else:
+        # Terminal one-shot completion cannot honor a run-now requested mid-run.
+        job.pop("manual_run_at", None)
+        job.pop("manual_run_prompt", None)
         _complete_job_record(job)  # one-shot: terminal completion
 
 
@@ -2481,7 +2516,16 @@ def mark_job_run(
         else:
             # Any run that reached the model (either outcome) resets the re-run ladder.
             clear_state(job)
-        if not success and quota_hold_seconds and not is_terminal_job(job):
+        # A deferred manual run outranks the quota park: parking next_run_at past the closed
+        # window would drop the request's manual identity and stamped prompt (#142659). The
+        # unreachable ladder needs no such guard — it only pulls next_run_at EARLIER, and a
+        # deferred request is already due.
+        if (
+            not success
+            and quota_hold_seconds
+            and not is_terminal_job(job)
+            and not job.get("manual_run_at")
+        ):
             quota_hold.plan_hold(job, quota_hold_seconds, recover_consumed_fire=recover_consumed_fire)
         else:
             quota_hold.clear_state(job)
@@ -2770,7 +2814,14 @@ def claim_job_for_fire(
             _activate_job_record(job)
         # Per-acquisition token: a process may legitimately reclaim its own stale lease, and the
         # previous runner must not heartbeat the new claim merely because hostname + PID match.
-        job["fire_claim"] = {"at": now.isoformat(), "by": f"{_machine_id()}:{uuid.uuid4().hex}"}
+        # ``since`` is the dispatch instant and stays immutable while heartbeat_fire_claim
+        # refreshes ``at``: completion logic compares manual run requests against when the run
+        # STARTED, not against the latest lease refresh (#142659).
+        job["fire_claim"] = {
+            "at": now.isoformat(),
+            "by": f"{_machine_id()}:{uuid.uuid4().hex}",
+            "since": now.isoformat(),
+        }
         # Claimed: the occurrence is now owned by a run (its ledger row + fire claim carry it).
         job.pop("pending_slot", None)
         if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
