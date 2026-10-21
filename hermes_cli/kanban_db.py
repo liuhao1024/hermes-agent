@@ -2471,60 +2471,6 @@ def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: in
         )
 
 
-def reclaim_task(
-    conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
-) -> bool:
-    """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running."""
-    row = conn.execute(
-        "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    if not row:
-        return False
-    if row["status"] != "running" and row["claim_lock"] is None:
-        # Nothing to reclaim — already ready / blocked / done.
-        return False
-    prev_lock = row["claim_lock"]
-    termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
-    with write_txn(conn):
-        retry_status = _retry_status_for_run(conn, task_id)
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-            "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
-        )
-        if cur.rowcount != 1:
-            return False
-        _record_reclaim(
-            conn, task_id, termination,
-            error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
-            payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status},
-        )
-    # Operator intervention = fresh retry budget (own txn, runs after commit).
-    _clear_failure_counter(conn, task_id)
-    return True
-
-
-def reassign_task(
-    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, reclaim_first: bool = False,
-    reason: Optional[str] = None,
-) -> bool:
-    """Reassign (None unassigns); a running task is refused unless
-    ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
-    if reclaim_first:
-        # Safe to call even if nothing to reclaim.
-        reclaim_task(conn, task_id, reason=reason or "reassign")
-    # assign_task handles its own txn + the still-running guard.
-    try:
-        return assign_task(conn, task_id, profile)
-    except RuntimeError:
-        # Task is still running and reclaim_first was False; caller
-        # needs to decide whether to retry with reclaim.
-        return False
-
-
 def _verify_created_cards(
     conn: sqlite3.Connection, completing_task_id: str, claimed_ids: Iterable[str],
 ) -> tuple[list[str], list[str]]:
@@ -4225,6 +4171,10 @@ from hermes_cli.kanban_db_workspace import (
     _is_managed_scratch_path,
     _managed_scratch_path_info,
     _scratch_workspace,
+)
+from hermes_cli.kanban_db_manual import (
+    reassign_task,
+    reclaim_task,
 )
 from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,
