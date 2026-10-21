@@ -213,6 +213,7 @@ _PREFIX_PATTERNS = [
     r"glwt-[A-Za-z0-9_\-]{10,}",        # GitLab workspace token
     r"GR1348941[A-Za-z0-9_\-]{10,}",    # GitLab legacy runner registration token
     r"pk-lf-[A-Za-z0-9\-]{8,}",         # Langfuse public key (sk-lf- already covered by sk- pattern)
+    r"ctx7sk-[A-Za-z0-9_\-]{16,}",      # Context7 API key (documented prefix; UUID-shaped bodies seen)
 ]
 
 # ENV assignment: KEY=value where KEY carries a secret-like name. Uppercase keys

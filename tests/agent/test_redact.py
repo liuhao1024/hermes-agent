@@ -111,6 +111,20 @@ class TestKnownPrefixes:
         for key in ("am_" + "0123456789abcdef" * 2, "am_" + "Ab9" * 8, "am_org_" + "Zq7k" * 6):
             assert key[-12:] not in redact_sensitive_text(f"leaked {key} in output"), key
 
+    def test_context7_key_masked_without_a_secret_name_next_to_it(self):
+        """A bare ``ctx7sk-`` key is masked in prose, JSON and YAML — not only next to a
+        secret-looking key name (#142576)."""
+        # prefix + suffix concatenation so no contiguous key literal exists in this file
+        key = "ctx7sk-" + "00000000-0000-0000-0000-000000000000"
+        for text in [
+            f"key is {key}\n",                                                    # bare value in prose
+            f'["{key}"]\n',                                                       # JSON array element
+            f"headers:\n  CONTEXT7_API_KEY: {key}\nurl: https://mcp.context7.com/mcp\n",  # YAML header + url line
+        ]:
+            assert key not in redact_sensitive_text(text, force=True), text
+        for benign in ["ctx7sk-short", "ctx7sk-0000"]:  # body under the 16-char floor is prose
+            assert redact_sensitive_text(benign) == benign
+
     def test_slack_token(self):
         token = "xoxb-" + "0" * 12 + "-" + "a" * 14
         result = redact_sensitive_text(token)
