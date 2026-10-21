@@ -21,7 +21,7 @@ from agent.conversation_compression import COMPRESSION_RETRY_CONTEXT_REDUCED_STA
 from agent.fast_mode import fast_mode_unprovisioned, mark_fast_mode_unavailable
 from agent.model_metadata import is_output_cap_error, parse_available_output_tokens_from_error
 from agent.retry_utils import is_zai_coding_overload_error, zai_coding_overload_retry_ceiling
-from agent.error_classifier import FailoverReason, classify_api_error
+from agent.error_classifier import FailoverReason, classify_api_error, image_count_cap_from_error
 from agent.message_sanitization import (
     _looks_like_corrupt_image_rejection, _looks_like_image_content_rejection, _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates, _sanitize_structure_non_ascii, _sanitize_structure_surrogates,
@@ -68,37 +68,51 @@ def _blines(agent: Any, *lines: str) -> None:
         agent._buffer_vprint(line)
 
 
-def _image_error_max_dimension(error: Exception) -> Optional[int]:
-    """Extract a provider-reported image dimension ceiling, if present."""
-    parts = []
-    for value in (error, getattr(error, "message", None), getattr(error, "body", None)):
-        if value:
-            try:
-                parts.append(str(value))
-            except Exception:
-                pass
-    text = " ".join(parts).lower()
-    # OpenAI Codex Responses reports a tile-patch budget (ceil(w/32)×ceil(h/32))
-    # instead of a pixel ceiling. A square image is the worst case for the budget,
-    # so a per-side cap of isqrt(limit)*32 px keeps isqrt(limit)² ≤ limit — for the
-    # 30000-patch ceiling that is 5536 px. Without this the caller falls back to
-    # 8000 px and a 6000 px image that already exceeds the budget is skipped (#106337).
-    if "patches after processing" in text:
-        match = re.search(r"exceeding the limit of\s*(\d{2,7})", text)
-        if not match:
-            return None
-        max_dimension = math.isqrt(int(match.group(1))) * 32
-        return max_dimension if 512 <= max_dimension <= 8000 else None
-    if "image" not in text or "dimension" not in text or "max allowed size" not in text:
-        return None
-    match = re.search(r"max allowed size(?:\s+for [^:]+)?:\s*(\d{3,5})\s*pixels?", text)
-    if not match:
-        return None
-    try:
-        max_dimension = int(match.group(1))
-    except ValueError:
-        return None
-    return max_dimension if 512 <= max_dimension <= 8000 else None
+# Moved to agent/image_eviction_policy.py beside the other image-error primitives;
+# re-imported under the same name for the shrink rung and existing tests.
+from agent.image_eviction_policy import _image_error_max_dimension
+
+
+def _recover_image_too_large(
+    agent: Any, api_error: Exception, api_messages: Any, recovered_with_pool: bool
+) -> tuple[bool, bool]:
+    """One-shot recovery for an ``image_too_large`` rejection.
+
+    A per-request image COUNT rejection ("supports at most N images per prompt",
+    #142602) runs the retire-to-cap path: the request is well-formed, it just
+    carries more images than the route allows, and shrinking cannot reduce the
+    count. The parsed cap is latched so the send path stops over-sending; when
+    nothing can be retired (every image is a user upload) a resize retry would
+    re-send the same count, so the error is surfaced instead. Byte/dimension
+    rejections shrink the oversized parts in place as before. Returns the
+    ``(retry_now, recovered_with_pool)`` pair.
+    """
+    cap = image_count_cap_from_error(api_error)
+    if cap is not None:
+        from agent.context_compressor import evict_stale_outbound_tool_images
+        from agent.image_eviction_policy import outbound_retired_image_ids
+
+        prev = getattr(agent, "_provider_image_count_cap", None)
+        if prev is None or cap < prev:
+            agent._provider_image_count_cap = cap
+        if evict_stale_outbound_tool_images(api_messages, outbound_retired_image_ids(agent), limit=cap):
+            _vlines(agent, f"📐 {agent.model} allows at most {cap} images per request — retired the oldest tool-result images and retrying...")
+            return True, recovered_with_pool
+        logger.info(
+            "image-count recovery: no tool-result images to retire below the "
+            "provider cap of %s; surfacing original error.", cap,
+        )
+        return False, recovered_with_pool
+    if agent._try_shrink_image_parts_in_messages(
+        api_messages, max_dimension=_image_error_max_dimension(api_error) or 8000
+    ):
+        _vlines(agent, "📐 Image(s) exceeded provider size limit — shrank and retrying...")
+        return True, recovered_with_pool
+    logger.info(
+        "image-shrink recovery: no data-URL image parts found "
+        "or shrink didn't reduce size; surfacing original error."
+    )
+    return False, recovered_with_pool
 
 
 def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
@@ -668,18 +682,11 @@ def recover_after_classification(
     if recovered_with_pool:
         return True, recovered_with_pool
 
-    # Shrink oversized native image parts in-place and retry once.
+    # Oversized-image recovery, one shot: a COUNT rejection retires to the provider's
+    # cap (a resize cannot reduce the count, #142602); a byte/dimension one shrinks.
     if classified.reason == FailoverReason.image_too_large and not _retry.image_shrink_retry_attempted:
         _retry.image_shrink_retry_attempted = True
-        if agent._try_shrink_image_parts_in_messages(
-            api_messages, max_dimension=_image_error_max_dimension(api_error) or 8000
-        ):
-            _vlines(agent, "📐 Image(s) exceeded provider size limit — shrank and retrying...")
-            return True, recovered_with_pool
-        logger.info(
-            "image-shrink recovery: no data-URL image parts found "
-            "or shrink didn't reduce size; surfacing original error."
-        )
+        return _recover_image_too_large(agent, api_error, api_messages, recovered_with_pool)
 
     # Strict OpenAI-spec providers 400 on list-type tool content: strip images, mark
     # (provider, model) no-list-tool-content for the session, retry once.

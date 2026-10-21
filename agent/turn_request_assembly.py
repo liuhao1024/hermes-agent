@@ -160,9 +160,13 @@ def assemble_api_request(
     # OpenAI-style tool-result image_url parts. The per-call clone is rewritten in
     # place; persisted history is untouched.
     from agent.context_compressor import evict_stale_outbound_tool_images
-    from agent.image_eviction_policy import outbound_retired_image_ids
+    from agent.image_eviction_policy import outbound_retired_image_ids, provider_image_count_cap
 
-    evict_stale_outbound_tool_images(api_messages, outbound_retired_image_ids(agent))
+    # A provider-advertised image count cap latched by the count rejection recovery (#142602)
+    # tightens the default ceiling for the rest of the session.
+    evict_stale_outbound_tool_images(
+        api_messages, outbound_retired_image_ids(agent), limit=provider_image_count_cap(agent)
+    )
 
     # One-time repeated-heal notice goes out via the status/warning callback, NEVER
     # appended to messages: the cached prompt prefix stays byte-identical.

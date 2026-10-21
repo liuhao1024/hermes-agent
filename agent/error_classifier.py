@@ -195,10 +195,15 @@ _PAYLOAD_TOO_LARGE_PATTERNS = (
 # maximum allowed (M, from `StreamReadConstraints.getMaxStringLength()`)"). Only an inline
 # image reaches those sizes, so shrinking is the recovery; the method-scoped Jackson token
 # is used because the bare class name also appears when Jackson caps a *token* length.
+# Per-REQUEST image COUNT caps ("Model 'X' supports at most 16 images per prompt",
+# #142602): the request is well-formed, only too many images ride it. Shrinking cannot
+# reduce the count, so the recovery for this wording is retiring the oldest tool-result
+# images down to the parsed cap (see ``image_count_cap_from_error``), not a resize.
 _IMAGE_TOO_LARGE_PATTERNS = (
     "image exceeds", "image too large", "image_too_large", "image size exceeds", "image dimensions exceed",
     "dimensions exceed max allowed size", "max allowed size: 8000", "media exceeds", "media too large",
     "patches after processing", "make sure your payload is below", "streamreadconstraints.getmaxstringlength",
+    "images per prompt", "images per request", "images per message",
 )
 
 # Undecodable image bytes → strip-and-retry, never shrink. xAI wordings
@@ -1036,6 +1041,20 @@ def classify_api_error(
             message = f"{message} (endpoint: {host})"
     base = {"status_code": status_code, "provider": provider, "model": model, "message": message}
     return ClassifiedError(**{**base, **verdict})
+
+
+def image_count_cap_from_error(error: Exception) -> Optional[int]:
+    """The per-request image COUNT cap a provider error names, or ``None``.
+
+    Matches "supports at most 16 images per prompt/request/message" across the same
+    surfaces ``classify_api_error`` reads (str(error), body messages, and OpenRouter's
+    ``error.metadata.raw`` wrapper) so the recovery path can retire the oldest
+    tool-result images down to the real cap (#142602) instead of shrinking, which
+    cannot reduce the count. Lives here because only this module unwraps the body.
+    """
+    msg = _build_error_msg(error, _extract_error_body(error))
+    m = re.search(r"at most (\d+) images per (?:prompt|request|message)", msg)
+    return int(m.group(1)) if m else None
 
 
 def _off_route_host(c: _Ctx) -> str:

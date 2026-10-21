@@ -29,6 +29,8 @@ from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (
     FailoverReason, PROVIDER_STREAM_EMPTY_FRAME_ERROR_CODE, PROVIDER_STREAM_NON_JSON_ERROR_CODE,
     _extract_status_code)
+# Re-exported moved names (see agent/provider_error_payload.py): status-code readers.
+from agent.provider_error_payload import _status_code_from_payload, _status_code_from_value
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
 from agent.chat_completion_local import _streams_llamacpp, stale_giveup
@@ -131,31 +133,6 @@ class ProviderStreamError(Exception):
         if error_obj.get("message"):
             text += f": {error_obj['message']}"
         return text
-
-
-def _status_code_from_value(value: Any) -> Optional[int]:
-    if isinstance(value, int) and 100 <= value < 600:
-        return value
-    if not isinstance(value, str):
-        return None
-    match = re.search(r"(?:HTTP_STATUS/)?\b([1-5]\d\d)\b", value, re.IGNORECASE)
-    return int(match.group(1)) if match else None
-
-
-def _status_code_from_payload(payload: Any) -> Optional[int]:
-    if not isinstance(payload, dict):
-        return None
-
-    candidates = [payload.get(k) for k in ("status_code", "status", "http_status")]
-    error_obj = payload.get("error")
-    if isinstance(error_obj, dict):
-        candidates.extend(error_obj.get(k) for k in ("status_code", "status", "http_status", "code"))
-    candidates.append(payload.get("code"))
-    for candidate in candidates:
-        status_code = _status_code_from_value(candidate)
-        if status_code is not None:
-            return status_code
-    return None
 
 
 def _json_object_from_text(text: str) -> Optional[dict]:
@@ -2168,9 +2145,13 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
 
     # Compression/resume can orphan a tool result whose parent tool_call was summarized away.
     api_messages = agent._sanitize_api_messages(api_messages)
-    # Same send-path vision eviction as the main loop (#89296).
+    # Same send-path vision eviction as the main loop (#89296), honoring a provider-advertised
+    # image count cap latched by the count rejection recovery (#142602).
     from agent.context_compressor import evict_stale_outbound_tool_images, outbound_retired_image_ids
-    evict_stale_outbound_tool_images(api_messages, outbound_retired_image_ids(agent))
+    from agent.image_eviction_policy import provider_image_count_cap
+    evict_stale_outbound_tool_images(
+        api_messages, outbound_retired_image_ids(agent), limit=provider_image_count_cap(agent)
+    )
     # Same per-model image strip as turn_api_request.build_api_request: this path builds
     # api_messages by hand and calls _build_api_kwargs directly, so a model recorded in
     # agent._image_rejecting_models would otherwise get images here → 4xx → no summary.

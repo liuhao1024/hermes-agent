@@ -36,6 +36,8 @@ dimensions as unsafe, so a payload this module cannot measure keeps today's stri
 from __future__ import annotations
 
 import base64
+import math
+import re
 import struct
 from typing import Any, Iterable, Optional, Sequence
 
@@ -286,3 +288,91 @@ def _retire_count_for_request(
         if _fits(total - retire):
             break
     return retire
+
+
+# ─── Image part / payload readers (shared with the send-path passes) ────────
+# Moved from agent/context_compressor.py (the part taxonomy) and
+# agent/turn_recovery.py (the dimension reader) so both eviction passes, the
+# recovery path and the tool layer share one set of image-error primitives;
+# still pure stdlib.
+
+_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def _is_image_part(part: Any) -> bool:
+    """True if ``part`` is an image block (``image_url``, ``input_image``, or ``image``)."""
+    return isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+
+
+def _tool_result_parts(content: Any) -> Any:
+    """Part list of a tool-result body, unwrapping the ``_multimodal`` envelope."""
+    return content.get("content") if isinstance(content, dict) and content.get("_multimodal") else content
+
+
+def _image_payload(msg: dict[str, Any]) -> list[str]:
+    """Data URL / base64 string of each image block in a message (``""`` when unmeasurable).
+
+    The provider counts BLOCKS (one ``tool_result`` with three screenshots is three), so the
+    block count is the list length. Bytes are the summed string lengths: the payload is ASCII and
+    the JSON framing around it is noise against a 24 MB budget. The strings also let the caller
+    read dimensions from headers only, without a second walk or a full decode.
+    """
+    parts = _tool_result_parts(msg.get("content"))
+    if not isinstance(parts, list):
+        return []
+    sources: list[str] = []
+    for p in parts:
+        if not _is_image_part(p):
+            continue
+        image_url = p.get("image_url")
+        source = p.get("source")
+        data = (
+            (image_url.get("url") if isinstance(image_url, dict) else image_url)
+            or (source.get("data") if isinstance(source, dict) else None)
+        )
+        sources.append(data if isinstance(data, str) else "")
+    return sources
+
+
+def provider_image_count_cap(agent: Any) -> Optional[int]:
+    """The per-request image COUNT cap a route's rejection advertised (#142602).
+
+    ``None`` until the count-cap recovery latches one, in which case the send-path
+    passes apply it over the dimension-derived default ceiling — the static
+    ``OUTBOUND_IMAGE_LIMIT`` cannot know a route caps at 16.
+    """
+    cap = getattr(agent, "_provider_image_count_cap", None)
+    return cap if isinstance(cap, int) and cap > 0 else None
+
+
+def _image_error_max_dimension(error: Exception) -> Optional[int]:
+    """Extract a provider-reported image dimension ceiling, if present."""
+    parts = []
+    for value in (error, getattr(error, "message", None), getattr(error, "body", None)):
+        if value:
+            try:
+                parts.append(str(value))
+            except Exception:
+                pass
+    text = " ".join(parts).lower()
+    # OpenAI Codex Responses reports a tile-patch budget (ceil(w/32)×ceil(h/32))
+    # instead of a pixel ceiling. A square image is the worst case for the budget,
+    # so a per-side cap of isqrt(limit)*32 px keeps isqrt(limit)² ≤ limit — for the
+    # 30000-patch ceiling that is 5536 px. Without this the caller falls back to
+    # 8000 px and a 6000 px image that already exceeds the budget is skipped (#106337).
+    if "patches after processing" in text:
+        match = re.search(r"exceeding the limit of\s*(\d{2,7})", text)
+        if not match:
+            return None
+        max_dimension = math.isqrt(int(match.group(1))) * 32
+        return max_dimension if 512 <= max_dimension <= 8000 else None
+    if "image" not in text or "dimension" not in text or "max allowed size" not in text:
+        return None
+    match = re.search(r"max allowed size(?:\s+for [^:]+)?:\s*(\d{3,5})\s*pixels?", text)
+    if not match:
+        return None
+    try:
+        max_dimension = int(match.group(1))
+    except ValueError:
+        return None
+    return max_dimension if 512 <= max_dimension <= 8000 else None

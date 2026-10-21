@@ -13,7 +13,16 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from agent.image_eviction_policy import images_all_within_many_image_limit, latched_retire_count, outbound_image_retire_count, outbound_retired_image_ids
+from agent.image_eviction_policy import (
+    _IMAGE_PART_TYPES,
+    _image_payload,
+    _is_image_part,
+    _tool_result_parts,
+    images_all_within_many_image_limit,
+    latched_retire_count,
+    outbound_image_retire_count,
+    outbound_retired_image_ids,
+)
 from agent.compression_marker import (
     ELISION_MARKER_MAX_LEN,
     _elision_marker,
@@ -1433,11 +1442,6 @@ def _replace_image_parts(parts: Any, placeholder: str) -> Optional[list[Any]]:
     return [{"type": "text", "text": placeholder} if _is_image_part(p) else p for p in parts]
 
 
-def _tool_result_parts(content: Any) -> Any:
-    """Part list of a tool-result body, unwrapping the ``_multimodal`` envelope."""
-    return content.get("content") if isinstance(content, dict) and content.get("_multimodal") else content
-
-
 def _tool_content_has_images(content: Any) -> bool:
     """True when a tool-result body (part list or ``_multimodal`` envelope) carries images."""
     return _content_has_images(_tool_result_parts(content))
@@ -1485,32 +1489,9 @@ def _retire_stale_tool_result_images(
     return pruned
 
 
-def _image_payload(msg: dict[str, Any]) -> list[str]:
-    """Data URL / base64 string of each image block in a message (``""`` when unmeasurable).
-
-    The provider counts BLOCKS (one ``tool_result`` with three screenshots is three), so the
-    block count is the list length. Bytes are the summed string lengths: the payload is ASCII and
-    the JSON framing around it is noise against a 24 MB budget. The strings also let the caller
-    read dimensions from headers only, without a second walk or a full decode.
-    """
-    parts = _tool_result_parts(msg.get("content"))
-    if not isinstance(parts, list):
-        return []
-    sources: list[str] = []
-    for p in parts:
-        if not _is_image_part(p):
-            continue
-        image_url = p.get("image_url")
-        source = p.get("source")
-        data = (
-            (image_url.get("url") if isinstance(image_url, dict) else image_url)
-            or (source.get("data") if isinstance(source, dict) else None)
-        )
-        sources.append(data if isinstance(data, str) else "")
-    return sources
-
-
-def evict_stale_outbound_tool_images(api_messages: list[dict[str, Any]], retired_ids: Optional[set[str]] = None) -> int:
+def evict_stale_outbound_tool_images(
+    api_messages: list[dict[str, Any]], retired_ids: Optional[set[str]] = None, limit: Optional[int] = None
+) -> int:
     """Drop stale screenshot/vision payloads from the per-call API copy.
 
     Compression's keep-newest pass only runs when prune/compress fires, and the Anthropic
@@ -1522,6 +1503,8 @@ def evict_stale_outbound_tool_images(api_messages: list[dict[str, Any]], retired
     Eviction is driven by the provider limit, counted in image BLOCKS, with user uploads
     reserved against the ceiling but never rewritten; the block ceiling depends on the
     request's image dimensions — policy and rationale in :mod:`agent.image_eviction_policy`.
+    ``limit`` overrides that ceiling with a provider-advertised per-request image COUNT cap
+    (parsed from a rejection, #142602); ``None`` keeps the dimension-derived default.
     Returns the number of messages rewritten.
     ``retired_ids`` latches the frontier per session: see :func:`latched_retire_count`.
     """
@@ -1540,6 +1523,7 @@ def evict_stale_outbound_tool_images(api_messages: list[dict[str, Any]], retired
         carrier_bytes_newest_first=[sum(map(len, sources)) for _, sources in carriers],
         reserved_bytes=sum(map(len, reserved)),
         many_image_safe=images_all_within_many_image_limit([*reserved, *(x for _, ss in carriers for x in ss)]),
+        limit=limit,
     )
     retire = latched_retire_count(retire, [api_messages[i].get("tool_call_id") for i, _ in carriers], retired_ids)
     pruned = 0
@@ -1549,14 +1533,6 @@ def evict_stale_outbound_tool_images(api_messages: list[dict[str, Any]], retired
             api_messages[i] = new_msg
             pruned += 1
     return pruned
-
-
-_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
-
-
-def _is_image_part(part: Any) -> bool:
-    """True if ``part`` is an image block (``image_url``, ``input_image``, or ``image``)."""
-    return isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
 
 
 def _content_has_images(content: Any) -> bool:
