@@ -54,7 +54,7 @@ def _lift_pause(job_id, pause):
 
 def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id=None):
     from gateway.session_cron import owner_for_home, operation
-    from hermes_cli.gateway_client import connect_gateway
+    from hermes_cli.gateway_client import CRON_RPC_TIMEOUT, connect_gateway
     from hermes_constants import get_hermes_home
     from utils import atomic_json_write
 
@@ -126,7 +126,9 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
 
     async def remote():
         async with connect_gateway() as client:
-            return await observe(lambda op, data: client.rpc('cron.' + op, **data))
+            # The owner being polled is also running this job; a busy answer is slow, not gone
+            # (#142414), so every observer verb waits on the cron budget, not DEFAULT_RPC_TIMEOUT.
+            return await observe(lambda op, data: client.rpc('cron.' + op, _timeout=CRON_RPC_TIMEOUT, **data))
 
     try:
         if owner is not None:

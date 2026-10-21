@@ -24,6 +24,12 @@ RESUME_KEY_MISMATCH = ("--api-key on resume must be the key this session was lau
 # request, ``compression.context_total_ceiling_seconds`` to 600 s). Same budget as Desktop's
 # ``SESSION_COMPRESS_TIMEOUT_MS`` so every surface gives up at the same point.
 COMPRESS_RPC_TIMEOUT = 660
+# A restart-safe cron worker polls the very owner that is running its job, and under a wave of
+# delegated children those reads queue behind the owner's busy loop well past 30 s (observed
+# 20-80 s per answer) while the run itself is alive. The observer waits on the job's own
+# inactivity budget (``HERMES_CRON_TIMEOUT`` default 600 s; a wedged owner drops the socket rather
+# than stalling one read) instead of declaring the execution unknown off a single slow answer.
+CRON_RPC_TIMEOUT = 600
 # A full event queue parks the socket reader; a consumer that takes no event for this long has
 # stalled and is failed. Same bound as the owner's own send deadline (``tui_gateway/ws.py``).
 EVENT_STALL_TIMEOUT = 30
