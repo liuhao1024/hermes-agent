@@ -72,6 +72,9 @@ class SessionState:
         self.revision = None
         self.subscription_id = None
         self.execution_generation = None
+        # The last ``config.set show_reasoning`` this viewer sent (``None``: never sent); a
+        # reconnect re-supplies it, the restarted gateway having lost the session flag in memory.
+        self.show_reasoning_sent: bool | None = None
         self.messages: list = []
         self.usage: dict = {}
         # Called (loop thread) with each ``session.usage`` payload; GatewayAgent maps it onto main's
@@ -308,6 +311,15 @@ class GatewayConnection:
                     raise
                 logger.debug("session.resume %s after reconnect: %s", session_id, exc)
                 state.subscription_id = None
+                continue
+            if state.show_reasoning_sent is not None:
+                # The restarted gateway lost the session's display flag in memory; re-supply what this
+                # viewer last set, so reasoning streams (or stays hidden) as it did before the restart.
+                try:
+                    await client.rpc("config.set", session_id=session_id, key="show_reasoning",
+                                     value="1" if state.show_reasoning_sent else "0")
+                except GatewayRPCError as exc:
+                    logger.debug("config.set show_reasoning %s after reconnect: %s", session_id, exc)
 
     def resume(self, call, session_id, *, typed=False):
         """``session.resume`` through ``call`` (the store's attach), re-supplying :attr:`launch_api_key`;

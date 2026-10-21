@@ -182,7 +182,9 @@ def test_a_turn_lost_to_a_restart_is_reported_plainly_and_the_next_turn_runs(gat
     conn._thread.join(5)
     result = agent.run_conversation("second")
     assert not result.get("failed") and result["final_response"] == "reply 2"
-    assert [method for method, _ in gateway.lives[1].calls][:2] == ["session.resume", "prompt.submit"]
+    # session.resume re-supplies the agent's construction-time ``show_reasoning`` "0" before the turn.
+    assert [method for method, _ in gateway.lives[1].calls][:3] == [
+        "session.resume", "config.set", "prompt.submit"]
 
 
 def test_the_previous_connections_loss_never_fails_a_live_turn(gateway, conn):
@@ -434,6 +436,58 @@ def test_a_call_racing_a_redial_waits_for_it_and_is_sent(gateway, conn):
     first.join(10)
     assert second == {"status": "ok", "life": 2} and results == [second]
     assert len(gateway.lives) == 2
+
+
+def _show_reasoning_sets(life):
+    return [(method, params) for method, params in life.calls if method == "config.set"]
+
+
+@pytest.mark.parametrize("sent, value", [(True, "1"), (False, "0")], ids=["shown", "hidden"])
+def test_a_reconnect_re_supplies_the_sessions_show_reasoning_flag(gateway, conn, sent, value):
+    """A restarted gateway lost the session's ``show_reasoning`` flag in memory, and the CLI's
+    (session id, callback-installed) tuple did not change, so the flag is never re-sent: the first
+    turn after the restart shows no live reasoning, only the post-turn thought box (#142562)."""
+    conn.state(SID).show_reasoning_sent = sent
+    gateway.hang_up(conn)
+    assert conn.call("status") == {"status": "ok", "life": 2}
+    assert gateway.lives[1].calls[0][0] == "session.resume"
+    assert _show_reasoning_sets(gateway.lives[1]) == [
+        ("config.set", {"session_id": SID, "key": "show_reasoning", "value": value})]
+
+
+def test_a_reconnect_sends_no_show_reasoning_a_viewer_never_set(gateway, conn):
+    """Only a viewer that once set the flag re-supplies it: an unset flag keeps the launch-source
+    fallback (classic CLI: reasoning not shown live) exactly as before."""
+    gateway.hang_up(conn)
+    assert conn.call("status") == {"status": "ok", "life": 2}
+    assert _show_reasoning_sets(gateway.lives[1]) == []
+
+
+def test_a_session_gone_during_the_restart_gets_no_show_reasoning_re_send(gateway, conn):
+    gateway.resume_errors.append(GatewayClientError("not_found"))
+    conn.state(SID).show_reasoning_sent = True
+    gateway.hang_up(conn)
+    assert conn.call("status") == {"status": "ok", "life": 2}
+    assert conn.state(SID).subscription_id is None
+    assert _show_reasoning_sets(gateway.lives[1]) == []
+
+
+def test_the_agents_flag_set_lands_on_the_state_a_reconnect_re_sends(gateway, conn):
+    """End to end: construction sends the unset flag ("0"), installing the reasoning sink sends
+    "1"; a restart and redial re-sends that last value with no change on the agent (the tuple did
+    not move, so the setter itself re-sends nothing)."""
+    agent = GatewayAgent(connection=conn, session_id=SID)
+    agent.reasoning_callback = lambda text: None
+    assert _show_reasoning_sets(gateway.lives[0]) == [
+        ("config.set", {"session_id": SID, "key": "show_reasoning", "value": "0"}),
+        ("config.set", {"session_id": SID, "key": "show_reasoning", "value": "1"})]
+    assert conn.state(SID).show_reasoning_sent is True
+
+    gateway.hang_up(conn)
+    assert conn.call("status") == {"status": "ok", "life": 2}
+    agent.reasoning_callback = lambda text: None  # same tuple: not re-sent by the setter
+    assert _show_reasoning_sets(gateway.lives[1]) == [
+        ("config.set", {"session_id": SID, "key": "show_reasoning", "value": "1"})]
 
 
 def test_lost_before():

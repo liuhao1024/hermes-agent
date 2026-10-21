@@ -428,6 +428,8 @@ class GatewayAgent:
             logger.debug("config.set show_reasoning failed: %s", exc)
             return
         self._show_reasoning_sent = wanted
+        # On the session's state too: a reconnect re-sends it (a restarted gateway lost the flag).
+        self._state().show_reasoning_sent = wanted[1]
 
     @property
     def service_tier(self):
