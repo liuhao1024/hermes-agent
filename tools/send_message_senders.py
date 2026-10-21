@@ -3,6 +3,8 @@
 from pm import install_hint
 import asyncio
 import contextlib
+import html
+import html.parser
 import logging
 import os
 import re
@@ -243,12 +245,85 @@ async def _telegram_send_one_media(bot, chat_id, media_path, is_voice, *, captio
                 os.remove(thumb_path)
 
 
+# Telegram's HTML subset (Bot API docs): anything else — e.g. a model-invented <service> —
+# makes the whole send fail entity parsing and degrade to plain text (#142568).
+_TELEGRAM_ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+                          "a", "code", "pre", "blockquote", "span", "tg-spoiler", "tg-emoji"}
+
+
+def _telegram_allowed_attrs(tag, attrs):
+    """``None`` = drop the tag but keep its text (a/ span stripped of their one legal
+    attribute are rejected by Telegram); else the whitelist-filtered attribute list."""
+    if tag == "a":
+        kept = [(k, v) for k, v in attrs if k == "href" and v]
+        return kept or None
+    if tag == "tg-emoji":
+        kept = [(k, v) for k, v in attrs if k == "emoji-id" and v]
+        return kept or None
+    if tag in ("pre", "code"):
+        return [(k, v) for k, v in attrs if k == "class" and v and v.startswith("language-")]
+    if tag == "blockquote":
+        return [(k, v) for k, v in attrs if k == "expandable"]
+    if tag == "span":
+        kept = [(k, v) for k, v in attrs if k == "class" and v in ("tg-spoiler", "tg-emoji")]
+        return kept or None
+    return []
+
+
+class _TelegramHTMLSanitizer(html.parser.HTMLParser):
+    """Rebuild text using only Telegram's allowed tags: unknown tags/attributes are
+    dropped while their text survives, stray markup characters are escaped."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.pieces = []
+        # Stripped shells (e.g. an href-less <a>) must take their end tag with them,
+        # otherwise the leftover </a> alone fails Telegram's entity parser.
+        self.dropped = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _TELEGRAM_ALLOWED_TAGS:
+            kept = _telegram_allowed_attrs(tag, attrs)
+            if kept is None:
+                self.dropped[tag] = self.dropped.get(tag, 0) + 1
+                return
+            rendered = "".join(f' {k}' if v is None else f' {k}="{html.escape(v, quote=True)}"'
+                               for k, v in kept)
+            self.pieces.append(f"<{tag}{rendered}>")
+
+    def handle_endtag(self, tag):
+        if self.dropped.get(tag):
+            self.dropped[tag] -= 1
+            return
+        if tag in _TELEGRAM_ALLOWED_TAGS:
+            self.pieces.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        self.pieces.append(html.escape(data, quote=False))
+
+
+def _sanitize_telegram_html(text):
+    """Unknown tags (e.g. model-invented ``<service>``) are stripped, their text kept,
+    so one bad tag no longer degrades the whole message to plain text (#142568)."""
+    parser = _TelegramHTMLSanitizer()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:
+        # Malformed markup the stdlib parser chokes on: send as-is; the existing
+        # plain-text fallback still catches a parse failure downstream.
+        logger.warning("Telegram HTML sanitisation failed; sending unsanitised text", exc_info=True)
+        return text
+    return "".join(parser.pieces)
+
+
 def _telegram_format(message):
     """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
-    HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
+    HTML (sanitised against Telegram's tag subset); otherwise Markdown -> MarkdownV2 via
+    the adapter's ``format_message``."""
     from telegram.constants import ParseMode
     if re.search(r'<[a-zA-Z/][^>]*>', message):
-        return message, ParseMode.HTML, True
+        return _sanitize_telegram_html(message), ParseMode.HTML, True
     try:
         from plugins.platforms.telegram.adapter import TelegramAdapter
         return TelegramAdapter.__new__(TelegramAdapter).format_message(message), ParseMode.MARKDOWN_V2, False

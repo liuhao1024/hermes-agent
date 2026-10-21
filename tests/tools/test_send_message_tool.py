@@ -779,6 +779,93 @@ class TestSendTelegramHtmlDetection:
         sleep_mock.assert_awaited_once()
 
 
+class TestSendTelegramHtmlSanitization:
+    """One model-invented tag must not degrade the whole message to plain text (#142568):
+    unknown tags are stripped with their text kept, stray markup escaped, and only
+    Telegram's tag/attribute subset survives into the HTML send."""
+
+    def _sanitize(self, text):
+        from tools.send_message_senders import _sanitize_telegram_html
+
+        return _sanitize_telegram_html(text)
+
+    def test_unknown_tag_stripped_text_kept(self):
+        assert (
+            self._sanitize("Deploy <b>ok</b> for <service>api-gw</service>")
+            == "Deploy <b>ok</b> for api-gw"
+        )
+
+    def test_known_tags_round_trip(self):
+        text = (
+            "<b>b</b><strong>s</strong><i>i</i><em>e</em><u>u</u><ins>n</ins>"
+            "<s>s</s><strike>t</strike><del>d</del><code>c</code><pre>p</pre>"
+            "<blockquote>q</blockquote><tg-spoiler>sp</tg-spoiler>"
+        )
+        assert self._sanitize(text) == text
+
+    def test_link_keeps_href_drops_other_attrs(self):
+        assert (
+            self._sanitize('<a href="https://x.io" onclick="steal()">l</a>')
+            == '<a href="https://x.io">l</a>'
+        )
+
+    def test_hrefless_link_shell_dropped(self):
+        assert self._sanitize("<a>no target</a>") == "no target"
+
+    def test_stray_markup_characters_escaped(self):
+        assert self._sanitize("1 < 2 & 3 > 0") == "1 &lt; 2 &amp; 3 &gt; 0"
+
+    def test_language_class_kept_on_code_and_pre(self):
+        assert (
+            self._sanitize('<pre><code class="language-python">x=1</code></pre>')
+            == '<pre><code class="language-python">x=1</code></pre>'
+        )
+        assert self._sanitize('<code class="evil">x</code>') == "<code>x</code>"
+
+    def test_span_class_whitelist(self):
+        assert (
+            self._sanitize('<span class="tg-spoiler">s</span>')
+            == '<span class="tg-spoiler">s</span>'
+        )
+        assert self._sanitize('<span class="fancy">x</span>') == "x"
+
+    def test_tg_emoji_id_kept(self):
+        text = '<tg-emoji emoji-id="5368324170671202286">ok</tg-emoji>'
+        assert self._sanitize(text) == text
+
+    def test_blockquote_expandable_kept(self):
+        assert (
+            self._sanitize("<blockquote expandable>q</blockquote>")
+            == "<blockquote expandable>q</blockquote>"
+        )
+
+    def test_unknown_endtag_stripped_too(self):
+        assert self._sanitize("a</service>b") == "ab"
+
+
+class TestSendTelegramSanitizedSend:
+    """End-to-end: a message carrying an unknown tag still goes out as HTML with the
+    rest of its formatting intact instead of falling back to plain text (#142568)."""
+
+    def _make_bot(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        return bot
+
+    def test_unknown_tag_message_sends_sanitized_html(self, monkeypatch):
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+
+        asyncio.run(
+            _send_telegram("tok", "123", "<service>maintenance</service>: <b>done</b>")
+        )
+
+        bot.send_message.assert_awaited_once()
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["parse_mode"] == "HTML"
+        assert kwargs["text"] == "maintenance: <b>done</b>"
+
+
 class TestSendTelegramThreadIdMapping:
     """General-topic mapping in _send_telegram (issue #22267).
 
