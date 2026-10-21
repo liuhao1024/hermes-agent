@@ -220,7 +220,10 @@ def _is_unusable_container_cwd(cwd: str, *, mounted_host: str | None = None) -> 
     """True if *cwd* is a host or relative path that can't be a container
     workdir: ``docker run -w`` needs an absolute in-sandbox path, otherwise the
     container fails to start (exit 125). Windows drive paths aren't ``isabs``
-    on POSIX, so they're caught by the prefix check.
+    in POSIX terms, so they're caught by the prefix check. The absoluteness
+    check is pinned to POSIX on purpose: a container cwd is a Linux path, and
+    on a Windows host ``ntpath.isabs`` calls a drive-less path such as
+    ``/tmp`` drive-relative, which would reject every in-sandbox cwd.
 
     The directory mounted at ``/workspace`` is unusable inside the container
     even when it matches none of those prefixes. That equality check runs
@@ -230,7 +233,7 @@ def _is_unusable_container_cwd(cwd: str, *, mounted_host: str | None = None) -> 
         return False
     if _is_mounted_host_cwd(cwd, mounted_host):
         return True
-    return _is_host_cwd(cwd) or not os.path.isabs(cwd)
+    return _is_host_cwd(cwd) or not posixpath.isabs(cwd)
 
 
 def _tenv(name: str, default: str = "") -> str:

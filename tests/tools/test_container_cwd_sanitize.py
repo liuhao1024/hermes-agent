@@ -28,6 +28,22 @@ class TestIsUnusableContainerCwd:
     def test_posix_home_host_path_rejected(self):
         assert tt._is_unusable_container_cwd("/home/ben/projects") is True
 
+    def test_windows_host_ntpath_semantics_keep_posix_container_cwds(self, monkeypatch):
+        # On a Windows host os.path is ntpath, whose isabs() treats a drive-less
+        # path like /tmp as drive-relative (not absolute) — so every in-sandbox
+        # cwd was discarded as unusable (#142492). The check must stay POSIX
+        # regardless of the host platform.
+        import ntpath
+        import os as _os
+
+        monkeypatch.setattr(_os, "path", ntpath)
+        for cwd in ("/tmp", "/root", "/workspace", "/home"):
+            assert tt._is_unusable_container_cwd(cwd) is False
+        # Host and relative shapes stay unusable under the same semantics.
+        assert tt._is_unusable_container_cwd(r"C:\Users\someuser") is True
+        assert tt._is_unusable_container_cwd("relative/path") is True
+        assert tt._is_unusable_container_cwd("/home/cua") is True
+
 class TestOverrideCwdSanitizedAtCallSite:
     """E2E pin: a per-task cwd OVERRIDE that is a host path must NOT reach the
     container builder. This is the actual reported bug — the gateway/TUI
