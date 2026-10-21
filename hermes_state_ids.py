@@ -34,6 +34,10 @@ SESSION_ID_RECOGNIZERS = (
     re.compile(r"^api-[0-9a-f]{16}$"),
     # gateway/platforms/api_server_runs.py: /v1/runs falls back to its f"run_{uuid4().hex}".
     re.compile(r"^run_[0-9a-f]{32}$"),
+    # PR code-review callers (a GitHub Actions workflow / review relay) derive
+    # f"hermes-review-{owner}-{repo}-{pr}" — owner/repo folded to [A-Za-z0-9_-] lower-case so the
+    # id stays a safe file name — and pass it to POST /v1/runs or X-Hermes-Session-Id.
+    re.compile(r"^hermes-review-[A-Za-z0-9_-]+-\d+$"),
     # acp_adapter/session.py and /v1/responses: str(uuid4()).
     re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
 )
