@@ -2205,6 +2205,7 @@ from gateway.run_goals import GatewayGoalsMixin
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.run_profile_reconcile import GatewayProfileReconcileMixin
 from gateway.run_plugin_rewire import GatewayPluginRewireMixin
+from gateway.run_adapter_dispose import _dispose_unused_adapter
 from gateway.platforms.base import (
     BasePlatformAdapter,
     _reply_anchor_for_event,
@@ -3205,32 +3206,6 @@ def _preserve_queued_followup_history_offset(
     if isinstance(followup_offset, int) and followup_offset <= current_offset:
         return followup_result
     return {**followup_result, "history_offset": current_offset}
-
-
-async def _dispose_unused_adapter(adapter: BasePlatformAdapter | None) -> None:
-    """Best-effort dispose for an adapter that never made it onto ``self.adapters`` (may be ``None``).
-    Nothing else calls ``disconnect()`` on it, so ``__init__`` resources (e.g. SQLite fds) would leak
-    until GC (not prompt for asyncio-bound objects) and exhaust the fd ulimit over a long retry loop.
-
-    The reconnect watcher in ``GatewayRunner._platform_reconnect_watcher`` constructs a fresh adapter on
-    every retry attempt. When the connect call fails — for any of the three reasons (non-retryable error,
-    retryable error, exception during connect) — the adapter is dropped without ever being installed, so
-    nothing else will call its ``disconnect()``. ``APIServerAdapter`` opens a SQLite ``ResponseStore`` that
-    holds 2 fds — the db file and its WAL sidecar) stay open until garbage collection sweeps the unreachable
-    object, which Python's cyclic GC does not do promptly for asyncio-bound objects with native handles. The
-    cumulative leak is 2 fds × every retry at the 300s backoff cap ≈ 12 fds/hour, and the default 2560-fd
-    ulimit is exhausted in ~12h of continuous failure, after which every open() call on the gateway raises
-    ``OSError: [Errno 24] Too many open files`` and the gateway becomes a zombie (#37011).
-    """
-    if adapter is None:
-        return
-    try:
-        await adapter.disconnect()
-    except Exception:
-        # Half-constructed adapters may raise; must not abort the watcher (CancelledError propagates).
-        logger.debug(
-            "Adapter dispose raised on unowned adapter %r",
-            getattr(adapter, "name", type(adapter).__name__), exc_info=True)
 
 
 # Max seconds between platform reconnect retries (primary watcher and secondary profiles share it).

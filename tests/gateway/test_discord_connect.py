@@ -382,6 +382,46 @@ async def test_disconnect_cancels_running_bot_task(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_bot_task_bounded_when_task_swallows_cancel():
+    """Regression (#142670): _cancel_bot_task must not await a wedged client.start() forever.
+
+    A start() task stuck inside ws.receive on a starved loop never surfaces CancelledError
+    even after cancel(); the old unbounded ``await self._bot_task`` hung here, and through
+    _dispose_unused_adapter hung the whole reconnect watcher — Discord stayed down until a
+    gateway restart. The bound must be final even though wait_for alone would keep awaiting
+    the cancelled task (hence the shield).
+    """
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    adapter._bot_task_cancel_timeout = 0.05
+
+    async def _swallow_cancel_once():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass  # wedged in ws.receive: cancel requested, never honored
+        await asyncio.Event().wait()  # the test's cleanup cancel ends the task here
+
+    wedged = asyncio.create_task(_swallow_cancel_once())
+    adapter._bot_task = wedged
+    # Yield once so the task starts and is inside the try block before it is cancelled
+    # (a task cancelled before its first step dies at the coroutine entry, before try).
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(adapter._cancel_bot_task(), timeout=2.0)
+
+    assert adapter._bot_task is None, (
+        "the bounded cancel must stop waiting and clear _bot_task"
+    )
+    assert not wedged.done(), (
+        "the wedged task itself is abandoned, not forcibly finished"
+    )
+
+    wedged.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wedged
+
+
+@pytest.mark.asyncio
 async def test_safe_sync_slash_commands_only_mutates_diffs():
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 

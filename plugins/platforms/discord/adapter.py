@@ -1316,6 +1316,13 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         )
         self._liveness_task: Optional[asyncio.Task] = None
         self._liveness_notification_task: Optional[asyncio.Task] = None
+        # Bound on awaiting the cancelled client.start() task in _cancel_bot_task (#142670):
+        # on a starved loop the task sits in ws.receive and never surfaces CancelledError,
+        # and the old unbounded await hung the reconnect watcher until a gateway restart.
+        self._bot_task_cancel_timeout = self._finite_positive_config_float(
+            "bot_task_cancel_timeout_seconds", 5.0,
+            env_key="HERMES_DISCORD_BOT_TASK_CANCEL_TIMEOUT_SECONDS",
+        )
         # True while disconnect() intentionally closes discord.py (done callback: shutdown vs crash).
         self._disconnecting = False
         # Last DISPATCH frame's monotonic stamp, ticked by ``on_socket_event_type`` (see its
@@ -1913,7 +1920,22 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         if self._bot_task and not self._bot_task.done():
             self._bot_task.cancel()
             try:
-                await self._bot_task
+                # shield, not a bare wait_for: on timeout wait_for cancels and then awaits
+                # the inner task, so a start() wedged in ws.receive (never surfacing
+                # CancelledError on a starved loop) would still hang this await — and with
+                # it the reconnect watcher — forever (#142670). The shield makes the bound
+                # final; the abandoned task stays cancelled and disconnect()'s client.close()
+                # is the next line of defense.
+                await asyncio.wait_for(
+                    asyncio.shield(self._bot_task),
+                    timeout=self._bot_task_cancel_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[%s] client.start() task did not finish cancelling within %.1fs; abandoning it",
+                    self.name,
+                    self._bot_task_cancel_timeout,
+                )
             except (asyncio.CancelledError, Exception):
                 pass
         self._bot_task = None

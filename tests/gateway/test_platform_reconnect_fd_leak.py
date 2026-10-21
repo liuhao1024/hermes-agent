@@ -319,3 +319,34 @@ class TestAPIServerDisconnectClosesResponseStore:
         with pytest.raises(sqlite3.ProgrammingError):
             store._conn.execute("SELECT 1").fetchone()
 
+
+@pytest.mark.asyncio
+async def test_dispose_unused_adapter_bounded_when_disconnect_hangs(monkeypatch):
+    """Regression (#142670): a stalled disconnect() must not hang the reconnect watcher.
+
+    The reconnect watcher disposes failed replacement adapters through
+    ``_dispose_unused_adapter``. When the adapter's disconnect() wedges (e.g. Discord's
+    ``client.start()`` task never surfacing CancelledError on a starved loop), the old
+    unbounded ``await adapter.disconnect()`` hung the watcher forever — every primary
+    platform's reconnect rides on that same task, so one wedged adapter took the whole
+    gateway's platform recovery down until restart. The dispose must be bounded even
+    though wait_for alone would keep awaiting the stalled disconnect (hence the shield).
+    """
+    from gateway import run_adapter_dispose
+
+    monkeypatch.setattr(run_adapter_dispose, "_ADAPTER_DISPOSE_TIMEOUT", 0.05)
+
+    release = asyncio.Event()
+
+    class _HangingDisconnectAdapter:
+        name = "hang"
+
+        async def disconnect(self):
+            await release.wait()  # wedged mid-disconnect, never returns on its own
+
+    adapter = _HangingDisconnectAdapter()
+
+    await asyncio.wait_for(_dispose_unused_adapter(adapter), timeout=2.0)
+
+    release.set()  # let the abandoned shielded dispose task finish cleanly
+
