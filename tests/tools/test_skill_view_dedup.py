@@ -134,6 +134,48 @@ class TestSkillViewDedup:
         assert repeat.get("dedup") is True
         assert repeat.get("content_returned") is False
 
+    def test_non_tool_caller_records_for_dedup(self, skills_home):
+        # A plugin/preload path imports skill_view() and serves the skill directly (#142427):
+        # the serve must count, so the model's later skill_view tool call gets the stub.
+        from tools.skills_tool import skill_view
+
+        preload = json.loads(skill_view("demo-dedup-skill", task_id="t-svd"))
+        assert "Step one" in preload["content"]
+
+        r = _view("demo-dedup-skill")
+        assert r.get("dedup") is True
+        assert r.get("content_returned") is False
+        assert "content" not in r
+
+    def test_non_tool_caller_can_opt_out_of_recording(self, skills_home):
+        from tools.skills_tool import skill_view
+
+        preload = json.loads(skill_view("demo-dedup-skill", task_id="t-svd", record_serve=False))
+        assert "Step one" in preload["content"]
+
+        r = _view("demo-dedup-skill")
+        assert r.get("dedup") is None
+        assert "Step one" in r.get("content", "")
+
+    def test_raw_serve_of_a_different_rendering_serves_full_content(self, skills_home):
+        # slash/preload callers pass preprocess=False; when preprocessing would render different
+        # bytes (here ${HERMES_SESSION_ID}), the later preprocessed tool view must NOT stub.
+        d = skills_home / "skills" / "demo-session-token-skill"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: demo-session-token-skill\ndescription: Session token skill.\n---\n"
+            "# Session ${HERMES_SESSION_ID}\n\nStep one: run the demo procedure fully.\n",
+            encoding="utf-8",
+        )
+        from tools.skills_tool import skill_view
+
+        raw = json.loads(skill_view("demo-session-token-skill", task_id="t-svd", preprocess=False))
+        assert "${HERMES_SESSION_ID}" in raw["content"]
+
+        r = _view("demo-session-token-skill")
+        assert r.get("dedup") is None
+        assert "t-svd" in r.get("content", "")
+
 
 class TestSkillViewDedupRaces:
     """A repeat view must never claim 'unchanged' for content the model was not served."""

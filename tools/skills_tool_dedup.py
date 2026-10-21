@@ -22,28 +22,48 @@ _SKILL_VIEW_DEDUP_MESSAGE = (
     "returns the full content again.)")
 
 
-def dedup_skill_view(task_id, name, file_path, payload: dict, result: str) -> str | None:
-    """The "unchanged" stub when this task was already served exactly ``result`` for this skill
-    file; otherwise record ``result``'s digest and return None (serve the full result)."""
-    # Never dedup setup-needed views: readiness depends on config/env state that
-    # changes without the file changing; the model must see the refreshed status.
+def _dedup_key_digest(task_id, name, file_path, payload: dict, result: str):
+    """Shared admission + fingerprint of one serve: None when it must never take part in
+    dedup (no task to key it to, or setup-needed readiness a re-view must re-show)."""
     if (not task_id or payload.get("setup_needed")
             or payload.get("readiness_status") == "setup_needed"):
         return None
-    resolved = str(payload.get("name") or name)
-    key = (resolved, file_path or "")
-    digest = hashlib.sha256(result.encode("utf-8")).hexdigest()
+    return ((str(payload.get("name") or name), file_path or ""),
+            hashlib.sha256(result.encode("utf-8")).hexdigest())
+
+
+def _remember(cache, key, digest) -> None:
+    cache.pop(key, None)  # re-insert at the end: FIFO eviction keeps the recently served
+    cache[key] = digest
+    while len(cache) > _SKILL_VIEW_DEDUP_CAP:  # FIFO eviction
+        del cache[next(iter(cache))]
+
+
+def record_skill_view(task_id, name, file_path, payload: dict, result: str) -> None:
+    """Record a successful skill_view serve from ANY caller — the tool handler, or a plugin /
+    preload path that imported ``skill_view`` directly (#142427) — so a byte-identical repeat
+    view from the tool returns the unchanged stub instead of the full body again."""
+    if (kd := _dedup_key_digest(task_id, name, file_path, payload, result)) is None:
+        return
+    key, digest = kd
+    with _skill_view_tracker_lock:
+        _remember(_skill_view_tracker.setdefault(str(task_id), {}), key, digest)
+
+
+def dedup_skill_view(task_id, name, file_path, payload: dict, result: str) -> str | None:
+    """The "unchanged" stub when this task was already served exactly ``result`` for this skill
+    file; otherwise record ``result``'s digest and return None (serve the full result)."""
+    if (kd := _dedup_key_digest(task_id, name, file_path, payload, result)) is None:
+        return None
+    key, digest = kd
     with _skill_view_tracker_lock:
         cache = _skill_view_tracker.setdefault(str(task_id), {})
         if cache.get(key) == digest:
             return json.dumps({
-                "success": True, "status": "unchanged", "name": resolved,
+                "success": True, "status": "unchanged", "name": str(payload.get("name") or name),
                 "file": file_path or "SKILL.md", "dedup": True, "content_returned": False,
                 "message": _SKILL_VIEW_DEDUP_MESSAGE}, ensure_ascii=False)
-        cache.pop(key, None)  # re-insert at the end: FIFO eviction keeps the recently served
-        cache[key] = digest
-        while len(cache) > _SKILL_VIEW_DEDUP_CAP:  # FIFO eviction
-            del cache[next(iter(cache))]
+        _remember(cache, key, digest)
     return None
 
 

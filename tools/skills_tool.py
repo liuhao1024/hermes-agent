@@ -25,7 +25,7 @@ from tools.skills_tool_plugin import (
     MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _fail, _json,
     _mark_background_review_read, _preprocess_skill, _read_skill_text, _safe_frontmatter,
     _serve_plugin_skill, _serve_skill_file, _truncate_description)
-from tools.skills_tool_dedup import dedup_skill_view, reset_skill_view_dedup
+from tools.skills_tool_dedup import dedup_skill_view, record_skill_view, reset_skill_view_dedup
 from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
@@ -589,12 +589,29 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
         logger.warning("Skill security warning for '%s': %s", name, "; ".join(warnings))
 
 
+def _record_served_skill(record: bool, task_id, name, file_path, served: str) -> None:
+    """Best-effort dedup registration of one successful serve: whoever served the bytes —
+    the tool handler or a plugin/preload caller of ``skill_view`` — the next identical view
+    from the tool can return the unchanged stub (#142427)."""
+    if not record:
+        return
+    with suppress(Exception):
+        parsed = json.loads(served)
+        if isinstance(parsed, dict) and parsed.get("success"):
+            record_skill_view(task_id, name, file_path, parsed, served)
+
+
 def skill_view(
-    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
+    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True,
+    record_serve: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
-    slash/preload callers render the message themselves."""
+    slash/preload callers render the message themselves. ``record_serve`` registers the serve
+    in the repeat-view dedup registry, so a later identical ``skill_view`` tool call gets the
+    unchanged stub — the tool handler passes False because its own ``dedup_skill_view`` call
+    must compare against what was served BEFORE this serve."""
+    record = record_serve and not is_background_review()
     try:
         # Validate before the ':' dispatch so a Windows drive path (C:\skills\foo) can't be
         # reinterpreted as a plugin namespace.
@@ -604,6 +621,7 @@ def skill_view(
         if ":" in name:  # plugin registry; bare names use the flat-tree scan below
             served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess)
             if served is not None:
+                _record_served_skill(record, task_id, name, file_path, served)
                 return served
         # The fall-through form (namespace/bare) joins onto each search dir too; re-validate it
         # since `bare` is not namespace-checked.
@@ -630,9 +648,11 @@ def skill_view(
                 e["path"] == skill_md and e["load_name"] == rel for e in _skill_catalog(skip_disabled=True, include_hidden=True))):
             return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
         if file_path and skill_dir:
-            return _serve_skill_file(
+            served = _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
                 hint="Use a relative path within the skill directory")
+            _record_served_skill(record, task_id, name, file_path, served)
+            return served
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
         metadata = frontmatter.get("metadata")
         hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
@@ -689,7 +709,9 @@ def skill_view(
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
-        return _json(result)
+        served = _json(result)
+        _record_served_skill(record, task_id, name, None, served)
+        return served
     except Exception as e:
         return tool_error(str(e), success=False)
 
@@ -745,7 +767,7 @@ def _skill_view_with_bump(args, **kw):
     # possibly-pruned transcript copy (#95976). No dedup in the fork; None also keeps its views
     # out of the parent's bucket.
     dedup_task_id = None if is_background_review() else task_id
-    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id)
+    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id, record_serve=False)
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
