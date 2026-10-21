@@ -185,6 +185,7 @@ export interface Translations {
   // ── Sessions page ──
   sessions: {
     title: string;
+    loadWhat?: string;
     history: string;
     overview: string;
     filterChats: string;

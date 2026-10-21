@@ -80,10 +80,12 @@ import {
 import { useSystemActions } from "@/contexts/useSystemActions";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { useI18n } from "@/i18n";
+import { en } from "@/i18n/en";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { apiErrorFromResponse, errorMessage } from "@/lib/api-error";
+import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 
 
 /** Render an FTS5 snippet with highlighted matches.
@@ -689,6 +691,14 @@ type SessionsView = "list" | "overview";
 
 const PAGE_SIZE = 20;
 
+// First-load hang guard (#142352): fetchJSON's auth paths (401 → login
+// redirect, stale-token reload) leave the returned promise pending forever
+// on purpose, because the page is expected to unload. When that navigation
+// loses the race, the awaited listing call never settles and the pane stays
+// blank behind the loading early-return. Racing a timeout turns the hang
+// into the retryable error state instead.
+export const SESSIONS_LOAD_HANG_TIMEOUT_MS = 10_000;
+
 function SessionsPagination({
   className,
   compact = false,
@@ -742,6 +752,9 @@ export default function SessionsPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
+  // Humanized error of the last visible (non-silent) listing load. Swallowing
+  // it instead left a silently empty page that looked like an empty store.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<
@@ -973,15 +986,30 @@ export default function SessionsPage() {
       : sessionsRequestRef.current + 1;
     if (!silent) sessionsRequestRef.current = requestId;
     if (!silent) setLoading(true);
-    api
-      .getSessions(PAGE_SIZE, p * PAGE_SIZE, sessionQueryOptions)
+    let hangTimer: ReturnType<typeof setTimeout> | undefined;
+    Promise.race([
+      api.getSessions(PAGE_SIZE, p * PAGE_SIZE, sessionQueryOptions),
+      new Promise<never>((_, reject) => {
+        hangTimer = setTimeout(
+          () => reject(new Error("session list request timed out")),
+          SESSIONS_LOAD_HANG_TIMEOUT_MS,
+        );
+      }),
+    ])
       .then((resp) => {
         if (requestId !== sessionsRequestRef.current) return;
         setSessions(resp.sessions);
         setTotal(resp.total);
+        setLoadError(null);
       })
-      .catch(() => {})
+      .catch((e: unknown) => {
+        // Background refreshes keep showing the stale list on failure;
+        // only a visible load surfaces the error.
+        if (silent || requestId !== sessionsRequestRef.current) return;
+        setLoadError(errorMessage(e));
+      })
       .finally(() => {
+        clearTimeout(hangTimer);
         if (requestId !== sessionsRequestRef.current) return;
         if (!silent) setLoading(false);
       });
@@ -1525,8 +1553,9 @@ export default function SessionsPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
+      <div className="flex flex-col items-center justify-center gap-2 py-24 text-muted-foreground">
         <Spinner className="text-2xl text-primary" />
+        <span className="text-sm">{t.common.loading}</span>
       </div>
     );
   }
@@ -1534,6 +1563,13 @@ export default function SessionsPage() {
   return (
     <div className="flex min-w-0 w-full max-w-full flex-col gap-4">
       <PluginSlot name="sessions:top" />
+      {loadError && (
+        <LoadErrorNotice
+          what={t.sessions.loadWhat ?? en.sessions.loadWhat!}
+          detail={loadError}
+          onRetry={() => loadSessions(page)}
+        />
+      )}
       <Toast toast={toast} />
       <input
         ref={importInputRef}
@@ -2012,7 +2048,7 @@ export default function SessionsPage() {
       )}
 
       {showList ? (
-        filtered.length === 0 ? (
+        filtered.length === 0 && !loadError ? (
           <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
             <Clock className="h-8 w-8 mb-3 opacity-40" />
             <p className="text-sm font-medium">

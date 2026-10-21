@@ -259,3 +259,100 @@ describe("structured reasoning rendering (#59957)", () => {
     expect(document.querySelectorAll("pre code").length).toBe(0);
   });
 });
+
+describe("first-load failure surfacing (#142352)", () => {
+  const row = (id: string) => ({
+    id, profile: "default", source: "cli", model: null, title: "Listed", started_at: 1,
+    ended_at: null, last_active: 1, is_active: false, message_count: 2, tool_call_count: 0,
+    input_tokens: 1, output_tokens: 1, preview: "listed",
+  });
+
+  // Renders without waiting for a successful listing — the scenarios under
+  // test never produce one on the first attempt.
+  async function mountSessionsPage() {
+    const [{ default: SessionsPage }, { I18nProvider }, { SystemActionsProvider }, { ProfileProvider }, { PageHeaderProvider }] =
+      await Promise.all([
+        import("./SessionsPage"),
+        import("@/i18n"),
+        import("@/contexts/SystemActions"),
+        import("@/contexts/ProfileProvider"),
+        import("@/contexts/PageHeaderProvider"),
+      ]);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <I18nProvider>
+          <MemoryRouter>
+            <SystemActionsProvider>
+              <ProfileProvider>
+                <PageHeaderProvider pluginTabs={[]}>
+                  <SessionsPage />
+                </PageHeaderProvider>
+              </ProfileProvider>
+            </SystemActionsProvider>
+          </MemoryRouter>
+        </I18nProvider>,
+      ),
+    );
+  }
+
+  const retryButton = () =>
+    Array.from(document.querySelectorAll('[role="alert"] button')).find((b) =>
+      b.textContent?.includes("Retry"),
+    );
+
+  it("shows a retryable load error instead of a silently empty pane when the first listing call fails", async () => {
+    apiMocks.getSessions.mockImplementation(async (limit: number) => {
+      if (limit >= 50) return { sessions: [], total: 0, limit, offset: 0 };
+      throw new Error("listing 500");
+    });
+    await mountSessionsPage();
+
+    await waitFor(() => Boolean(document.querySelector('[role="alert"]')));
+    const alert = document.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toContain("Could not load sessions");
+    expect(alert.textContent).toContain("listing 500");
+    // The empty-state must not impersonate a genuinely empty store while
+    // the load actually failed.
+    expect(document.body.textContent).not.toContain("No sessions yet");
+
+    // Retry recovers the list.
+    apiMocks.getSessions.mockImplementation(async (limit: number) => ({
+      sessions: limit >= 50 ? [] : [row("sid-recovered")],
+      total: limit >= 50 ? 0 : 1,
+      limit,
+      offset: 0,
+    }));
+    await act(async () => click(retryButton() ?? null));
+    await waitFor(() => Boolean(button("Delete session")));
+  });
+
+  it("degrades a never-settling first listing call to the retryable error state", async () => {
+    vi.useFakeTimers();
+    try {
+      // fetchJSON's auth paths intentionally leave the promise pending
+      // forever (the page is expected to unload); the page must not hang
+      // on the bare spinner when that navigation loses the race.
+      apiMocks.getSessions.mockImplementation((limit: number) =>
+        limit >= 50
+          ? Promise.resolve({ sessions: [], total: 0, limit, offset: 0 })
+          : new Promise(() => {}),
+      );
+      await mountSessionsPage();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+
+      const { SESSIONS_LOAD_HANG_TIMEOUT_MS } = await import("./SessionsPage");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SESSIONS_LOAD_HANG_TIMEOUT_MS + 50);
+      });
+      const alert = document.querySelector('[role="alert"]');
+      expect(alert).toBeTruthy();
+      expect(alert?.textContent).toContain("Could not load sessions");
+      expect(document.body.textContent).not.toContain("No sessions yet");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

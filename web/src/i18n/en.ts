@@ -169,6 +169,7 @@ export const en: Translations = {
 
   sessions: {
     title: "Sessions",
+    loadWhat: "sessions",
     history: "History",
     overview: "Overview",
     filterChats: "Chats",
