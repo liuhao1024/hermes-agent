@@ -214,11 +214,51 @@ class TestGenerate:
         assert request.headers["x-codex-image-turn-id"]
         body = json.loads(request.content)
         assert body == {
-            "prompt": "a cat", "model": "gpt-image-2", "n": 1, "quality": "medium",
-            "size": "1024x1536", "background": "opaque",
+            "prompt": "Aspect ratio 2:3, portrait. a cat", "model": "gpt-image-2", "n": 1,
+            "quality": "medium", "size": "1024x1536", "background": "opaque",
         }
         # The whole point of the native route: nothing about a chat model in the request.
         assert not any(key in body for key in ("tools", "input", "instructions"))
+
+    def test_aspect_ratio_directive_reaches_the_prompt(self, provider, codex_backend):
+        """#142385: the Codex backend ignores the ``size`` field and only honours geometry stated
+        in the prompt, so the resolved aspect must travel in the prompt text — ``size`` keeps
+        being sent for the day the backend starts honouring it."""
+        result = provider.generate("a cat", aspect_ratio="square")
+
+        assert result["success"] is True
+        (request,) = codex_backend["requests"]
+        body = json.loads(request.content)
+        assert body["prompt"] == "Aspect ratio 1:1, square. a cat"
+        assert body["size"] == "1024x1024"
+        # The tool result still reports the caller's own prompt, not the transport directive.
+        assert result["prompt"] == "a cat"
+
+    @pytest.mark.parametrize("aspect,directive", [
+        ("landscape", "Aspect ratio 3:2, landscape."),
+        ("square", "Aspect ratio 1:1, square."),
+        ("portrait", "Aspect ratio 2:3, portrait."),
+    ])
+    def test_aspect_ratio_directive_covers_each_supported_aspect(
+        self, provider, codex_backend, aspect, directive,
+    ):
+        provider.generate("a cat", aspect_ratio=aspect)
+        body = json.loads(codex_backend["requests"][-1].content)
+        assert body["prompt"] == f"{directive} a cat"
+
+    def test_prompt_stated_pixel_geometry_wins_over_the_directive(self, provider, codex_backend):
+        stated = "1920x1080 pixels, a wide city skyline at dusk"
+        result = provider.generate(stated, aspect_ratio="square")
+
+        assert result["success"] is True
+        body = json.loads(codex_backend["requests"][0].content)
+        assert body["prompt"] == stated
+
+    def test_prompt_stated_ratio_colon_form_wins_over_the_directive(self, provider, codex_backend):
+        stated = "16:9 cinematic wallpaper, a cat"
+        provider.generate(stated, aspect_ratio="portrait")
+        body = json.loads(codex_backend["requests"][0].content)
+        assert body["prompt"] == stated
 
     def test_custom_codex_base_receives_the_image_request(self, provider, codex_backend, tmp_path, monkeypatch):
         """With ``HERMES_CODEX_BASE_URL`` set, image requests go to the gateway's base instead of

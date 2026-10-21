@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +44,24 @@ _ACCEPTED_INPUT_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image
 _NO_AUTH = (
     "No Codex/ChatGPT OAuth credentials available. Run "
     "`hermes auth add openai-codex` (or `hermes setup` → Codex) to sign in.")
+
+# The backend ignores the ``size`` field but honours geometry stated in the prompt (#142385), so the
+# resolved aspect travels as a short prefix. Ratio or pixel dimensions already in the prompt win.
+_ASPECT_DIRECTIVES: dict[str, str] = {
+    "landscape": "Aspect ratio 3:2, landscape.",
+    "square": "Aspect ratio 1:1, square.",
+    "portrait": "Aspect ratio 2:3, portrait.",
+}
+_STATED_GEOMETRY = re.compile(r"\d+\s*[:x×]\s*\d+", re.IGNORECASE)
+
+
+def _prompt_with_aspect_directive(prompt: str, aspect: str) -> str:
+    """Prompt as sent to the backend: the aspect directive prepended unless the caller stated
+    geometry themselves (``16:9``, ``1024x768``), which then wins over ``aspect_ratio``."""
+    directive = _ASPECT_DIRECTIVES.get(aspect)
+    if directive is None or _STATED_GEOMETRY.search(prompt):
+        return prompt
+    return f"{directive} {prompt}"
 
 
 def _summarize_error_body(body: str) -> str:
@@ -279,6 +298,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
 
         tier_id, meta = _resolve_model()
         size = size_for(aspect)
+        request_prompt = _prompt_with_aspect_directive(prompt, aspect)
         fail = error_factory("openai-codex", aspect, model=tier_id, prompt=prompt)
         try:
             input_images = _normalize_input_images(image_url, reference_image_urls)
@@ -287,8 +307,8 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
 
         try:
             payload = _post_image_request(
-                token, prompt=prompt, size=size, quality=meta["quality"], input_images=input_images or None,
-                base_url=base_url)
+                token, prompt=request_prompt, size=size, quality=meta["quality"],
+                input_images=input_images or None, base_url=base_url)
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
             return fail(f"OpenAI image generation via Codex auth failed: {exc}", "api_error")
