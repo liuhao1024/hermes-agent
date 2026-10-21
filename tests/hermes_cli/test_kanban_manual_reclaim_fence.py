@@ -119,3 +119,35 @@ def test_unverified_fingerprint_stays_human_override(board, monkeypatch):
                            signal_fn=lambda pid, sig: killed.append((pid, sig))) is True
     assert killed == []                                  # never signalled by bare number
     assert kb.get_task(conn, tid).status == "ready"
+
+
+def _refused_kill(pid, sig):
+    # Windows: signalling an exited child raises plain OSError (often
+    # PermissionError), not ProcessLookupError.
+    raise PermissionError(13, "Permission denied")
+
+
+def test_windows_oserror_on_dead_worker_still_reclaims(board, monkeypatch):
+    """An exited worker misreported by the OSError path must not defer forever."""
+    conn = board
+    tid = _live_worker_task(conn)
+    _stub_worker_liveness(monkeypatch, alive_after_kill=False)
+
+    assert kb.reclaim_task(conn, tid, reason="operator",
+                           signal_fn=_refused_kill) is True
+    after = kb.get_task(conn, tid)
+    assert after.status == "ready"                       # reclaimed without waiting for TTL
+    assert after.claim_lock is None
+
+
+def test_windows_oserror_on_live_worker_still_defers(board, monkeypatch):
+    """A live worker whose signal was denied keeps the duplicate-spawn fence."""
+    conn = board
+    tid = _live_worker_task(conn)
+    _stub_worker_liveness(monkeypatch, alive_after_kill=True)
+
+    assert kb.reclaim_task(conn, tid, reason="operator",
+                           signal_fn=_refused_kill) is False
+    after = kb.get_task(conn, tid)
+    assert after.status == "running"                     # claim held
+    assert after.claim_lock is not None

@@ -485,6 +485,11 @@ def _terminate_reclaimed_worker(
         info["terminated"] = True
         return info
     except OSError:
+        # Windows raises plain OSError (often PermissionError) for an exited
+        # child instead of ProcessLookupError: recheck liveness so a dead
+        # worker reads as terminated, while a live one whose signal was
+        # denied still reports as surviving.
+        info["terminated"] = not _worker_alive(pid, started_at)
         return info
 
     if _poll_worker_exit(pid, started_at):
