@@ -240,6 +240,40 @@ class TestBuildOAuthAuth:
         assert provider is not None
         assert provider.context.client_metadata.scope == "read write admin"
 
+    def test_explicit_scope_survives_sdk_scope_reselection(self, tmp_path, monkeypatch):
+        """mcp 2.0 re-assigns client_metadata.scope from the scopes the server's metadata
+        advertises right before registration, and again on insufficient_scope step-up (#142477);
+        an explicit oauth.scope must survive both and stay in the serialized registration body."""
+        pytest.importorskip("mcp.client.auth")
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
+        provider = build_oauth_auth("pinned", "https://example.com/mcp", {
+            "scope": "job_seeker.jobs.search offline_access",
+        })
+        assert provider is not None
+        md = provider.context.client_metadata
+        assert md.scope == "job_seeker.jobs.search offline_access"
+        # Both SDK overwrite sites (mcp/client/auth/oauth2.py Step 3 and the insufficient_scope
+        # step-up) land as plain attribute assignments on client_metadata.
+        md.scope = "employer.read employer.write offline_access"
+        assert md.scope == "job_seeker.jobs.search offline_access"
+        assert md.model_dump(exclude_none=True)["scope"] == "job_seeker.jobs.search offline_access"
+        md.client_name = "Renamed"  # only the pinned field is guarded
+        assert md.client_name == "Renamed"
+
+    def test_unset_scope_still_follows_sdk_scope_reselection(self, tmp_path, monkeypatch):
+        pytest.importorskip("mcp.client.auth")
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
+        provider = build_oauth_auth("free", "https://example.com/mcp", {})
+        assert provider is not None
+        md = provider.context.client_metadata
+        assert md.scope is None
+        md.scope = "server.advertised"  # the SDK's selection lands untouched
+        assert md.scope == "server.advertised"
+
 
     @pytest.mark.asyncio
     async def test_token_response_accepts_201_created(self, tmp_path, monkeypatch):

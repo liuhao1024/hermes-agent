@@ -1131,6 +1131,35 @@ def apply_oauth_provider_defaults(cfg: dict, *, server_name: str = "", server_ur
     return cfg
 
 
+_PINNED_SCOPE_METADATA_CLASSES: dict[type, type] = {}
+
+
+def _pinned_scope_metadata_cls(metadata_cls: type) -> type:
+    """Subclass of the SDK's ``OAuthClientMetadata`` whose instances ignore re-assignment of a
+    scope they already carry. mcp 2.0's auth flow overwrites ``client_metadata.scope`` with the
+    scopes the protected-resource / authorization-server metadata advertises right before client
+    registration, and again on an ``insufficient_scope`` step-up — both as plain attribute
+    assignments — so a configured ``oauth.scope`` never reaches the registration request or the
+    authorization URL, and servers whose registration rejects the advertised set (fewer scopes
+    than they advertise) become unconnectable (#142477). Servers without an explicit
+    ``oauth.scope`` never receive this class and keep the SDK's spec scope selection untouched."""
+    cached = _PINNED_SCOPE_METADATA_CLASSES.get(metadata_cls)
+    if cached is not None:
+        return cached
+    from pydantic import BaseModel
+
+    def _pinned_scope_setattr(self: Any, name: str, value: Any) -> None:
+        if name == "scope" and BaseModel.__getattribute__(self, "scope") is not None:
+            return
+        BaseModel.__setattr__(self, name, value)
+
+    pinned = type("PinnedScopeClientMetadata", (metadata_cls,), {
+        "__module__": __name__,
+        "__setattr__": _pinned_scope_setattr})
+    _PINNED_SCOPE_METADATA_CLASSES[metadata_cls] = pinned
+    return pinned
+
+
 def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
     """Build OAuthClientMetadata; requires ``_configure_callback_port`` first."""
     port = cfg.get("_resolved_port")
@@ -1150,6 +1179,8 @@ def _build_client_metadata(cfg: dict) -> "OAuthClientMetadata":
         "application_type": cfg.get("application_type", "native")}
     if cfg.get("scope"):
         metadata_kwargs["scope"] = cfg["scope"]
+        # Pin an explicit oauth.scope against the SDK's advertised-scope re-selection (#142477).
+        metadata_cls = _pinned_scope_metadata_cls(metadata_cls)
     try:
         return metadata_cls.model_validate(metadata_kwargs)
     except Exception:  # mcp 1.x metadata models predate SEP-837 and reject the unknown field
