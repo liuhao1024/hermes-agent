@@ -2372,8 +2372,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_health_detailed(self, request: web.Request) -> web.Response:
         """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
         from gateway.status import (
-            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
-            read_runtime_status)
+            _build_pid_record, derive_gateway_busy, derive_gateway_drainable, normalize_updated_at,
+            parse_active_agents, read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
         gw_active = parse_active_agents(runtime.get("active_agents", 0))
@@ -2383,7 +2383,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         platforms = runtime.get("platforms", {})
         if not isinstance(platforms, dict):
             platforms = {}
-        platforms = dict(platforms)
+        # Startup preserves plain entries across restarts by design, so the raw map can still
+        # carry a retired platform's "connected" row stamped by the previous, now-dead writer
+        # (#142482). Drop rows another process wrote — the same exact (pid, start_time)
+        # ownership check the /api/status aggregation applies — before projecting them for
+        # dashboards; legacy rows without writer identity predate the stamps and stay projected.
+        identity = _build_pid_record()
+        platforms = {
+            key: value for key, value in platforms.items()
+            if not isinstance(value, dict) or value.get("writer_pid") is None
+            or (value.get("writer_pid") == identity["pid"]
+                and value.get("writer_start_time") == identity["start_time"])}
         api_status = self._api_server_status_payload(heartbeat_at=time.time())
         api_platform = dict(platforms.get("api_server", {}))
         api_platform.setdefault("state", "connected" if self.is_connected else "disconnected")
