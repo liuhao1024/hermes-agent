@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import re
 import os
+import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -248,6 +250,66 @@ class TestClassifier:
         assert "window.location.origin" in js
         assert "origin_changed" in js
         assert js.index("origin_changed") < js.index("querySelectorAll")
+
+    def _run_fill_js_against_select(self, fills, options):
+        # Executes the REAL generated fill script under node against a minimal mock DOM
+        # (SELECT with the given options) and reports {filled, picked, changed}.
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is required")
+        js = build_fill_js(fills, expected_origin="https://example.com", nonce="n")
+        harness = (
+            "const select = {tagName: 'SELECT', type: 'select-one', value: '', options: "
+            + json.dumps(options) + ", events: []};\n"
+            "select.dispatchEvent = (e) => select.events.push(e.type);\n"
+            "globalThis.window = {location: {origin: 'https://example.com'}};\n"
+            "globalThis.document = {\n"
+            "  querySelector: (sel) => (sel.includes(':0') ? select : null),\n"
+            "  querySelectorAll: () => [],\n"
+            "};\n"
+            "globalThis.Event = class { constructor(t) { this.type = t; } };\n"
+            "globalThis.InputEvent = class { constructor(t) { this.type = t; } };\n"
+            "const out = " + js + ";\n"
+            "console.log(JSON.stringify({filled: JSON.parse(out).filled, picked: select.value,"
+            " changed: select.events.includes('change')}));\n"
+        )
+        proc = subprocess.run([node, "-e", harness], check=False, capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout.strip())
+
+    @pytest.mark.parametrize(
+        "option,should_match",
+        [
+            ({"value": "07/29", "textContent": "07/29"}, True),        # plain MM/YY keeps matching
+            ({"value": "", "textContent": "7 / 29"}, True),            # whitespace + no leading zero
+            ({"value": "", "textContent": "07 / 2029"}, True),         # "MM / YYYY" text
+            ({"value": "07/2029", "textContent": "07 / 2029"}, True),  # "MM/YYYY" value
+            ({"value": "", "textContent": "7/2029"}, True),            # "M/YYYY"
+            ({"value": "", "textContent": "08 / 2029"}, False),        # a different month never matches
+        ],
+    )
+    def test_fill_js_combined_expiry_select_variants(self, option, should_match):
+        #142640: the classifier derives cc-exp as MM/YY, so a combined expiry SELECT whose
+        # options read "MM / YYYY" (e.g. IXOPAY hosted checkouts) was never selected and the
+        # field counted as unfilled; two-digit-year options must keep matching.
+        out = self._run_fill_js_against_select(
+            [{"index": 0, "token": "cc-exp", "value": "07/29"}], [option]
+        )
+        assert out["filled"] == (1 if should_match else 0)
+        assert out["changed"] is should_match
+
+    def test_fill_js_combined_expiry_select_picks_the_right_option(self):
+        # A real combined-expiry dropdown lists many "MM / YYYY" options; the fill must
+        # choose the one matching the saved card, not merely find any option.
+        out = self._run_fill_js_against_select(
+            [{"index": 0, "token": "cc-exp", "value": "07/29"}],
+            [
+                {"value": "02/2028", "textContent": "02 / 2028"},
+                {"value": "07/2029", "textContent": "07 / 2029"},
+                {"value": "12/2030", "textContent": "12 / 2030"},
+            ],
+        )
+        assert out["filled"] == 1 and out["picked"] == "07/2029"
 
 
 # ---------------------------------------------------------------------------

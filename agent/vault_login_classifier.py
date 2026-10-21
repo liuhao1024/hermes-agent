@@ -307,14 +307,20 @@ _FILL_JS_TEMPLATE = """(() => {
   const fills = __FILLS__;
   const nonce = __NONCE__;
   let filled = 0;
-  const norm = (t) => String(t || "").trim().toLowerCase();
+  const norm = (t) => String(t || "").replace(/\\s+/g, "").toLowerCase();
   for (const f of fills) {
     const el = document.querySelector('[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]');
     if (!el || (f.token === "current-password" && el.type !== "password")) continue;
     try {
       if (el.tagName === "SELECT") {
         const want = norm(f.value);
-        const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
+        // combined expiry SELECTs render "MM / YYYY" options; accept those next to plain MM/YY
+        const variants = new Set([want, want.replace(/^0/, "")]);
+        if (/^\\d{2}\\/\\d{2}$/.test(want)) {
+          variants.add(want.replace(/^(\\d{2})\\/(\\d{2})$/, "$1/20$2"));
+          variants.add(want.replace(/^0(\\d)\\/(\\d{2})$/, "$1/20$2"));
+        }
+        const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => variants.has(norm(t))));
         if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
         continue;
       }
