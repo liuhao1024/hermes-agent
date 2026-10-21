@@ -155,6 +155,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         for context, app_id in sorted(required, key=str):
             matching = [r for r in runs if r["name"] == context and
                         (app_id in (None, -1) or r["app"]["id"] == app_id)]
+            matching = _newest_suite_per_app(matching)
             # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
             legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
             selected = matching + ([max(legacy, key=lambda s: s["id"])] if legacy else [])
@@ -188,6 +189,24 @@ def collect_acceptance(contract: str, published_pr: str | None,
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
+
+
+def _suite_key(run: dict) -> tuple:
+    return ((run.get("app") or {}).get("id"), (run.get("check_suite") or {}).get("id") or 0)
+
+
+def _newest_suite_per_app(runs: list) -> list:
+    """Keep each app's runs from that app's newest check suite at the head.
+
+    ``filter=latest`` dedupes only within a suite, so a re-run whose pinned merge
+    ref predates a base fix keeps its superseded verdict beside the fresh suite's
+    — and a re-run reuses the stale merge ref, so no retry can drop it. Suite id,
+    not run time, marks the newest trigger: a superseded re-run can start last.
+    """
+    newest: dict = {}
+    for app, suite in map(_suite_key, runs):
+        newest[app] = max(newest.get(app, -1), suite)
+    return [run for run in runs if _suite_key(run)[1] == newest.get(_suite_key(run)[0])]
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:

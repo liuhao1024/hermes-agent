@@ -20,10 +20,14 @@ def github(tmp_path, monkeypatch):
             state["requests"].append(self.path)
             sha = state["head"]
             if self.path == "/graphql":
+                required = (
+                    [{"context": "required"}]
+                    if state.get("unpinned")
+                    else [{"context": "required", "app": {"databaseId": 1}}]
+                )
                 value = {"data": {"repository": {"pullRequest": {
                     "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
-                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": required}}}}}}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -32,7 +36,8 @@ def github(tmp_path, monkeypatch):
                        "html_url": "https://github.com/acme/repo/actions/runs/42"}
                 if state.get("stale"):
                     run["head_sha"] = "b" * 40
-                runs = [] if state.get("missing") else [run]
+                extra = state.get("extra_runs", [])
+                runs = ([] if state.get("missing") else [run]) + extra
                 value = [{"total_count": 100 + len(runs), "check_runs": [
                     {**run, "id": 1000 + i, "name": "optional", "conclusion": "skipped"}
                     for i in range(100)]}, {"total_count": 100 + len(runs), "check_runs": runs}]
@@ -129,6 +134,58 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
             assert kb.get_task(conn, tid).status != "done"
             assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0] == 0
             github.pop("race")
+
+
+# --- #142765: a superseded check suite at the same head must not block completion ---
+
+def _suite_run(run_id, conclusion, suite_id, started_at, app_id=1):
+    return {"id": run_id, "name": "required", "head_sha": "a" * 40, "app": {"id": app_id},
+            "status": "completed", "conclusion": conclusion, "started_at": started_at,
+            "check_suite": {"id": suite_id}}
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("newest_conclusion, ok", [("success", True), ("failure", False)])
+def test_superseded_suite_at_same_head_loses_to_newest_suite(
+    github, newest_conclusion, ok
+):
+    """Two suites at one head: the older suite's re-run started last (21:28) but its
+    pinned merge ref predates the base fix, so the newest suite's verdict decides."""
+    with connect() as conn:
+        github.update(
+            extra_runs=[
+                _suite_run(50, "failure", 107521574380, "2026-10-21T21:28:00Z"),
+                _suite_run(51, newest_conclusion, 107528805675, "2026-10-21T21:10:00Z"),
+            ]
+        )
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+        assert kb.complete_task(conn, tid, result="done",
+            metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is ok
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+        assert receipt["classification"] == newest_conclusion
+        assert [c["id"] for c in receipt["checks"]] == [51]
+
+
+@pytest.mark.platforms("posix")
+def test_unpinned_context_judges_each_apps_newest_suite(github):
+    """An unpinned context accepts any app's check, but per app: app 1's newest-suite
+    failure stands even when app 2's newer suite succeeded."""
+    with connect() as conn:
+        github.update(
+            unpinned=True,
+            extra_runs=[
+                _suite_run(50, "failure", 200, "2026-10-21T21:00:00Z", app_id=1),
+                _suite_run(51, "success", 300, "2026-10-21T21:10:00Z", app_id=2),
+            ],
+        )
+        tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
+        assert not kb.complete_task(conn, tid, result="done",
+            metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+        receipt = json.loads(conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
+        assert receipt["classification"] == "failure"
+        assert {c["id"] for c in receipt["checks"]} == {50, 51}
 
 
 # --- #122689: acceptance must read the repo as the ASSIGNEE profile's gh login ---
