@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -167,6 +168,40 @@ def _is_ended_session_result(result: Any) -> bool:
             and ("has ended" in message or "session ended" in message))
 
 
+def _flatten_setup_exception(exc: BaseException) -> list[str]:
+    """Leaf messages of an MCP handshake failure, de-duplicated in order.
+
+    ``stdio_client`` wraps the real failure in an anyio TaskGroup whose str() is just
+    "unhandled errors in a TaskGroup (1 sub-exception)", so quoting only the wrapper
+    named nothing actionable (#142314). ExceptionGroups carry their leaves in
+    ``.exceptions``; duck-typing it keeps this independent of the group class."""
+    subs = getattr(exc, "exceptions", None)
+    if subs:
+        leaves: list[str] = []
+        for sub in subs:
+            leaves.extend(_flatten_setup_exception(sub))
+        return leaves or [str(exc)]
+    return [str(exc)] if str(exc) else []
+
+
+def _setup_failure_detail(exc: BaseException, stderr_tail: str) -> str:
+    """The setup error a user can act on: flattened exception + the driver's own stderr words."""
+    leaves = [m for m in _flatten_setup_exception(exc) if m.strip()]
+    detail = "; ".join(dict.fromkeys(leaves)) or type(exc).__name__
+    if stderr_tail:
+        detail += f" — driver stderr tail: {stderr_tail}"
+    return detail
+
+
+def _stderr_tail(sink, max_bytes: int = 2048) -> str:
+    """Best-effort tail of the driver's captured stderr (the child writes its own dup of the fd)."""
+    with contextlib.suppress(OSError, ValueError):
+        size = os.fstat(sink.fileno()).st_size
+        sink.seek(max(0, size - max_bytes))
+        return sink.read(min(size, max_bytes)).decode("utf-8", "replace").strip()
+    return ""
+
+
 class _CuaDriverSession:
     """Holds the mcp ClientSession. Spawned lazily; re-entered on drop. Lifecycle ownership: one long-running
     coroutine (`_lifecycle_coro`) opens the stdio_client + ClientSession contexts, populates capabilities, sets
@@ -184,6 +219,9 @@ class _CuaDriverSession:
     # call_tool. Class-level default: tests that bypass __init__ see healthy.
     # See #74799.
     _timeout_suspect = False
+    # Set alongside _setup_error when the lifecycle dies: the driver's stderr tail captured during
+    # that attempt. Class-level default keeps __new__-built tests reading a plain "".
+    _setup_error_stderr = ""
 
     def __init__(self, bridge: _AsyncBridge, embedded_daemon: Optional[Any] = None) -> None:
         self._bridge, self._embedded_daemon, self._session = bridge, embedded_daemon, None
@@ -217,6 +255,12 @@ class _CuaDriverSession:
 
         self._shutdown_event = asyncio.Event()  # built on the loop's own thread
         _t0 = _time.monotonic()
+        # The driver's real startup failure ("incompatible daemon: contract version X does not match
+        # SDK Y") lands on its stderr, never in the TaskGroup-wrapped exception. Capture it to a
+        # temporary file — a real fd, so the subprocess layer can dup2 it — and quote the tail in the
+        # setup error. Stderr no longer reaches the console logs, matching doctor, which already
+        # pipes and tails it the same way (#142314).
+        stderr_sink = tempfile.TemporaryFile()
         # Phase marker: the ready-timeout error reports HOW FAR a wedged startup got.
         # Phase marker surfaced by the ready-timeout error (issue #57025): when startup wedges, the caller
         # reports HOW FAR it got instead of an opaque "never reached ready".
@@ -233,7 +277,7 @@ class _CuaDriverSession:
             _t_manifest = _time.monotonic()
             # Telemetry policy first (default: disabled), then strip Hermes secrets.
             params = StdioServerParameters(command=command, args=args, env=_sanitize_subprocess_env(child_env))
-            async with stdio_client(params) as (read, write):
+            async with stdio_client(params, errlog=stderr_sink) as (read, write):
                 self._startup_phase = "mcp-initialize"
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -249,12 +293,14 @@ class _CuaDriverSession:
         except BaseException as e:
             # Ordinary errors and anyio CancelledError alike: start() surfaces this.
             self._setup_error = e
+            self._setup_error_stderr = _stderr_tail(stderr_sink)
             self._ready_event.set()
             raise
         finally:
             # A session that dies for ANY reason must be re-enterable: the next call sees _started False and
             # rebuilds. Atomic bool write — stop() may hold _lock.
             self._session, self._started = None, False
+            stderr_sink.close()
 
     # Reset _started so a session that dies for ANY reason (MCP connection drop, driver crash, unexpected
     # coro exit) is re-enterable: the next start()/call sees _started False and rebuilds the session instead
@@ -294,6 +340,7 @@ class _CuaDriverSession:
         """Spawn the lifecycle owner and wait for ready. Caller holds self._lock."""
         self._ready_event = threading.Event()
         self._setup_error = self._shutdown_event = None
+        self._setup_error_stderr = ""
         # The future tracks the WHOLE lifecycle; readiness is signalled via _ready_event.
         loop = self._bridge._loop
         if loop is None:
@@ -309,7 +356,10 @@ class _CuaDriverSession:
                 f"{getattr(self, '_startup_phase', 'unknown')}). Run `hermes computer-use doctor` and check "
                 f"{display_hermes_home()}/logs/agent.log for the phase timings.")
         if self._setup_error is not None:
-            raise RuntimeError(f"cua-driver session setup failed: {self._setup_error}") from self._setup_error
+            raise RuntimeError(
+                "cua-driver session setup failed: "
+                + _setup_failure_detail(self._setup_error, self._setup_error_stderr)
+            ) from self._setup_error
         self._transport_generation += 1
         if self._transport_generation > 1:
             self._notify_transport_reset()
