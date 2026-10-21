@@ -76,8 +76,48 @@ def _https_context() -> ssl.SSLContext:
     return context
 
 
+class _KeepAliveRequestMixin:
+    """Drop urllib.request's forced ``Connection: close`` header.
+
+    ``AbstractHTTPHandler.do_open`` stamps ``Connection: close`` onto every
+    request it sends, unconditionally — a header the caller supplied is simply
+    overwritten. The CDN edges in front of the asset hosts fingerprint exactly
+    that header to reset flagged egress IPs mid-transfer (#142463): every pm
+    download from such an IP dies with ``ConnectionResetError`` while curl and
+    a bare ``HTTPConnection``, neither of which sends the header, complete the
+    same URL. Removing it restores the HTTP/1.1 default (keep-alive), which is
+    what every other HTTP client puts on the wire.
+    """
+
+    def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
+        if headers:
+            headers = {name: value for name, value in headers.items()
+                       if name.title() != "Connection"}
+        return super().request(method, url, body, headers, encode_chunked=encode_chunked)
+
+
+class _KeepAliveHTTPConnection(_KeepAliveRequestMixin, http.client.HTTPConnection):
+    pass
+
+
+class _KeepAliveHTTPSConnection(_KeepAliveRequestMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _KeepAliveHTTPHandler(urllib.request.HTTPHandler):
+    # Loopback http exists for test servers; production fetches are https-only.
+    def http_open(self, req):
+        return self.do_open(_KeepAliveHTTPConnection, req)
+
+
+class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_KeepAliveHTTPSConnection, req, context=self._context)
+
+
 _OPENER = urllib.request.build_opener(
-    _HttpsRedirectHandler(), urllib.request.HTTPSHandler(context=_https_context())
+    _HttpsRedirectHandler(), _KeepAliveHTTPHandler(),
+    _KeepAliveHTTPSHandler(context=_https_context()),
 )
 
 

@@ -426,3 +426,32 @@ def test_download_reports_a_hold_that_never_releases(dl_server, tmp_path, monkey
     with pytest.raises(RuntimeError, match="could not be renamed into place"):
         dl.run()
     assert not dest.exists()
+
+
+@pytest.mark.parametrize("honors_range", [True, False], ids=["ranged", "single-stream"])
+def test_requests_leave_the_default_keep_alive_fingerprint(dl_server, tmp_path, monkeypatch, honors_range):
+    """urllib.request forces "Connection: close" onto every request (AbstractHTTPHandler.
+    do_open), and the CDN edges in front of the asset hosts fingerprint exactly that header
+    to reset flagged egress IPs mid-body (#142463) — while curl and a bare HTTPConnection,
+    which send no Connection header at all, complete the same URLs. Every request a download
+    makes — probe, ranged worker, or single stream — must carry the HTTP/1.1 default
+    fingerprint instead of the close one."""
+    _Handler.no_range = not honors_range
+    seen = []
+    original = _Handler.do_GET
+
+    def respond(handler):
+        seen.extend(handler.headers.get_all("Connection") or ["<no Connection header>"])
+        original(handler)
+
+    monkeypatch.setattr(_Handler, "do_GET", respond)
+    body = _payload(64, b"transport")
+    _Handler.payloads["/asset"] = body
+    dest = tmp_path / "asset"
+
+    Download([Source(_url(dl_server, "/asset"), dest, _sha(body))],
+             partials_dir=tmp_path / "partials", connections=2).run()
+
+    assert dest.read_bytes() == body
+    assert seen, "no request reached the server"
+    assert not any("close" in value.lower() for value in seen)
