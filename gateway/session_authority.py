@@ -1100,6 +1100,26 @@ class SessionAuthority:
             return True
         return False
 
+    async def _settle_conflicted_head(self, ref):
+        """A preclaim ``admission_conflict`` is a durable verdict: the queued head's route or
+        binding no longer matches the store (a #54878 routing self-heal left it behind, a retired
+        hosted room), so every later drain refuses the same head again and the session id strands
+        for good (#142731). Settle that one row as cancelled — the successors revalidate on their
+        own merits — instead of pausing the FIFO behind it."""
+        first = next((row for row in list_session_admissions(self.db, session_id=ref.session_id)
+                      if row['status'] == 'queued'), None)
+        if first is None:
+            return False
+        try:
+            row = await asyncio.to_thread(cancel_session_input, self.db, epoch=self.epoch,
+                                          admission_id=first['admission_id'])
+        except RuntimeStoreError:
+            return False  # claimed or steering meanwhile: that turn owns the head now
+        if (row['status'], row['outcome']) != ('terminal', 'cancelled'):
+            return False
+        self._settle_cancelled(ref, first['admission_id'])
+        return True
+
     async def _claim_with_retry(self, ref, live):
         """The drain's next ``(row, first)``, waiting out transient storage and a classic turn on the
         route; None when the drain must exit (paused, or stopping with committed rows left queued)."""
@@ -1114,6 +1134,8 @@ class SessionAuthority:
                     from gateway.session_unattended_unknown import settle_unattended_unknown
                     if await settle_unattended_unknown(self, ref):
                         continue
+                if exc.reason == 'admission_conflict' and await self._settle_conflicted_head(ref):
+                    continue
                 import logging
                 logging.getLogger(__name__).warning('Session %s paused: %s', ref.session_id, exc.reason)
                 self._pause(ref, exc.reason)
