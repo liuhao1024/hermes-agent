@@ -163,21 +163,39 @@ def _launchctl_label_supervising_process(label: str) -> bool:
 def _retry_launchctl_bootstrap_until_registered(
     domain: str, plist_path, label: str, *, deadline: float
 ) -> bool:
-    """Retry ``_launchctl_bootstrap`` until the label supervises a process or ``deadline`` passes. Under
-    load bootstrap can fail even after bootout, during a drain (default 180s) — ~10s is too short."""
+    """Retry until the label supervises a process or ``deadline`` passes. Under load bootstrap can
+    fail even after bootout, during a drain (default 180s) — ~10s is too short. Bootstrap only
+    registers an on-demand job (no RunAtLoad/KeepAlive, per-user domain — launchd starts nothing
+    at load), so once a bootstrap has succeeded the label is kickstarted instead of re-bootstrapped:
+    bootstrap on a registered label EIOs into a bootout that still leaves nothing running, until
+    the deadline (#142741). A failed kickstart drops back to bootstrap so the plist is reloaded."""
     attempt = 0
+    bootstrapped = False
     while True:
         attempt += 1
+        verb = "kickstart" if bootstrapped else "bootstrap"
         try:
-            _gw()._launchctl_bootstrap(domain, plist_path, label, timeout=30)
+            if bootstrapped:
+                _gw()._launchd_kickstart(label, domain)
+            else:
+                _gw()._launchctl_bootstrap(domain, plist_path, label, timeout=30)
+                bootstrapped = True
             if _gw()._launchctl_label_supervising_process(label):
                 return True
-            outcome = f"exited 0 but {domain}/{label} has no supervised process (launchctl list)"
+            outcome = (
+                f"exited 0 but {domain}/{label} has no supervised process (launchctl list)"
+                if verb == "bootstrap"
+                else f"ran for {domain}/{label} but no supervised process appeared (launchctl list)"
+            )
         except subprocess.CalledProcessError as exc:
             outcome = f"failed (rc={exc.returncode}) for {domain}/{label}"
+            bootstrapped = False
         except subprocess.TimeoutExpired:
             outcome = f"timed out for {domain}/{label}"
-        _gw()._append_launchd_reload_log(f"bootstrap attempt {attempt} {outcome} — retrying")
+            bootstrapped = False
+        _gw()._append_launchd_reload_log(
+            f"{verb} attempt {attempt} {outcome} — retrying"
+        )
         if time.monotonic() >= deadline:
             return False
         time.sleep(2)
