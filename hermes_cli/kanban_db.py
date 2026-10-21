@@ -536,6 +536,39 @@ def _explicit_board_intent_pinned() -> bool:
     return explicit_board_intent_is_pinned()
 
 
+def _fence_conflicts_with_explicit_board(
+    pin: str, slug: str, default_parts: tuple[str, ...], leaf: str,
+) -> bool:
+    """Whether a dispatcher fence pins this resolver to a board other than the
+    one the caller explicitly named.
+
+    Machine flows (:func:`pin_first_board_resolution`) never conflict here:
+    their enumerated slug is not caller intent — the notifier/dispatcher sweep
+    maps every slug to the pin by design. Only the dispatcher's own fences
+    (workers, delegated children/descendants) reject a cross-board request,
+    which used to resolve silently onto the pinned board (#142435).
+
+    Board identity comes from ``HERMES_KANBAN_BOARD`` (the dispatcher names the
+    pinned board there; the pin file may live anywhere, e.g. a test or migrated
+    root, so paths alone cannot prove "same board"). Without it the explicit
+    slug's own resolution is compared to the pin path."""
+    from agent.delegation_context import explicit_board_intent_is_pinned
+
+    if not explicit_board_intent_is_pinned():
+        return False
+    pinned_slug = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip()
+    if pinned_slug:
+        try:
+            return _normalize_board_slug(pinned_slug) != _normalize_board_slug(slug)
+        except ValueError:
+            pass  # unusable pinned slug: fall back to the path comparison
+    explicit = (
+        kanban_home().joinpath(*default_parts) if slug == DEFAULT_BOARD
+        else board_dir(slug) / leaf
+    )
+    return os.path.realpath(Path(pin).expanduser()) != os.path.realpath(explicit)
+
+
 def _board_path(
     env_var: Optional[str], board: Optional[str], default_parts: tuple[str, ...], leaf: str,
 ) -> Path:
@@ -545,11 +578,21 @@ def _board_path(
     user-facing cross-board intent (CLI ``--board``, a model tool's ``board=``)
     is honored, but machine flows that enumerate boards (gateway notifier /
     watcher / dispatcher ticks) and dispatched or delegated workers keep
-    resolving through the pin. Without explicit intent the ``env_var`` override
+    resolving through the pin. A fenced caller naming a DIFFERENT board is
+    rejected instead of silently landing on the pin (#142435): same board is
+    fine, another board fails with a PermissionError the worker can relay.
+    Without explicit intent the ``env_var`` override
     pins the file, else legacy ``<root>/<default_parts>`` for the ``default``
     board, else ``board_dir(slug)/leaf``."""
     pin = os.environ.get(env_var, "").strip() if env_var else ""
     slug = _explicit_board_slug(board)
+    if pin and slug is not None and _fence_conflicts_with_explicit_board(pin, slug, default_parts, leaf):
+        pinned = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip() or str(Path(pin))
+        raise PermissionError(
+            f'explicit board "{slug}" is fenced off in this dispatched worker '
+            f'(pinned to "{pinned}"); ask the owner/orchestrator outside the '
+            f'worker to act on board "{slug}"'
+        )
     if pin and (slug is None or _explicit_board_intent_pinned()):
         return Path(pin).expanduser()
     if slug is None:
