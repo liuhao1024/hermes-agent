@@ -258,10 +258,14 @@ def clear_completion(root: Path) -> None:
     _completion_attempts_path(root).unlink(missing_ok=True)
 
 
-def refuse_foreign_owned_venv(project_root: Path) -> None:
-    """Refuse cross-user mutation before PM changes the selected environment (#83529)."""
+def _foreign_owned_path(project_root: Path) -> tuple[Path, int] | None:
+    """``(path, owner_uid)`` for the first install path another uid owns, else None.
+
+    The passive probe behind :func:`refuse_foreign_owned_venv` (#83529): callers
+    that would only retry a refusal use it to skip the attempt up front.
+    """
     if not hasattr(os, "geteuid"):
-        return
+        return None
     uid = os.geteuid()  # windows-footgun: ok — guarded POSIX ownership check
     root = Path(project_root)
     # A root-run update on a user's checkout is not safe even if a fresh
@@ -283,10 +287,38 @@ def refuse_foreign_owned_venv(project_root: Path) -> None:
         except FileNotFoundError:
             continue
         if owner != uid:
-            raise RuntimeError(
-                f"refusing to update {root}: {path} is owned by uid {owner}, "
-                f"not the current uid {uid}; repair ownership before retrying"
-            )
+            return path, owner
+    return None
+
+
+def refuse_foreign_owned_venv(project_root: Path) -> None:
+    """Refuse cross-user mutation before PM changes the selected environment (#83529)."""
+    foreign = _foreign_owned_path(project_root)
+    if foreign is None:
+        return
+    path, owner = foreign
+    raise RuntimeError(
+        f"refusing to update {Path(project_root)}: {path} is owned by uid {owner}, "
+        f"not the current uid {os.geteuid()}; repair ownership before retrying"
+    )
+
+
+def _explain_foreign_owned(root: Path, foreign: tuple[Path, int]) -> None:
+    """One non-failure line for a launch on an install another uid owns (#143047).
+
+    The refusal is deterministic — no relaunch by this user can succeed — so the
+    completion is skipped, not retried; the previously installed generation still
+    activates, exactly as a failed sync degrades.
+    """
+    import sys
+
+    _, owner = foreign
+    print(
+        f"hermes: {root} is owned by uid {owner}, not the current uid {os.geteuid()}; "
+        "ask its owner or an administrator to run `hermes update` — "
+        "continuing with the installed dependencies",
+        file=sys.stderr, flush=True,
+    )
 
 
 #: The completion tails import the CLI (so prepare_launch) while the pending marker is armed.
@@ -411,6 +443,13 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
         # noise (the record's age tracks the wait), leaving the marker armed.
         pass
     elif not owed_to_cli and (not current or pending.is_file()):
+        # A checkout another uid owns (#143047, a shared root-mode install) can
+        # never be completed from this account: attempting it on every launch
+        # only re-prints the refusal. The passive probe decides before the lock.
+        foreign = _foreign_owned_path(root)
+        if foreign is not None:
+            _explain_foreign_owned(root, foreign)
+            return None
         # The marker alone first (a process the live update spawned runs under its claim and
         # inherits no checkout lock); install_root still names the checkout whose held lock
         # keeps a dead update's marker (R6: refused as held, never reclaimed).

@@ -503,3 +503,42 @@ def test_supervised_launch_with_stale_dependencies_still_syncs(
     assert syncs, "a supervised child booted on a stale dependency graph without syncing"
     assert completion_tail, "the tail armed by that sync was never finished"
     assert not venv_sync.completion_pending_path(root).is_file()
+
+
+def test_the_foreign_owned_probe_names_the_first_foreign_path(tmp_path, monkeypatch):
+    """The passive probe behind refuse_foreign_owned_venv: same verdict, no raise."""
+    root = _self_checkout(tmp_path, monkeypatch)
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1, raising=False)
+    assert venv_sync._foreign_owned_path(root) == (root, os.stat(root).st_uid)
+    with pytest.raises(RuntimeError, match="refusing to update"):
+        venv_sync.refuse_foreign_owned_venv(root)
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid, raising=False)
+    assert venv_sync._foreign_owned_path(root) is None
+
+
+def test_a_foreign_owned_checkout_degrades_instead_of_retrying(
+    tmp_path, monkeypatch, completion_tail, capsys
+):
+    """A shared root-mode install (#143047): the UID refusal is deterministic, so
+    launching must not re-attempt the completion and re-print the failure every
+    time. Each launch degrades to the installed generation with one explanatory
+    line — no sync, no tail, no relaunch."""
+    import pm
+
+    root = _self_checkout(tmp_path, monkeypatch)
+    monkeypatch.setattr(venv_sync, "_foreign_owned_path", lambda root: (root, 0))
+    monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)
+    syncs = []
+    monkeypatch.setattr(pm, "sync_venv", lambda *a, **kw: syncs.append(a))
+
+    for _ in range(3):
+        assert venv_sync.prepare_launch(root, []) is None
+
+    assert syncs == [], "a launch whose checkout another uid owns re-attempted the sync"
+    assert len(completion_tail) == 0
+    lines = capsys.readouterr().err.strip().splitlines()
+    assert len(lines) == 3, "each launch must print the explanation exactly once"
+    assert all("owned by uid 0" in line for line in lines)
+    assert all("administrator" in line for line in lines)
+    assert not any("completion failed" in line for line in lines)
