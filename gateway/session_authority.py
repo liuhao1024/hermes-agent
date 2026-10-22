@@ -161,6 +161,10 @@ class SessionAuthority:
         self.retired = False
         self._classic_evict_at = {}  # route -> last leaked/reaped-slot eviction check (monotonic)
         self.executing = {}  # session id -> generation whose execution is in progress (publish fence)
+        # session id -> last generation whose execution returned ahead of its settlement commit:
+        # the admission still reads ``started`` in that window, but a Stop for it must not reach
+        # the route's live agent (the NEXT claim's, on own-agent runs) — interrupt latches instead.
+        self.executing_returned = {}
         # session id -> end_reason of a last-viewer close still waiting for an idle FIFO
         # (gateway/session_viewer_close); a viewer attaching again cancels it.
         self.pending_closes = {}
@@ -874,8 +878,17 @@ class SessionAuthority:
             with live.event_stream.lock:
                 adopted_generation, agent = self.adopted.get(ref.session_id, (None, None))
                 if adopted_generation != generation:
-                    agent = self.agent(ref)
-                    if not self._runs_own_agent(ref):
+                    # A generation whose execution already returned (its settlement can lag, the
+                    # admission still reading ``started``) must not take the route's live agent:
+                    # own-agent runs (/v1/runs) install theirs at creation, before adoption, so
+                    # the resident agent there is the NEXT claim's and a Stop delivered to it
+                    # kills that turn instead (#143290). Latch for adopt_agent, which fires a
+                    # latched Stop for this exact generation only.
+                    if self.executing_returned.get(ref.session_id) == generation:
+                        agent = None
+                    else:
+                        agent = self.agent(ref)
+                    if agent is None or not self._runs_own_agent(ref):
                         # Accepted for this exact claim before its turn adopted an agent: whatever agent
                         # the turn adopts for this generation must not run the work as if no Stop arrived.
                         self.pending_stops[ref.session_id] = generation
@@ -1159,6 +1172,10 @@ class SessionAuthority:
                 return await execute_finite_admission(self, ref, row), 'completed'
             finally:
                 with live.event_stream.lock:
+                    # Returned before its settlement commits: the admission still reads ``started``,
+                    # but a Stop for this generation must latch now (see interrupt), not reach the
+                    # route's live agent — on own-agent runs that slot is the NEXT claim's already.
+                    self.executing_returned[ref.session_id] = row['generation']
                     self.executing.pop(ref.session_id, None)
         except ManagedExecutionUnknown:
             with live.event_stream.lock:
@@ -1167,6 +1184,7 @@ class SessionAuthority:
             self.pending_stop_causes.pop(ref.session_id, None)
             self.pending_steers.pop(ref.session_id, None)
             self.adopted.pop(ref.session_id, None)
+            self.executing_returned.pop(ref.session_id, None)
             # An automation turn nobody waits on settles here, at the exit that fenced it (GW-10),
             # so the followers already queued run in this drain; a person's turn still pauses.
             from gateway.session_unattended_unknown import settle_unattended_unknown
@@ -1291,6 +1309,7 @@ class SessionAuthority:
                 self.pending_stop_causes.pop(ref.session_id, None)
                 self.pending_steers.pop(ref.session_id, None)
                 self.adopted.pop(ref.session_id, None)
+                self.executing_returned.pop(ref.session_id, None)
                 from gateway.session_queued_controls import publish_transfers
                 publish_transfers(self, ref, row['generation'])
                 if settled is None:
