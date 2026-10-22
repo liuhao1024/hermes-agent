@@ -57,6 +57,26 @@ class TestGetToolset:
         finally:
             del TOOLSETS["_mergetest"]
 
+    def test_plugin_and_mcp_alias_with_same_name_are_merged(self, monkeypatch):
+        # A plugin toolset and an MCP server sharing one bare name: the server registers a
+        # bare alias to its `mcp-<name>` toolset; the plugin toolset must union those tools
+        # in instead of shadowing them, while the canonical `mcp-<name>` stays independently
+        # selectable (#143162).
+        reg = ToolRegistry()
+        reg.register(name="c2c_approve_knock", toolset="c2c",
+                     schema=_make_schema("c2c_approve_knock", "Knock"), handler=_dummy_handler)
+        reg.register(name="mcp__c2c__send", toolset="mcp-c2c",
+                     schema=_make_schema("mcp__c2c__send", "Send"), handler=_dummy_handler)
+        reg.register_toolset_alias("c2c", "mcp-c2c")
+        monkeypatch.setattr("tools.registry.registry", reg)
+
+        ts = get_toolset("c2c")
+        assert ts is not None
+        assert {"c2c_approve_knock", "mcp__c2c__send"} <= set(ts["tools"])
+
+        assert set(resolve_toolset("c2c")) == {"c2c_approve_knock", "mcp__c2c__send"}
+        assert resolve_toolset("mcp-c2c") == ["mcp__c2c__send"]
+
 class TestResolveToolset:
 
     def test_cycle_detection(self):

@@ -310,6 +310,14 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[dict[st
         registry_toolset = name
         alias = _display_alias(name, _get_registry_toolset_aliases())
         description = f"MCP server '{alias}' tools" if alias else f"Plugin toolset: {name}"
+        tools = registry.get_tool_names_for_toolset(registry_toolset)
+        # An MCP server named like a plugin toolset registers a bare alias to its ``mcp-<name>``
+        # toolset; union it so the plugin toolset cannot shadow the server's tools behind the shared
+        # bare name — the same merge the static branch above applies for built-in names (#143162).
+        alias_target = registry.get_toolset_alias_target(name)
+        if alias_target and alias_target != name:
+            tools = sorted(set(tools) | set(registry.get_tool_names_for_toolset(alias_target)))
+        return {"description": description, "tools": tools, "includes": []}
     else:
         registry_toolset = registry.get_toolset_alias_target(name)
         if not registry_toolset:
