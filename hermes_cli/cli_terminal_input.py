@@ -600,3 +600,66 @@ def _collect_query_images(query: str | None, image_arg: str | None = None) -> tu
         images.append(explicit_path)
 
     return message, list(dict.fromkeys(images))
+
+
+def enter_is_mid_paste_stream(shell) -> bool:
+    """Whether this Enter key event sits inside a machine-fed input stream (paste without
+    bracketed-paste, IME or dictation) and must become a newline, not a submit (#10994).
+
+    In-window alone is not enough: that also matches the tail of human typing — one
+    character per keypress with gaps above the window — whose Enter is a real submit.
+    Stock Windows Terminal sends Enter and Shift+Enter as the same byte, so a WT user's
+    newline keys all arrive in the submit handler; swallowing their submit Enter too made
+    multi-line input unsendable (#142927). The LAST change must itself carry machine-pace
+    evidence: a multi-character insert (whole-chunk paste) or a chain of changes closer
+    together than the window.
+    """
+    from hermes_cli.cli_tui_mixin import _RAPID_INPUT_ENTER_WINDOW_S
+    last_change = getattr(shell, "_tui_last_text_change", 0.0)
+    machine_paced = (
+        getattr(shell, "_tui_last_change_was_multi", False)
+        or last_change - getattr(shell, "_tui_prev_text_change", 0.0) < _RAPID_INPUT_ENTER_WINDOW_S
+    )
+    return time.monotonic() - last_change < _RAPID_INPUT_ENTER_WINDOW_S and machine_paced
+
+
+def composer_text_changed(shell, buf) -> None:
+    """Fallback paste collapse for terminals without bracketed paste.
+
+    Either heuristic triggers: many characters added in one event (paste delivered in one
+    tick), or the newline count jumped by 4+ (terminals that feed characters individually
+    but batch newlines; Alt+Enter adds 1 newline per event so never trips it).
+    """
+    shell._tui_prev_text_change = getattr(shell, "_tui_last_text_change", 0.0)
+    shell._tui_last_change_was_multi = len(buf.text) - getattr(shell, "_tui_prev_text_len", 0) > 1
+    shell._tui_last_text_change = time.monotonic()
+    from cli import _strip_leaked_bracketed_paste_wrappers, _strip_leaked_terminal_responses_with_meta
+    text = _strip_leaked_bracketed_paste_wrappers(buf.text)
+    text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(text)
+    if _had_mouse_reports:
+        shell._recover_terminal_input_modes(reason="mouse reports leaked into prompt buffer")
+    if text != buf.text:
+        cursor = min(buf.cursor_position, len(text))
+        shell._tui_paste_just_collapsed = True
+        buf.text = text
+        buf.cursor_position = cursor
+        shell._tui_prev_text_len = len(text)
+        shell._tui_prev_newline_count = text.count('\n')
+        return
+    chars_added = len(text) - shell._tui_prev_text_len
+    shell._tui_prev_text_len = len(text)
+    if shell._tui_paste_just_collapsed or shell._skip_paste_collapse:
+        shell._tui_paste_just_collapsed = False
+        shell._skip_paste_collapse = False
+        shell._tui_prev_newline_count = text.count('\n')
+        return
+    line_count = text.count('\n')
+    newlines_added = line_count - shell._tui_prev_newline_count
+    shell._tui_prev_newline_count = line_count
+    is_paste = chars_added > 1 or newlines_added >= 4
+    if (
+        shell._tui_paste_over_threshold(text, line_count, "paste_collapse_threshold_fallback")
+        and is_paste
+        and not text.startswith('/')):
+        buf.text = shell._tui_collapse_paste(text, line_count, fallback=True)
+        buf.cursor_position = len(buf.text)

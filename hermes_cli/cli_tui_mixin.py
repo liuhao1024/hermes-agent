@@ -1390,6 +1390,7 @@ class CLITuiMixin:
             _apply_backslash_line_continuation,
             _is_backslash_line_continuation,
             _looks_like_slash_command)
+        from hermes_cli.cli_terminal_input import enter_is_mid_paste_stream
         if self._tui_enter_overlay(event):
             return
         buf = event.app.current_buffer
@@ -1408,8 +1409,9 @@ class CLITuiMixin:
         # Paste without bracketed-paste (tmux strips it) and IME/voice dictation deliver each
         # newline as its own Enter key event; the buffer collapse in _tui_on_text_changed only
         # sees whole-chunk pastes. Text still arriving (<50 ms since the last change) means this
-        # Enter is a line break inside one message, not a submit (#10994).
-        if time.monotonic() - getattr(self, "_tui_last_text_change", 0.0) < _RAPID_INPUT_ENTER_WINDOW_S:
+        # Enter is a line break inside one message, not a submit (#10994) — but only with
+        # machine-pace evidence; human typing's Enter is a real submit (#142927).
+        if enter_is_mid_paste_stream(self):
             buf.insert_text("\n")
             return
         text = raw_text.strip()
@@ -1715,37 +1717,8 @@ class CLITuiMixin:
         tick), or the newline count jumped by 4+ (terminals that feed characters individually
         but batch newlines; Alt+Enter adds 1 newline per event so never trips it).
         """
-        self._tui_last_text_change = time.monotonic()
-        from cli import _strip_leaked_bracketed_paste_wrappers, _strip_leaked_terminal_responses_with_meta
-        text = _strip_leaked_bracketed_paste_wrappers(buf.text)
-        text, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(text)
-        if _had_mouse_reports:
-            self._recover_terminal_input_modes(reason="mouse reports leaked into prompt buffer")
-        if text != buf.text:
-            cursor = min(buf.cursor_position, len(text))
-            self._tui_paste_just_collapsed = True
-            buf.text = text
-            buf.cursor_position = cursor
-            self._tui_prev_text_len = len(text)
-            self._tui_prev_newline_count = text.count('\n')
-            return
-        chars_added = len(text) - self._tui_prev_text_len
-        self._tui_prev_text_len = len(text)
-        if self._tui_paste_just_collapsed or self._skip_paste_collapse:
-            self._tui_paste_just_collapsed = False
-            self._skip_paste_collapse = False
-            self._tui_prev_newline_count = text.count('\n')
-            return
-        line_count = text.count('\n')
-        newlines_added = line_count - self._tui_prev_newline_count
-        self._tui_prev_newline_count = line_count
-        is_paste = chars_added > 1 or newlines_added >= 4
-        if (
-            self._tui_paste_over_threshold(text, line_count, "paste_collapse_threshold_fallback")
-            and is_paste
-            and not text.startswith('/')):
-            buf.text = self._tui_collapse_paste(text, line_count, fallback=True)
-            buf.cursor_position = len(buf.text)
+        from hermes_cli.cli_terminal_input import composer_text_changed
+        composer_text_changed(self, buf)
 
     def _tui_handle_prompt_stash(self, event):
         """Ctrl+S: composer has content → push onto the stash and clear; empty + one stashed →
