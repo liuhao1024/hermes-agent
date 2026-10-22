@@ -303,9 +303,15 @@ def check_resume_policy(args, snapshot):
     if not requested:
         return
     info = snapshot.get("info") if isinstance(snapshot, dict) else None
-    frozen = dict((info or {}).get("launch_request") or {})
+    frozen_request = (info or {}).get("launch_request") or {}
+    frozen = dict(frozen_request)
     if info and "cwd" in info:
         frozen["cwd"] = info["cwd"]
+    if info is not None and not frozen_request:
+        # A session stored before launch requests were recorded (pre-v0.22.4) froze no route:
+        # the first explicit flags stand as its launch, they don't differ from nothing. ``cwd``
+        # stays comparable when the info still carries one.
+        requested = {key: value for key, value in requested.items() if key in frozen}
     if "model" in requested and requested["model"] == frozen.get("model_requested"):
         requested["model"] = frozen.get("model")  # the alias the owner resolved at creation
     elif "model" in requested and requested["model"] != frozen.get("model") and "model_requested" not in frozen:

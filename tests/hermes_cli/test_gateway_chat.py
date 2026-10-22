@@ -31,6 +31,20 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
     assert calls == []
 
 
+def test_pre_policy_session_resume_accepts_explicit_flags():
+    """A session stored before launch requests were recorded (pre-v0.22.4) froze no route:
+    every explicit flag is that session's first launch value, not a difference from nothing."""
+    from hermes_cli import gateway_chat
+    legacy = {"info": {"cwd": "/w"}}  # no launch_request: the session predates the freeze
+    gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=1000, model="m",
+                                                        toolsets="file", query="x"), legacy)
+    # A session whose launch was recorded still refuses a differing value; repeats pass.
+    frozen = {"info": {"launch_request": {"source": "cli", "max_turns": 1000}, "cwd": "/w"}}
+    gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=1000, query="x"), frozen)
+    with pytest.raises(gateway_chat.GatewayClientError):
+        gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", max_turns=5, query="x"), frozen)
+
+
 def test_refusals_name_the_replacement_and_a_runnable_safe_mode_example(monkeypatch, capsys):
     """An exit-2 refusal tells the user where every refused flag went; the safe-mode
     refusal prints a command they can run as-is."""

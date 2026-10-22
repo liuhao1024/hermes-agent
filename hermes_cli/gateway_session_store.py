@@ -510,6 +510,8 @@ def _check_resume_launch(launch, snapshot):
         fields["toolsets"] = ",".join(str(item) for item in fields["toolsets"])
     check_resume_policy(argparse.Namespace(**fields), snapshot)
     frozen = ((snapshot.get("info") or {}).get("launch_request") or {})
+    if not frozen:
+        return  # a session stored before launch requests were recorded froze nothing to differ from
     differs = [key for key, value in _classic_only_policy(launch).items() if frozen.get(key) != value]
     if differs:
         raise resume_policy_error(differs)
