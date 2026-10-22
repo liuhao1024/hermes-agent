@@ -191,10 +191,17 @@ def restore_local_session(authority, sid):
     else:
         with store._lock:
             current = store._entry_locked(route)
-            if current is None or (current.session_id not in receipt.get('lineage', [sid])
-                                   and not _stray_route_target(authority, receipt, current.session_id)):
+            if current is not None and current.session_id not in receipt.get('lineage', [sid]) \
+                    and not _stray_route_target(authority, receipt, current.session_id):
                 raise RuntimeStoreError('admission_conflict')
-            current.session_id = target
+            if current is None:
+                # A route the loaded store cannot see (a legacy scope, a pruned row) is the
+                # receipt's to heal while live exactly as on a cold restore: refusing here wedges
+                # every later claim on admission_conflict until a restart (#142844).
+                entry.origin = source
+                store._entries[route] = entry
+            else:
+                current.session_id = target
     return SessionRef(authority.profile_id, sid)
 
 
