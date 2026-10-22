@@ -959,6 +959,27 @@ class TestClassifyApiError:
         )
         assert gated.reason != FailoverReason.reasoning_mandatory
 
+    def test_vllm_chat_template_level_rejection_is_reasoning_mandatory(self):
+        """A vLLM host serving a chat template whose level set is narrower than the OpenAI schema
+        layer rejects an enabled ``medium`` by value with ``param: null`` and no "one of" wording
+        (#143247: DeepSeek V4.1 accepts low/high/xhigh/max, dies on medium/minimal). Before, this
+        matched no reasoning rule, classified as format_error and every turn silently fell back;
+        now it is a level rejection — the main loop drops the effort for the session and retries
+        (an omitted field is a 200 on that route), instead of abandoning a healthy model."""
+        from agent.error_classifier import is_reasoning_field_rejection, is_reasoning_level_rejection
+
+        body = {"error": {"message": "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, "
+                                     "or an integer within [1, 100] in chat_template_kwargs",
+                          "type": "BadRequestError", "param": None, "code": 400}}
+        msg = f"Error code: 400 - {body}"
+        assert is_reasoning_level_rejection(msg)
+        assert not is_reasoning_field_rejection(msg)
+        result = classify_api_error(MockAPIError(msg, status_code=400, body=body), provider="custom",
+                                    model="dsk-41-flash-1017")
+        assert result.reason == FailoverReason.reasoning_mandatory
+        assert result.retryable is True and result.should_fallback is False
+        assert result.should_compress is False
+
     def test_structured_invalid_reasoning_effort_400_never_compresses(self):
         """A custom Responses relay rejects an unsupported ``reasoning.effort`` with a message-less
         structured 400 (``param`` + ``error_code: invalid_reasoning_effort``, #100536). No wording rule

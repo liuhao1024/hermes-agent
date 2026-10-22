@@ -541,21 +541,37 @@ _REASONING_REQUIRED_MARKERS = (
 # without these markers the title lane fails outright instead of retrying at the floor.
 _REASONING_LEVEL_REJECTION_MARKERS = ("must be one of", "invalid value for")
 
+# A vLLM chat template whose set is narrower than the OpenAI schema layer rejects an out-of-set
+# level the same way but drops the "one of": "DeepSeek V4.1 reasoning_effort must be low, high,
+# xhigh, max, or an integer within [1, 100] in chat_template_kwargs" (#143247; ``param`` is
+# ``null`` so no structured rule can match). The trailing ","/"or" after the first level is the
+# enum tell — a paired-field constraint ("must be 'none' when 'enable_thinking' is false") has a
+# plain "when" tail and keeps its own class.
+_REASONING_LEVEL_ENUM_RE = re.compile(
+    r"must be\s+(?:one of[:\s]+)?['\"]?(?:none|off|minimal|low|medium|high|xhigh|max|ultra|an integer)"
+    r"['\"]?\s*(?:,|\bor\b)"
+)
+
 
 def is_reasoning_level_rejection(error_msg: str) -> bool:
     """Provider 400 rejecting the *value* of a reasoning wire control against the endpoint's closed
     level set ("'reasoning_effort' must be one of: 'minimal', 'low', …", Alibaba token-plan /
-    DashScope routes, code ``invalid_parameter_error``). The reasoning-field token must be present
-    next to the wording — a 400 enum complaint about some other field is not this class. The field is
-    understood and has to stay on the wire; only the disabled level ("none") is invalid, so the
-    recovery is the floor step-up in the auxiliary ladder and the disable-drop in the main loop, not
-    the strip rung and not an abort to the fallback chain."""
+    DashScope routes, code ``invalid_parameter_error``; or "reasoning_effort must be low, high,
+    xhigh, max, …" with ``param: null`` from a vLLM chat template narrower than the OpenAI schema
+    layer, #143247). The reasoning-field token must be present next to the wording — a 400 enum
+    complaint about some other field is not this class. The field is understood and has to stay on
+    the wire; only the disabled level ("none") is invalid, so the recovery is the floor step-up in
+    the auxiliary ladder and the disable-drop in the main loop, not the strip rung and not an abort
+    to the fallback chain."""
     msg = (error_msg or "").lower()
     token = _REASONING_FIELD_TOKEN.search(msg)
     if token is None:
         return False
     near = msg[max(0, token.start() - 48):token.end() + 96]
-    return any(m in near for m in _REASONING_LEVEL_REJECTION_MARKERS)
+    return (
+        any(m in near for m in _REASONING_LEVEL_REJECTION_MARKERS)
+        or _REASONING_LEVEL_ENUM_RE.search(near) is not None
+    )
 
 
 def is_reasoning_required_rejection(error_msg: str) -> bool:
