@@ -3380,6 +3380,33 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             await self._await_disconnect_step(task, _DISCONNECT_STEP_TIMEOUT, label)
         setattr(self, attr, None)
 
+    async def stop_inbound(self) -> None:
+        """Drain-time inbound stop: bounded ``updater.stop()`` only, egress untouched (#143122).
+
+        The gateway drain calls this while the message handler is still installed, so the
+        updates already fetched (their offset is acked — Telegram will not redeliver) get
+        dispatched and admitted instead of hitting the handler-less drop in the gap before
+        the real disconnect. Fence the polling lifecycle first: heartbeat/verifier/reconnect
+        paths must read the stopped updater as intentional teardown, not a wedged fetcher
+        to resurrect. ``disconnect()`` repeats the fence and the bounded stop harmlessly.
+        """
+        if self._teardown_started or self._webhook_mode:
+            return
+        app = self._app
+        updater = getattr(app, "updater", None) if app else None
+        if not updater or not getattr(updater, "running", False):
+            return
+        self._polling_teardown_started = True
+        self._polling_progress_accepting = False
+        self._polling_generation = getattr(self, "_polling_generation", 0) + 1
+        self._polling_progress_event = asyncio.Event()
+        try:
+            await _await_with_thread_deadline(updater.stop(), timeout=_UPDATER_STOP_TIMEOUT)
+        except Exception:
+            logger.warning(
+                "[%s] stop_inbound updater.stop() did not complete; the disconnect step retries it",
+                self.name, exc_info=True)
+
     async def disconnect(self) -> None:
         """Stop polling/webhook, cancel pending delayed deliveries, and disconnect."""
         # Mark disconnected first so the drop guard short-circuits any flush that wins the race.

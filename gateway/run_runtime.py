@@ -610,6 +610,23 @@ async def drain_gateway_runtime(runner):
         del descriptor['drain_reason']  # stopping now: no client attaches to answer anymore
     from gateway.session_hosted_service import stop_hosted_service
     await stop_hosted_service(runner)
+    # Close the inbound window BEFORE withdrawing the handlers: adapters that fetch
+    # (long-poll) get their fetcher stopped while the handler is still installed, so an
+    # update already in flight — its offset is acked, the server will not redeliver —
+    # is admitted (and settled by the stop sequence) instead of silently dropped in the
+    # gap before the adapter disconnect (#143122). Egress stays connected for already
+    # admitted work; a failed stop cannot block the drain — the disconnect retries it.
+    # getattr-guard: only fetcher adapters implement the seam (Telegram); shutdown-path
+    # doubles may lack it entirely.
+    for adapters in [runner.adapters, *getattr(runner, '_profile_adapters', {}).values()]:
+        for adapter in list(adapters.values()):
+            stop_inbound = getattr(adapter, 'stop_inbound', None)
+            if not callable(stop_inbound):
+                continue
+            try:
+                await stop_inbound()
+            except Exception:
+                logger.warning('stop_inbound(%s) failed during drain; continuing', adapter.name, exc_info=True)
     # Withdraw the public ingress callback without disconnecting egress needed
     # by already admitted work. Base adapters refuse before stamping acceptance.
     for adapter in runner.adapters.values():
