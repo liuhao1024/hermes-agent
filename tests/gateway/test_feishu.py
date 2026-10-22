@@ -1299,6 +1299,86 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_proactive_send_in_thread_uses_reply_api_not_thread_id_create(self):
+        """Regression for #142955: a proactive send targeting a topic thread
+        (no reply anchor) must not call message.create with
+        receive_id_type="thread_id" — Feishu rejects that with 99992402.
+        It should anchor on the thread's latest message via the reply API."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        calls = {"list": 0, "create": 0, "reply": 0}
+        captured = {}
+
+        class _MessageAPI:
+            def list(self, request):
+                calls["list"] += 1
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(items=[SimpleNamespace(message_id="om_thread_last")]),
+                )
+
+            def create(self, request):
+                calls["create"] += 1
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_created"))
+
+            def reply(self, request):
+                calls["reply"] += 1
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_replied"))
+
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI())))
+
+        result = asyncio.run(
+            adapter.send(chat_id="oc_chat", content="hello", metadata={"thread_id": "omt_thread"})
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls["list"], 1)
+        self.assertEqual(calls["reply"], 1)
+        self.assertEqual(calls["create"], 0)
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_proactive_send_in_thread_falls_back_to_chat_root_when_thread_empty(self):
+        """When a topic thread has no fetchable message, a proactive send must
+        fall back to a chat-root create (receive_id_type="chat_id"),
+        never receive_id_type="thread_id"."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        calls = {"list": 0, "create": 0, "reply": 0}
+        captured = {}
+
+        class _MessageAPI:
+            def list(self, request):
+                calls["list"] += 1
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(items=[]))
+
+            def create(self, request):
+                calls["create"] += 1
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_root"))
+
+            def reply(self, request):
+                calls["reply"] += 1
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_replied"))
+
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI())))
+
+        result = asyncio.run(
+            adapter.send(chat_id="oc_chat", content="hello", metadata={"thread_id": "omt_thread"})
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls["list"], 1)
+        self.assertEqual(calls["reply"], 0)
+        self.assertEqual(calls["create"], 1)
+        self.assertEqual(captured["request"].receive_id_type, "chat_id")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_send_uses_post_for_every_chunk_of_multi_chunk_markdown(self):
         """Regression for #26841: when a long Markdown message is split
         across multiple chunks, every chunk must go out as
