@@ -325,6 +325,7 @@ def test_icacls_tree_fallback_walks_the_tree_once(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     outside.mkdir()
     (home / "dirty" / "jn").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(hermes_dir_acl, "_pywin32_importable", lambda: False)
     monkeypatch.setattr(hermes_dir_acl, "_grant_with_pywin32", _no_pywin32)
     monkeypatch.setattr(hermes_dir_acl, "_whoami_sid", lambda: "S-1-5-21-1-2-3-1001")
     calls = []
@@ -341,6 +342,54 @@ def test_icacls_tree_fallback_walks_the_tree_once(tmp_path, monkeypatch):
     assert sorted(p.relative_to(home).as_posix() for p in calls) == clean
     assert sorted(p.relative_to(tmp_path).as_posix() for p in skipped) == ["home", "home/dirty", "home/dirty/jn"]
     assert failed == [] and granted == len(clean)
+
+
+def test_tree_grant_streams_the_walk_when_the_native_writer_is_importable(elevated_windows, monkeypatch):
+    """#143124: a real home holds half a million entries and materialising the walk cost ~1.6 GB
+    before the first grant. When pywin32 resolves, the walk is granted as it yields: the first
+    grant happens while the walk is still running. A link (or hard link) is still neither granted
+    nor entered, and every granted entry keeps its expected-path pin."""
+    home, outside, touched = elevated_windows
+    (home / "sessions").mkdir()
+    (home / "sessions" / "s.json").write_text("{}")
+    (home / "sessions" / "jn").symlink_to(outside, target_is_directory=True)
+    (home / "hardlink.exe").hardlink_to(outside / "app.exe")
+    monkeypatch.setattr(hermes_dir_acl, "_pywin32_importable", lambda: True)
+    walk_finished = []
+    real_iter = hermes_dir_acl.iter_tree_without_reparse_points
+
+    def streaming_iter(root, skipped):
+        yield from real_iter(root, skipped)
+        walk_finished.append(True)  # only once the walk is exhausted
+
+    monkeypatch.setattr(hermes_dir_acl, "iter_tree_without_reparse_points", streaming_iter)
+    native = hermes_dir_acl._grant_with_pywin32
+    first_grant_before_walk_finished = []
+    monkeypatch.setattr(hermes_dir_acl, "_grant_with_pywin32",
+                        lambda p, *a, **k: (first_grant_before_walk_finished.append(not walk_finished),
+                                            native(p, *a, **k)))
+
+    granted, skipped, failed = hermes_dir_acl.grant_tree_user_access(home, elevated=True)
+
+    assert first_grant_before_walk_finished[0] is True, "the walk was materialised before granting"
+    assert _escapes(touched, outside) == [] and failed == []
+    assert sorted(p.name for p in skipped) == ["hardlink.exe", "jn"]
+    assert granted == 3  # home, sessions, s.json
+
+
+def test_streaming_tree_grant_reports_progress(elevated_windows, monkeypatch):
+    """#143124: the repair sat between `Code updated!` and the gateway restart printing nothing for
+    30+ minutes; the streaming shape reports (granted, skipped, failed) every N grants."""
+    home, _outside, _touched = elevated_windows
+    for i in range(3):
+        (home / f"d{i}").mkdir()
+    monkeypatch.setattr(hermes_dir_acl, "_pywin32_importable", lambda: True)
+    monkeypatch.setattr(hermes_dir_acl, "_TREE_GRANT_PROGRESS_EVERY", 2)
+    seen = []
+    granted, _skipped, _failed = hermes_dir_acl.grant_tree_user_access(
+        home, elevated=True, progress=lambda g, s, f: seen.append((g, s, f)))
+    assert granted == 4  # home + d0..d2
+    assert seen == [(2, 0, 0), (4, 0, 0)]
 
 
 def _no_pywin32(*_a, **_k):

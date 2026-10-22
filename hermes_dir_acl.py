@@ -338,14 +338,38 @@ def iter_tree_without_reparse_points(root: str | Path, skipped: list[Path]) -> I
                 yield child, False
 
 
+def _pywin32_importable() -> bool:
+    """Whether the native writer's imports all resolve here. Decides the tree repair's shape: only
+    the icacls fallback's write propagates into a subtree, so it needs the whole-tree link map and
+    the walk is materialised for it; the native repair streams instead (#143124)."""
+    try:
+        import ntsecuritycon
+        import win32api
+        import win32file
+        import win32security
+    except ImportError:
+        return False
+    return True
+
+
+_TREE_GRANT_PROGRESS_EVERY = 10_000  # a real home holds half a million entries: ~56 lines over ~30 min
+
+
 def grant_tree_user_access(root: str | Path, *, pin_root: bool = False,
-                           elevated: bool | None = None) -> tuple[int, list[Path], list[tuple[Path, str]]]:
+                           elevated: bool | None = None,
+                           progress=None) -> tuple[int, list[Path], list[tuple[Path, str]]]:
     """Recursive :func:`grant_user_access` (the elevated post-update repair): grant the token's user
     full control on *root* and every directory and file under it, inheriting on directories.
 
     With *pin_root*, *root* is the operator's own choice (``HERMES_HOME``) and may itself be a link:
     it is resolved once and the walk runs below the real directory. A link BELOW it is still never
     entered or granted through.
+
+    With the native writer importable the walk is consumed as it yields (a real home holds half a
+    million entries, and materialising them cost ~1.6 GB before the first grant, #143124); the
+    icacls fallback still materialises once, for its whole-tree link map. *progress*, when given,
+    is called with ``(granted, skipped, failed)`` counts every ``_TREE_GRANT_PROGRESS_EVERY`` grants
+    (streaming shape only), so a long repair can show it is moving.
 
     Returns ``(granted, skipped, failed)``: *skipped* are the reparse points (and hard-linked files)
     that were neither granted nor entered, *failed* the ``(path, reason)`` grants that raised. A
@@ -354,8 +378,13 @@ def grant_tree_user_access(root: str | Path, *, pin_root: bool = False,
         return 0, [], []
     root = Path(os.path.realpath(root) if pin_root else os.path.abspath(root))
     skipped: list[Path] = []
-    entries = list(iter_tree_without_reparse_points(root, skipped))
-    granted, skipped, failed = _grant_entries(root, os.path.realpath(root), entries, skipped)
+    if _pywin32_importable():
+        granted, failed = _grant_entries_streaming(root, os.path.realpath(root),
+                                                   iter_tree_without_reparse_points(root, skipped),
+                                                   skipped, progress)
+    else:
+        entries = list(iter_tree_without_reparse_points(root, skipped))
+        granted, skipped, failed = _grant_entries(root, os.path.realpath(root), entries, skipped)
     if skipped:
         log.warning("Elevated ACL repair skipped %d junction/symlink/hard-link entr%s under %s (never "
                     "granted through): %s", len(skipped), "y" if len(skipped) == 1 else "ies", root,
@@ -387,6 +416,28 @@ def _grant_entries(root: Path, real_root: str, entries: list[tuple[Path, bool]],
         else:
             granted += 1
     return granted, skipped, failed
+
+
+def _grant_entries_streaming(root: Path, real_root: str, entries: Iterator[tuple[Path, bool]],
+                             skipped: list[Path], progress=None) -> tuple[int, list[tuple[Path, str]]]:
+    """The native-writer form of :func:`_grant_entries`, consuming the walk as it yields instead of
+    materialising it: a real home holds half a million entries and the ``list`` cost ~1.6 GB before
+    the first grant (#143124). Only the icacls fallback's write propagates into a subtree, so it is
+    the one that needs the whole-tree link map; here each entry is granted through the same
+    :func:`_grant` gate (lstat re-check, never through a link) as it is walked."""
+    granted, failed = 0, []
+    for path, is_dir in entries:
+        try:
+            _grant(path, is_dir, os.path.join(real_root, *path.relative_to(root).parts))
+        except ReparsePointRefused:
+            skipped.append(path)
+        except Exception as exc:  # health: allow BLE001 -- pywintypes.error is not an OSError; keep going like /C
+            failed.append((path, str(exc) or type(exc).__name__))
+        else:
+            granted += 1
+            if progress is not None and granted % _TREE_GRANT_PROGRESS_EVERY == 0:
+                progress(granted, len(skipped), len(failed))
+    return granted, failed
 
 
 # Dir OBJECTS this elevated process already granted, as ``(path, volume serial, file id)`` from

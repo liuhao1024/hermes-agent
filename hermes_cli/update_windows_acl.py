@@ -2,6 +2,7 @@
 user back access to the home tree that run may have left Administrators-only (#139870, #134889 W8).
 Split from ``update_cmd_maint.py``."""
 import logging
+import sys
 
 logger = logging.getLogger("hermes_cli.update_cmd")
 
@@ -18,6 +19,10 @@ def repair_windows_home_acl(*, elevated: bool | None = None) -> None:
     same-user junction inside the home would have turned the elevated grant into full
     control of e.g. ``C:\\Program Files\\X``.
 
+    The repair walks every entry under the home and on a large one runs for minutes
+    (#143124); it prints what it is doing and a running count (stderr reaches the user:
+    the completion child's streams are both attached to the terminal).
+
     *elevated* is the host fact (default: probed; False on every host but an elevated Windows one).
     """
     from hermes_dir_acl import grant_tree_user_access, process_is_elevated
@@ -28,9 +33,17 @@ def repair_windows_home_acl(*, elevated: bool | None = None) -> None:
     from hermes_constants import get_hermes_home
 
     home = get_hermes_home()
+    print(f"  ⏳ Windows ACL repair: restoring your user access under {home} — this walks every "
+          "entry and can take minutes on a large home (progress below)", file=sys.stderr, flush=True)
+
+    def _progress(granted: int, skipped: int, failed: int) -> None:
+        print(f"     {granted} entries granted, {skipped} links skipped, {failed} failed ...",
+              file=sys.stderr, flush=True)
+
     # The home itself is the operator's choice and may be a link: pin its real directory and walk
     # below it (links beneath are still never followed).
-    granted, skipped, failed = grant_tree_user_access(home, pin_root=True, elevated=True)
+    granted, skipped, failed = grant_tree_user_access(home, pin_root=True, elevated=True,
+                                                      progress=_progress)
     if failed and not granted:
         path, reason = failed[0]
         raise RuntimeError(f"could not restore user access to {home}: {path}: {reason}")
@@ -39,6 +52,7 @@ def repair_windows_home_acl(*, elevated: bool | None = None) -> None:
         # silent success that leaves stranded state stranded.
         why = f"{skipped[0]} is a junction, symlink or hard link" if skipped else "nothing was walkable"
         raise RuntimeError(f"could not restore user access to {home}: nothing was repaired ({why})")
+    print(f"  ✅ Windows ACL repair: {granted} entries under {home}", file=sys.stderr, flush=True)
     if failed:
         # Like icacls /C: keep going, report the first few; the step stays owed only when nothing took.
         logger.warning("Restoring user access under %s failed for %d entr%s, e.g. %s: %s", home, len(failed),

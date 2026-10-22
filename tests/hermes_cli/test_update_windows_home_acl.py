@@ -84,3 +84,20 @@ def test_repair_that_repaired_nothing_stays_owed(monkeypatch, tmp_path):
     (tmp_path / "home").symlink_to(tmp_path / "gone", target_is_directory=True)  # dangling
     with pytest.raises(RuntimeError, match="nothing was repaired"):
         maint.repair_windows_home_acl()
+
+
+def test_repair_prints_what_it_is_doing(monkeypatch, tmp_path, capsys):
+    """#143124: the repair walked 562k entries for 30+ minutes between `Code updated!` and the
+    gateway restart printing nothing, indistinguishable from a hang. It now says what it is
+    doing, reports a running count, and announces the finished repair."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "state").mkdir()
+    _fake_elevated(monkeypatch, tmp_path)
+    monkeypatch.setattr(hermes_dir_acl, "_pywin32_importable", lambda: True)
+    monkeypatch.setattr(hermes_dir_acl, "_TREE_GRANT_PROGRESS_EVERY", 2)
+    maint.repair_windows_home_acl(elevated=True)
+    out = capsys.readouterr().err
+    assert "restoring your user access" in out
+    assert "2 entries granted, 0 links skipped, 0 failed" in out
+    assert "2 entries under" in out  # the finished repair: home + state
