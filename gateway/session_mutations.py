@@ -37,9 +37,35 @@ def _authorize_import(authority, actor, ref, params):
     return tuple(item['session']['id'] for item in normalized)
 
 
+def _unclaimed_row_metadata(conn, authority, sid, actor):
+    """Whether *sid* is a cold row no restore chain claims, so a metadata edit (rename/archive/
+    sidebar) edits the row itself instead of dying on the session gate's mount (#143110): a retired
+    WebUI install's ``source='webui'`` rows are self-keyed and name no ``Platform``, so the local,
+    routed and API restores all refuse them. Rows a chain could still claim keep the gate — this
+    verdict mirrors ``SessionAuthority.authorize``'s three loaders. A stamped owner keeps its row
+    (``authorize_history``'s rule), and another profile's row is not ours to edit."""
+    from gateway.session_route_recovery import _messaging_platform
+    row = conn.execute('SELECT source,user_id,chat_id,profile_name FROM sessions WHERE id=?', (sid,)).fetchone()
+    if row is None or str(row['chat_id'] or '').startswith('local-'):
+        return False
+    if _messaging_platform(row['source']) is not None:
+        return False
+    from hermes_state_local import API_BINDING_PREFIX, POLICY_PREFIX
+    from hermes_state_local_migration import LEGACY_PREFIX
+    if conn.execute('SELECT 1 FROM state_meta WHERE key IN (?,?,?)',
+                    (POLICY_PREFIX + sid, LEGACY_PREFIX + sid, API_BINDING_PREFIX + sid)).fetchone():
+        return False
+    from hermes_state_mutation_binding import _login_label, _owner_user
+    if _owner_user(dict(row)) and row['user_id'] not in (actor.subject, _login_label(actor.subject)):
+        raise RuntimeStoreError('permission_denied')
+    return row['profile_name'] in (None, '', authority.db._own_profile_name() or 'default')
+
+
 def _authorize_control(authority, actor, ref, params, owner=None):
-    """Control authorization; True when the session is cold history the write must claim. *owner* is
-    ``_owner_ref``'s answer when the caller already resolved it (one read per mutation, not two)."""
+    """Control authorization; True when the session is cold history the write must claim, ``'row'``
+    when a metadata edit names an unclaimed cold row the write edits directly (no live session).
+    *owner* is ``_owner_ref``'s answer when the caller already resolved it (one read per mutation,
+    not two)."""
     from hermes_state_mutation_retirement import has_mutation_receipt
     if actor.profile_id != authority.profile_id or ref.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
@@ -56,6 +82,9 @@ def _authorize_control(authority, actor, ref, params, owner=None):
                 from gateway.session_local_migration import require_history_claim
                 require_history_claim(authority, conn, actor, ref.session_id)
                 cold_history = authorize_history(conn, actor, ref.session_id)
+                if (not cold_history and params.get('operation') in _METADATA
+                        and _unclaimed_row_metadata(conn, authority, ref.session_id, actor)):
+                    return 'row'
         if not cold_history:
             if params.get('operation') == 'delete':
                 # The read gate mounts a cold row first, so the check below sees what it is.
@@ -174,7 +203,8 @@ async def _mutate_session(authority, actor, ref, params, *, commit_lock=None, ow
             raise RuntimeStoreError('permission_denied')
 
     return await write_mutation(authority, ref, params, editor_servers, principal_id=actor.subject,
-                                authorize_write=authorize_write if cold_history or operation == 'import' else None,
+                                authorize_write=authorize_write if (cold_history is True
+                                                                    or operation == 'import') else None,
                                 commit_lock=commit_lock)
 
 
