@@ -12,7 +12,7 @@ import asyncio
 import pytest
 
 # Import-time update recovery stats the checkout's git dir; collection runs before the home I/O guard.
-import gateway.session_managed_worker  # noqa: F401
+import gateway.session_managed_worker
 
 
 @pytest.mark.asyncio
