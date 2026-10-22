@@ -33,6 +33,7 @@ from hermes_cli.observability.shared_metrics_loop import record_browser_call
 _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "BROWSER_USE_API_KEY",
     "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_BROWSER_TTL",
+    "AGENT_BROWSER_EXECUTABLE_PATH",
 )
 
 

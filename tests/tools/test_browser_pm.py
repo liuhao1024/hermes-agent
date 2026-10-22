@@ -193,6 +193,69 @@ def test_external_chromium_override_survives_pm_composition(browser_store, monke
     assert session._agent_browser_command_env(str(tmp_path))["AGENT_BROWSER_EXECUTABLE_PATH"] == str(override)
 
 
+def test_routed_scope_executable_beats_pm_and_launch_override(browser_store, monkeypatch, tmp_path):
+    """A served profile's scoped AGENT_BROWSER_EXECUTABLE_PATH is the renderer the daemon
+    launches, not PM's shared Chromium and not the launch profile's process-wide override (#143170)."""
+    from agent.secret_scope import (
+        reset_multiplex_context, reset_secret_scope, set_multiplex_context, set_secret_scope,
+    )
+
+    _, _, publish = browser_store
+    pm_chromium = publish("chromium")
+    renderer = tmp_path / "served renderer"
+    renderer.write_bytes(b"renderer")
+    monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", str(tmp_path / "launch renderer"))
+    mux = set_multiplex_context(True)
+    scope = set_secret_scope(
+        {"AGENT_BROWSER_EXECUTABLE_PATH": str(renderer)},
+        profile_home=str(tmp_path / "served-home"),
+    )
+    try:
+        env = session._agent_browser_command_env(str(tmp_path / "socket"))
+    finally:
+        reset_secret_scope(scope)
+        reset_multiplex_context(mux)
+    assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(renderer)
+    assert env["AGENT_BROWSER_EXECUTABLE_PATH"] != str(pm_chromium)
+
+
+def test_routed_scope_executable_miss_falls_back_to_pm_not_launch_override(browser_store, monkeypatch, tmp_path):
+    """A served profile that configures no renderer of its own gets PM's Chromium — never the
+    launch profile's process-wide override leaking across the routed boundary (#143170)."""
+    from agent.secret_scope import (
+        reset_multiplex_context, reset_secret_scope, set_multiplex_context, set_secret_scope,
+    )
+
+    _, _, publish = browser_store
+    pm_chromium = publish("chromium")
+    monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", str(tmp_path / "launch renderer"))
+    mux = set_multiplex_context(True)
+    scope = set_secret_scope({}, profile_home=str(tmp_path / "served-home"))
+    try:
+        env = session._agent_browser_command_env(str(tmp_path / "socket"))
+    finally:
+        reset_secret_scope(scope)
+        reset_multiplex_context(mux)
+    assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(pm_chromium)
+
+
+def test_single_profile_scoped_executable_reaches_command_env(browser_store, monkeypatch, tmp_path):
+    """On a single-profile install the profile's scoped renderer wins over PM's Chromium too —
+    the override no longer has to ride the process environment (#143170)."""
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+
+    _, _, publish = browser_store
+    publish("chromium")
+    renderer = tmp_path / "profile renderer"
+    renderer.write_bytes(b"renderer")
+    scope = set_secret_scope({"AGENT_BROWSER_EXECUTABLE_PATH": str(renderer)})
+    try:
+        env = session._agent_browser_command_env(str(tmp_path / "socket"))
+    finally:
+        reset_secret_scope(scope)
+    assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(renderer)
+
+
 def test_restricted_path_discovers_external_browser_without_execution(browser_store, monkeypatch, tmp_path):
     _, store, _ = browser_store
     external_bin = tmp_path / "external-homebrew" / "bin"

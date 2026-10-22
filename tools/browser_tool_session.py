@@ -184,10 +184,28 @@ def _agent_browser_command_env(socket_dir: str) -> dict[str, str]:
     env["PATH"] = _install._merge_browser_path(env.get("PATH", ""))
     env = env_for("agent-browser", base_env=env)
     from hermes_cli.browser_runtime import chromium_executable
+    from agent.secret_scope import current_secret_scope, get_secret, serves_routed_profile
 
-    executable = chromium_executable()
-    if executable:
-        env["AGENT_BROWSER_EXECUTABLE_PATH"] = executable
+    # The renderer resolves through the active profile's scope, not the process env or PM's
+    # restamp: a routed profile's pick comes from its bound scope only, and without one it
+    # runs PM's shared Chromium — never the launch profile's process-wide override, which
+    # the child-env snapshot carries (#143170).
+    routed = serves_routed_profile()
+    scoped_executable = (
+        (current_secret_scope() or {}).get("AGENT_BROWSER_EXECUTABLE_PATH") if routed
+        else get_secret("AGENT_BROWSER_EXECUTABLE_PATH")
+    )
+    if scoped_executable:
+        env["AGENT_BROWSER_EXECUTABLE_PATH"] = scoped_executable
+    elif routed:
+        env.pop("AGENT_BROWSER_EXECUTABLE_PATH", None)
+        executable = chromium_executable(allow_override=False)
+        if executable:
+            env["AGENT_BROWSER_EXECUTABLE_PATH"] = executable
+    elif "AGENT_BROWSER_EXECUTABLE_PATH" not in env:
+        executable = chromium_executable()
+        if executable:
+            env["AGENT_BROWSER_EXECUTABLE_PATH"] = executable
     env["AGENT_BROWSER_SOCKET_DIR"] = socket_dir
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in env:
         env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(_daemon_idle_timeout_seconds() * 1000)
