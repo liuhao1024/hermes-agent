@@ -588,6 +588,36 @@ class TestHappyEyeballsSocketConnect:
             with pytest.raises(RuntimeError, match="racer bug"):
                 racer(("127.0.0.1", 1), 1.0)
 
+    def test_empty_source_host_binds_the_family_wildcard_like_the_stdlib(self, monkeypatch):
+        """``source_address=("", 0)`` — what paho-mqtt always passes — is the stdlib's
+        "unspecified host": stock create_connection binds it verbatim (the C resolver's
+        AI_PASSIVE wildcard), it is never a name to look up. The racer resolving it died
+        with gaierror on Linux and grabbed the loopback on macOS, so MQTT connects from
+        inside a Hermes process failed before a single SYN left the machine (#142908)."""
+        hb = _fresh_import()
+        real_getaddrinfo = socket.getaddrinfo
+
+        def linux_like_getaddrinfo(host, *args, **kwargs):
+            if host == "":  # glibc: an empty name is not resolvable (EAI_NONAME)
+                raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+            return real_getaddrinfo(host, *args, **kwargs)
+
+        monkeypatch.setattr(hb.socket, "getaddrinfo", linux_like_getaddrinfo)
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+        try:
+            for source in (("", 0), ("0.0.0.0", 0)):  # the paho default, and the literal workaround
+                winner = socket.create_connection(("127.0.0.1", port), 5.0, source)
+                try:
+                    assert winner.getpeername()[1] == port
+                finally:
+                    winner.close()
+        finally:
+            listener.close()
+
 
 @pytest.mark.skipif(
     sys.platform != "linux" or not (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc"),

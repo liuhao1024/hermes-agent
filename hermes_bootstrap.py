@@ -78,10 +78,18 @@ def _happy_eyeballs_create_connection(address: tuple[str, int], timeout: float |
         candidate = socket.socket(family, socktype, proto)
         try:
             if source_address is not None:
-                local_infos = socket.getaddrinfo(source_address[0], source_address[1], family=family, type=socktype)
-                if not local_infos:
-                    raise OSError(f"getaddrinfo returned no local {family} address for {source_address[0]}")
-                candidate.bind(local_infos[0][4])
+                local_host, local_port = source_address
+                if local_host:
+                    local_infos = socket.getaddrinfo(local_host, local_port, family=family, type=socktype)
+                    if not local_infos:
+                        raise OSError(f"getaddrinfo returned no local {family} address for {local_host}")
+                    candidate.bind(local_infos[0][4])
+                else:
+                    # "" is the stdlib's "unspecified host" (paho-mqtt always passes ("", 0)):
+                    # stock create_connection binds it verbatim, where the C resolver expands it
+                    # to the family wildcard via AI_PASSIVE. Resolving it here instead died with
+                    # gaierror on Linux and grabbed the loopback on macOS (#142908).
+                    candidate.bind(("", local_port))
             candidate.setblocking(False)
             result = candidate.connect_ex(sockaddr)
             if result in (0, errno.EISCONN):
