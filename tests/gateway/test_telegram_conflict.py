@@ -115,14 +115,50 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_conflict_retry_drops_pending_updates(monkeypatch):
-    """Conflict recovery must use drop_pending_updates=True (#75017).
+async def test_conflict_retry_preserves_pending_updates_by_default(monkeypatch):
+    """Default config: conflict recovery waits out the stale session instead of
+    dropping the queue (#143123). The destructive takeover only runs for setups
+    that opted into dropping the offline queue.
+    """
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    adapter.set_fatal_error_handler(AsyncMock())
+    adapter._drain_polling_connections = AsyncMock()
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    captured = {}
+
+    async def fake_start_polling(**kwargs):
+        captured["drop_pending_updates"] = kwargs.get("drop_pending_updates")
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    adapter._app = SimpleNamespace(updater=updater)
+
+    conflict = type("Conflict", (Exception,), {})
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+
+    assert captured.get("drop_pending_updates") is False, (
+        "Conflict retry must preserve the pending queue when "
+        "drop_pending_on_cold_boot is false (the default, #143123)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_conflict_retry_takes_over_queue_when_dropping_opted_in(monkeypatch):
+    """extra.drop_pending_on_cold_boot=true: conflict recovery uses
+    drop_pending_updates=True (#75017).
 
     Without this, each retry starts a new getUpdates session that
     immediately gets 409'd by the previous still-expiring session,
     creating the very conflict we are trying to recover from.
     """
-    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    adapter = TelegramAdapter(PlatformConfig(
+        enabled=True, token="***", extra={"drop_pending_on_cold_boot": True}))
     adapter.set_fatal_error_handler(AsyncMock())
     adapter._drain_polling_connections = AsyncMock()
     monkeypatch.setattr("asyncio.sleep", AsyncMock())

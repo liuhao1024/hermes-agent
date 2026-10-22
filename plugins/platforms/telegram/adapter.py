@@ -697,11 +697,12 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         self._status_indicator_enabled: bool = bool(extra.get("status_indicator", False))
         self._status_online_text: str = str(extra.get("status_online", "Online"))
         self._status_offline_text: str = str(extra.get("status_offline", "Offline"))
-        # Cold-boot queue: drop server-side pending updates on first boot (default True,
-        # preserves historical behaviour). Set extra.drop_pending_on_cold_boot: false to
-        # receive messages sent while the gateway was offline (e.g. nightly-off hosts).
+        # Cold-boot queue: preserve server-side pending updates on a cold boot (default False,
+        # #143123) so messages sent while the gateway was offline are delivered on the next boot.
+        # Set extra.drop_pending_on_cold_boot: true to restore the historical drop-on-boot
+        # behaviour (a restart means "clean up" — fits always-on servers with stale queues).
         # Watcher reconnects always preserve the queue regardless of this setting.
-        self._drop_pending_on_cold_boot: bool = self._coerce_bool_extra("drop_pending_on_cold_boot", True)
+        self._drop_pending_on_cold_boot: bool = self._coerce_bool_extra("drop_pending_on_cold_boot", False)
         self._dm_topics_config: list[dict[str, Any]] = extra.get("dm_topics", [])
         # chat_ids with DM topics configured (O(1) root-DM ignore check)
         self._dm_topic_chat_ids: set[str] = {str(e["chat_id"]) for e in self._dm_topics_config if "chat_id" in e}
@@ -2432,9 +2433,20 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             # hasn't expired server-side yet) or our own previous retry's still-expiring session. Without
             # this, each retry starts a new getUpdates session that immediately gets 409'd by the previous
             # one, creating the very conflict we are trying to recover from (#75017).
+            # The takeover is also destructive — it discards whatever the pending queue holds — so it
+            # only runs when the user opted into dropping the offline queue. Queue-preserving setups
+            # (the default since #143123) wait out the zombie session instead; a conflict that never
+            # clears escalates to the existing fatal guidance ("another process is using this token").
+            drop_for_takeover = self._drop_pending_on_cold_boot
+            if not drop_for_takeover:
+                logger.info(
+                    "[%s] Conflict retry %d/%d preserving the pending queue while waiting out the stale "
+                    "getUpdates session (platforms.telegram.extra.drop_pending_on_cold_boot: false). If "
+                    "conflicts persist, another process may be using this bot token.",
+                    self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES)
             self._polling_conflict_recovery_generation = expected_generation
             try:
-                await self._start_polling_once(app, drop_pending_updates=True, error_callback=self._polling_error_callback_ref)
+                await self._start_polling_once(app, drop_pending_updates=drop_for_takeover, error_callback=self._polling_error_callback_ref)
                 logger.info(
                     "[%s] Telegram polling restarted after conflict retry %d/%d; health pending getUpdates progress",
                     self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES)
@@ -3100,7 +3112,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         """Whether THIS connection asks Telegram to discard its queued updates.
 
         A watcher reconnect always preserves them (#46621); a cold boot follows
-        ``platforms.telegram.extra.drop_pending_on_cold_boot`` (default true). The decision is logged
+        ``platforms.telegram.extra.drop_pending_on_cold_boot`` (default false, #143123 — messages
+        queued while offline are delivered on boot). The decision is logged
         on every cold boot — a command that never ran is otherwise invisible (#71811)."""
         drop_pending = self._drop_pending_on_cold_boot if not is_reconnect else False
         if not is_reconnect:
@@ -3172,8 +3185,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect via long polling, or a webhook server if ``TELEGRAM_WEBHOOK_URL`` is set.
 
-        ``is_reconnect``: False = cold boot (drop the Bot API queue unless
-        ``extra.drop_pending_on_cold_boot`` is false); True = watcher reconnect (preserve
+        ``is_reconnect``: False = cold boot (preserve the Bot API queue unless
+        ``extra.drop_pending_on_cold_boot`` is true); True = watcher reconnect (preserve
         queued updates, else every message sent during the outage is lost). Webhook env:
         TELEGRAM_WEBHOOK_URL, TELEGRAM_WEBHOOK_PORT (8443), TELEGRAM_WEBHOOK_HOST,
         TELEGRAM_WEBHOOK_SECRET."""
