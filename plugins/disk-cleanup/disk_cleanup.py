@@ -12,6 +12,7 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone, UTC
 from pathlib import Path
@@ -110,6 +111,9 @@ _EMPTY_DIR_PROTECTED_TOP_LEVEL = frozenset({
     "patches", "projects", "skins", "themes", "contributors",
     # Per-profile user trees bootstrapped by ``profiles.py::_PROFILE_DIRS`` (#112859).
     "workspace", "plans", "home",
+    # Persistent Docker/singularity terminal sandboxes bind-mount their durable user
+    # workspace from here; empty dirs inside are the agent's working tree (#143104).
+    "sandboxes",
     # Kanban owns its own lifecycle (workspaces GC'd at terminal state, attachments live with the task).
     "kanban"})
 
@@ -128,9 +132,31 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     # per-profile user trees bootstrapped by ``profiles.py::_PROFILE_DIRS`` (#112859).
     "patches", "projects", "skins", "themes", "contributors",
     "profiles", "backups", "optional-skills", "workspace", "plans", "home",
+    # ``sandboxes`` is the persistent terminal sandbox storage root: in persistent Docker mode
+    # /workspace and /root bind-mount from ``{HERMES_HOME}/sandboxes/docker/<profile>/``, so
+    # test_* deliverables there are the user's durable tree, not session scratch (#143104).
+    # Non-persistent mode removes the bind dirs itself via DockerEnvironment.cleanup().
+    "sandboxes",
     # Kanban task attachments/workspaces have their own lifecycle; test_* staging files there are
     # not disposable (#114552).
     "kanban"})
+
+
+def _sandbox_dir() -> Path:
+    """Host-side sandbox storage root; mirror of ``tools/environments/base.py::get_sandbox_dir``
+    (kept local so the plugin does not import the terminal backend stack). ``TERMINAL_SANDBOX_DIR``
+    overrides ``{HERMES_HOME}/sandboxes`` and may name any other directory under HERMES_HOME."""
+    custom = os.environ.get("TERMINAL_SANDBOX_DIR")
+    return Path(custom) if custom else get_hermes_home() / "sandboxes"
+
+
+def _inside_sandbox_dir(resolved: Path) -> bool:
+    """True for *resolved* paths on/below the sandbox storage root (#143104): the persistent
+    terminal bind tree is user workspace wherever ``TERMINAL_SANDBOX_DIR`` points."""
+    with contextlib.suppress(ValueError, OSError):
+        resolved.relative_to(_sandbox_dir().resolve())
+        return True
+    return False
 
 
 def _is_protected_dir(p: Path) -> bool:
@@ -414,6 +440,10 @@ def guess_category(path: Path) -> Optional[str]:
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
         if top in _NEVER_TRACK_TOP_LEVEL or _is_protected_dir(path):
+            return None
+        if _inside_sandbox_dir(path.resolve()):
+            # Custom ``TERMINAL_SANDBOX_DIR`` may name any other dir under HERMES_HOME;
+            # the sandbox bind tree is durable user workspace there too (#143104).
             return None
         if top in ("cron", "cronjobs"):
             # Only the disposable ``output/`` subtree; control-plane state (jobs.json,

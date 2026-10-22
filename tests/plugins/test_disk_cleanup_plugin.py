@@ -318,6 +318,68 @@ class TestProtectedDirsNeverRmtreed:
         assert dg.load_tracked() == []
 
 
+class TestPersistentSandboxFilesNeverCleaned:
+    """Regression tests for #143104 — with a persistent docker terminal backend, /workspace
+    and /root bind-mount from ``$HERMES_HOME/sandboxes/docker/<profile>/``, so test_* files
+    there are the agent's durable deliverables, not session scratch. The #112859 fix only
+    guarded the top-level names ``workspace``/``home``; ``sandboxes`` slipped past it because
+    guess_category() checked only ``rel.parts[0]``."""
+
+    def test_sandbox_test_files_never_tracked_or_deleted(self, _isolate_env):
+        """End-to-end: write_file into the default sandbox bind tree, a stale pre-fix tracked
+        entry, and session end. A root-level scratch file is the control and still cleaned."""
+        pi = _load_plugin_init()
+        dg = _load_lib()
+        keep = _isolate_env / "sandboxes" / "docker" / "default" / "workspace" / "dataset" / "test_validator.py"
+        keep.parent.mkdir(parents=True)
+        dg.save_tracked([{"path": str(keep), "category": "test",
+                          "timestamp": datetime.now(UTC).isoformat(), "size": 1}])
+        scratch = _isolate_env / "test_scratch.py"
+        _run_tool(pi, "write_file", {"path": str(keep), "content": "x"},
+                  create=lambda: keep.write_text("x"), task_id="t_sb", session_id="s_sb")
+        _run_tool(pi, "write_file", {"path": str(scratch), "content": "x"},
+                  create=lambda: scratch.write_text("x"), task_id="t_sb", session_id="s_sb")
+
+        pi._on_session_end(session_id="s_sb", completed=True, interrupted=False)
+
+        assert keep.exists(), "persistent sandbox workspace files are durable, never auto-deleted"
+        assert not scratch.exists(), "root-level scratch files are still cleaned up (control)"
+        assert dg.load_tracked() == [], "stale pre-fix sandbox entry is dropped, not retried"
+
+    def test_empty_dir_sweep_skips_sandbox_tree(self, _isolate_env):
+        """Empty dirs the sandbox bind layout relies on (``.../harness/tests``, other profiles'
+        ``workspace/``) must survive the sweep; unprotected empty top levels are still swept."""
+        dg = _load_lib()
+        keep = _isolate_env / "sandboxes" / "docker" / "default" / "workspace" / "harness" / "tests"
+        keep.mkdir(parents=True)
+        sweepable = _isolate_env / "pairing"
+        sweepable.mkdir()
+
+        dg._sweep_empty_dirs(_isolate_env)
+
+        assert keep.exists(), "empty dirs under sandboxes/ must survive the sweep"
+        assert not sweepable.exists(), "unprotected empty dirs are still swept"
+
+    def test_custom_terminal_sandbox_dir_also_protected(self, _isolate_env, monkeypatch):
+        """``TERMINAL_SANDBOX_DIR`` may name any other directory under HERMES_HOME; a test_*
+        inside it is not tracked either (path check, not the ``sandboxes`` name)."""
+        dg = _load_lib()
+        alt_root = _isolate_env / "alt-sbx"
+        custom = alt_root / "docker" / "default" / "workspace" / "test_harness.py"
+        custom.parent.mkdir(parents=True)
+        custom.write_text("x")
+        monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(alt_root))
+
+        assert dg.guess_category(custom) is None
+        dg.save_tracked([{"path": str(custom), "category": "test",
+                          "timestamp": datetime.now(UTC).isoformat(), "size": 1}])
+        summary = dg.quick()
+
+        assert custom.exists(), "custom sandbox dir files are durable user workspace"
+        assert summary["deleted"] == 0
+        assert dg.load_tracked() == []
+
+
 class TestGitWorktreeFilesNeverCleaned:
     """Regression tests for #115295 — git-owned test_* files (committed regression tests
     inside worktrees/checkouts) are never tracked or auto-deleted; scratch files outside
