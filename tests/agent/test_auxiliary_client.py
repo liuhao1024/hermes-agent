@@ -3339,13 +3339,12 @@ class TestCodexAdapterReasoningTranslation:
 
 
 
-    def test_no_extra_body_means_no_reasoning_keys(self):
-        """Baseline: without extra_body, no reasoning/include is sent (preserves
-        current behavior for callers that don't opt in)."""
+    def test_no_extra_body_defaults_to_medium_summary_auto(self):
+        """#143284: no extra_body mirrors build_kwargs' medium+auto reasoning default."""
         adapter, captured = self._build_adapter()
         adapter.create(messages=[{"role": "user", "content": "hi"}])
-        assert "reasoning" not in captured
-        assert "include" not in captured
+        assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
+        assert captured.get("include") == ["reasoning.encrypted_content"]
 
 
 
