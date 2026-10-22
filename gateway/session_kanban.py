@@ -275,17 +275,20 @@ def _run_worker_turns(agent, frame, history):
                                           **({'task_id': task_id} if task_id else {}),
                                           **({'turn_author': author} if author is not None else {}))
     from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
-    code, last_output = 1, ''
+    code, last_output, resets_at = 1, '', None
     try:
         result = _run_task_turns(agent, frame, history, context)
         code = turn_exit_code(result, kanban_worker=True)
         last_output = str(result.get('final_response') or '')[-500:] if isinstance(result, dict) else ''
+        # The provider-declared wall-lift epoch (#143109): the dispatcher's
+        # respawn guard outlasts the fixed cooldown by reading it off this event.
+        resets_at = result.get('failure_resets_at') if isinstance(result, dict) else None
         return result
     except Exception as exc:
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
         raise
     finally:
-        _record_worker_result(context, code, last_output)
+        _record_worker_result(context, code, last_output, resets_at=resets_at)
 
 
 def record_start_failure(frame, exc):
@@ -298,7 +301,7 @@ def record_start_failure(frame, exc):
     _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)), '')
 
 
-def _record_worker_result(context, code, last_output):
+def _record_worker_result(context, code, last_output, resets_at=None):
     _TURNS_DONE.set()
     import os
     from hermes_cli.kanban_db_connect import connect_closing
@@ -307,9 +310,11 @@ def _record_worker_result(context, code, last_output):
         if _bound_worker_matches(conn, context):
             # Closing a run clears its claim/PID and replaces metadata; keep the
             # result in the immutable attempt event stream instead.
-            kb._append_event(conn, context['task_id'], 'worker_result',
-                {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output}, run_id=context['run_id'])
+            payload = {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
+                       'last_output': last_output}
+            if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+                payload['failure_resets_at'] = float(resets_at)
+            kb._append_event(conn, context['task_id'], 'worker_result', payload, run_id=context['run_id'])
 
 
 def _bound_worker_matches(conn, context):

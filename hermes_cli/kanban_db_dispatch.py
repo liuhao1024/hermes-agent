@@ -1196,6 +1196,20 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
+            if dead.rate_limited:
+                # The worker stamped the provider-declared wall-lift epoch on its
+                # worker_result event (session_kanban); carry it onto the run so
+                # the respawn guard can wait for it instead of the fixed cooldown.
+                wrow = conn.execute(
+                    "SELECT e.payload FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
+                    "WHERE t.id=? AND e.kind='worker_result' ORDER BY e.id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                payload = _kb._json_dict(wrow["payload"]) if wrow is not None else {}
+                resets_at = payload.get("failure_resets_at")
+                if (payload.get("claim_lock") == row["claim_lock"]
+                        and isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool)):
+                    dead.event_payload["resets_at"] = float(resets_at)
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
@@ -1606,6 +1620,13 @@ def check_respawn_guard(
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
             # the stamped rate-limit text doesn't re-trap the task.
             return None
+        # Provider-declared reset (#143109): the run's worker recorded when the
+        # quota wall lifts; guard until then. A weekly Codex window outlasts any
+        # fixed cooldown (no more blind 5-minute respawns), while a short
+        # Retry-After must not wait the full fixed cooldown either.
+        resets_at = _kb._json_dict(latest_run["metadata"]).get("resets_at")
+        if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+            return "rate_limit_cooldown" if now < resets_at else None
         ended_at = _kb._to_epoch(latest_run["ended_at"])
         if ended_at is not None and (now - ended_at) < rl_cooldown:
             return "rate_limit_cooldown"

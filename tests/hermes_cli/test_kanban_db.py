@@ -469,6 +469,102 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
+def test_respawn_guard_waits_for_provider_declared_reset(kanban_home, monkeypatch):
+    """A provider-declared reset epoch on the rate-limited run owns the wait
+    (#143109): the guard defers until the wall actually lifts — past the fixed
+    cooldown for a long window, sooner than it for a short Retry-After."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    now = 5_000_000
+
+    def _seed(conn, tid, run_id, resets_at):
+        conn.execute(
+            "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', "
+            "ended_at=?, metadata=? WHERE id=?",
+            (now, json.dumps({"resets_at": resets_at}), run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "last_failure_error=? WHERE id=?",
+            ("pid 1 exited rate-limited (quota wall) — requeued", tid),
+        )
+        conn.commit()
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rl-reset", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+
+        # Long window (30 min): the fixed cooldown elapses at +300 s but the
+        # wall lifts at +1800 s — no blind 5-minute respawn in between.
+        _seed(conn, tid, run_id, now + 1800)
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 400)
+        assert kbd.check_respawn_guard(conn, tid) == "rate_limit_cooldown"
+
+        # Wall lifted → probe allowed, NOT trapped by blocker_auth.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 1900)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+        # Short Retry-After (60 s): respawn as soon as it lifts, instead of
+        # idling out the full fixed cooldown.
+        _seed(conn, tid, run_id, now + 60)
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 100)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_reclaim_carries_worker_declared_reset_onto_run(kanban_home, monkeypatch):
+    """The dying worker stamps the provider reset on its worker_result event; the
+    reclaim writes it onto the rate-limited run's metadata for the respawn guard
+    (#143109). A result recorded under a foreign claim is ignored."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    resets_at = time.time() + 1800
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="rl-carry", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        task = kb.get_task(conn, tid)
+        run_id, claim_lock = task.current_run_id, task.claim_lock
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (70001, tid))
+        conn.commit()
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "worker_result",
+                {"pid": 70001, "claim_lock": claim_lock,
+                 "exit_code": _kb.KANBAN_RATE_LIMIT_EXIT_CODE,
+                 "failure_resets_at": resets_at}, run_id=run_id)
+
+        _kbd._record_worker_exit(70001, _exited_status(_kb.KANBAN_RATE_LIMIT_EXIT_CODE))
+        assert tid not in kbd.detect_crashed_workers(conn)
+        meta = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run_id,),
+        ).fetchone()["metadata"])
+        assert meta.get("resets_at") == resets_at
+
+        # Next attempt: a worker_result from a stale claim must not leak its
+        # reset epoch onto this run.
+        kb.claim_task(conn, tid, claimer=f"{host}:w1")
+        task = kb.get_task(conn, tid)
+        run2 = task.current_run_id
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (70002, tid))
+        conn.commit()
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "worker_result",
+                {"pid": 70002, "claim_lock": "other-host:stale",
+                 "exit_code": 1, "failure_resets_at": resets_at + 9999}, run_id=run2)
+        _kbd._record_worker_exit(70002, _exited_status(_kb.KANBAN_RATE_LIMIT_EXIT_CODE))
+        kbd.detect_crashed_workers(conn)
+        meta2 = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id=?", (run2,),
+        ).fetchone()["metadata"])
+        assert "resets_at" not in meta2
+
+
 @pytest.mark.parametrize(
     "error_text, expected",
     [

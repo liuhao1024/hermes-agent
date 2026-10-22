@@ -53,6 +53,35 @@ def test_managed_result_persists_exact_worker_exit(tmp_path, monkeypatch, result
     assert session_kanban.worker_exit_code(path, context | {"claim_lock": "foreign"}) == 1
 
 
+def test_managed_result_stamps_provider_reset_epoch(tmp_path, monkeypatch):
+    """A rate-limit turn carrying ``failure_resets_at`` (#143109) persists the
+    epoch on the worker_result receipt so the dispatcher's respawn guard can
+    wait out the provider's window instead of a fixed cooldown."""
+    path, context = _bound_claim(tmp_path, monkeypatch)
+    result = {"failed": True, "failure_reason": "rate_limit", "failure_resets_at": 1_900_000_000.5}
+    monkeypatch.setattr(session_kanban, "_run_task_turns", lambda *_args: result)
+    frame = {"policy": {"kanban_json": json.dumps(context)}}
+
+    session_kanban.run_worker_turns(SimpleNamespace(), frame, [])
+
+    receipt = session_kanban.worker_result(path, context)
+    assert receipt["exit_code"] == kb.KANBAN_RATE_LIMIT_EXIT_CODE
+    assert receipt["failure_resets_at"] == 1_900_000_000.5
+
+
+def test_managed_result_without_reset_omits_the_epoch(tmp_path, monkeypatch):
+    """No declared reset (or a non-numeric one) leaves the receipt without the
+    epoch: the dispatcher falls back to the fixed cooldown."""
+    path, context = _bound_claim(tmp_path, monkeypatch)
+    result = {"failed": True, "failure_reason": "timeout", "failure_resets_at": "soon"}
+    monkeypatch.setattr(session_kanban, "_run_task_turns", lambda *_args: result)
+    frame = {"policy": {"kanban_json": json.dumps(context)}}
+
+    session_kanban.run_worker_turns(SimpleNamespace(), frame, [])
+
+    assert "failure_resets_at" not in session_kanban.worker_result(path, context)
+
+
 def _credential_failures():
     from hermes_cli.auth import AuthError
     from hermes_cli.auth_constants import CODEX_RATE_LIMITED_CODE
