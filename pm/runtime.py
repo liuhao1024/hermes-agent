@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -210,7 +211,15 @@ def collect_runtime_generations(root: Path) -> list[Path]:
             published = (generation / "pm-runtime.json").is_file()
             if published and (not (generation / ".lease-managed").is_file() or leases_held(generation)):
                 continue
-            shutil.rmtree(generation)
+            try:
+                shutil.rmtree(generation)
+            except OSError as exc:
+                # As the application collector: a locked file (a Windows image-section .pyd/.exe)
+                # can abort rmtree halfway, leaving a partially deleted generation that the next
+                # collection retries once the lock clears (#142976). The rest are still collected.
+                logging.getLogger(__name__).warning(
+                    "runtime generation %s left partially deleted by cleanup: %s", generation, exc)
+                continue
             removed.append(generation)
     return removed
 

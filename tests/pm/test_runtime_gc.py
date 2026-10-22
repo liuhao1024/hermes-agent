@@ -130,3 +130,67 @@ def test_lease_taken_while_a_peer_pruned_it_is_retaken(tmp_path, monkeypatch):
     finally:
         release()
     assert list(leases.iterdir()) == []
+
+
+def test_a_half_deleted_generation_is_named_and_the_rest_still_collected(tmp_path, monkeypatch, caplog):
+    """Windows holds .pyd/.exe files mapped as image sections, so rmtree can die halfway through
+    one generation (#142976): the half-deleted one is named in a warning (never reported as a
+    clean skip) and the loop keeps collecting the others."""
+    import logging as _logging
+    import shutil as _shutil
+
+    root = tmp_path / "pm-runtime"
+    stuck = _generation(root, "astuck")  # sorted() meets it first
+    idle = _generation(root, "zidle")
+    _generation(root, "selected")
+    (root / "selected.json").write_text(json.dumps({"generation": "generations/selected"}), encoding="utf-8")
+
+    def rmtree(path, *args, **kwargs):
+        if Path(path) == stuck:
+            raise PermissionError(5, "Access is denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    real_rmtree = _shutil.rmtree
+    monkeypatch.setattr("pm.runtime.shutil.rmtree", rmtree)
+    with caplog.at_level(_logging.WARNING, logger="pm.runtime"):
+        removed = collect_runtime_generations(root)
+    assert removed == [idle]
+    assert stuck.is_dir()  # the husk stays until the lock clears; a later pass retries it
+    assert sum("partially deleted" in record.message and "astuck" in record.message
+               for record in caplog.records) == 1
+
+
+def test_collect_generations_survive_one_locked_generation(tmp_path, monkeypatch, caplog):
+    """The application collector (``hermes_cli.runtime_state``) shares the fate: one generation
+    rmtree cannot finish no longer aborts the whole cleanup with a misleading 'skipped'."""
+    import json as _json
+
+    from hermes_cli.runtime_state import collect_generations
+    from pm.environments import install_state_dir, runtime_facts_path
+    import shutil as _shutil
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = install_state_dir(repo)
+    for name in ("astuck", "zidle"):
+        (state / "environments" / name).mkdir(parents=True)
+        (state / "environments" / name / ".lease-managed").touch()
+    selected = state / "environments" / "selected" / "venv"
+    selected.mkdir(parents=True)
+    (selected / "pyvenv.cfg").write_text("version = 3.11", encoding="utf-8")
+    runtime_facts_path(repo).write_text(_json.dumps(
+        {"packages": {"venv": {"environment": str(selected)}}}))
+
+    def rmtree(path, *args, **kwargs):
+        if Path(path) == state / "environments" / "astuck":
+            raise PermissionError(5, "Access is denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    real_rmtree = _shutil.rmtree
+    monkeypatch.setattr("hermes_cli.runtime_state.shutil.rmtree", rmtree)
+    with caplog.at_level("WARNING", logger="hermes_cli.runtime_state"):
+        removed = collect_generations(repo, min_age_seconds=0)
+    assert set(removed) == {state / "environments" / "zidle"}
+    assert (state / "environments" / "astuck").is_dir()
+    assert sum("partially deleted" in record.message for record in caplog.records) == 1

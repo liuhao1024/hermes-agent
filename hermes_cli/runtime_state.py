@@ -203,7 +203,15 @@ def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> lis
             if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
                 continue
             if not leases_held(generation):
-                shutil.rmtree(generation)
+                try:
+                    shutil.rmtree(generation)
+                except OSError as exc:
+                    # A locked file (a Windows image-section .pyd/.exe) can abort rmtree halfway:
+                    # the generation left on disk is partially deleted, not intact. Name it and keep
+                    # collecting the rest; a "cleanup skipped" report would read as a no-op (#142976).
+                    logging.getLogger(__name__).warning(
+                        "generation %s left partially deleted by cleanup: %s", generation, exc)
+                    continue
                 removed.append(generation)
     return removed
 
