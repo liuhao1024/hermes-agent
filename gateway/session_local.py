@@ -24,6 +24,10 @@ class LocalSessionAdapter(BasePlatformAdapter):
     def __init__(self, authority):
         super().__init__(PlatformConfig(enabled=True), Platform.LOCAL)
         self.authority = authority
+        # Without the owner-runner reference a push wake falls back to the classic inbound
+        # handler path, which a local adapter never has, and every notify+wake delivery
+        # is refused (``WakeNotAccepted``) instead of riding admit_route_wake into the FIFO.
+        self.gateway_runner = authority.runner
         self.sources = {}
         self.policies = {}
 
