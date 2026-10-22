@@ -77,7 +77,15 @@ export const pasteTokenLabel = (text: string, lineCount: number) => {
 }
 
 const THINKING_STATUS_RE = new RegExp(`^(?:${VERBS.join('|')})\\.{0,3}$`, 'i')
-const THINKING_STATUS_CHUNK_RE = new RegExp(`[^A-Za-z\n]+\\s*(?:${VERBS.join('|')})\\.{0,3}\\s*`, 'giu')
+// Ticker fragments streamed into reasoning always carry a status glyph (kaomoji,
+// emoji, braille frame) before the verb and an ellipsis right after it. Requiring
+// both keeps the chunk stripper off mid-sentence prose uses of the same verbs,
+// where a bare space/apostrophe precedes the word and a comma or space follows
+// (#143228: "the model's reasoning stream" lost both the word and the space).
+const THINKING_STATUS_CHUNK_RE = new RegExp(
+  `[^\\sA-Za-z0-9\\n][^A-Za-z\\n]*\\s*(?:${VERBS.join('|')})(?:\\.{1,3}|…)\\s*`,
+  'giu'
+)
 
 export const cleanThinkingText = (reasoning: string) =>
   reasoning

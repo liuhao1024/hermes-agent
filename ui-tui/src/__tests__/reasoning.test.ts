@@ -73,4 +73,28 @@ describe('cleanThinkingText', () => {
       )
     ).toBe('**Resolving comments on GitHub**\nActual step\nnext step')
   })
+
+  it('keeps mid-sentence content verbs and does not weld neighbouring words', () => {
+    // Regression for #143228: an unanchored leading `[^A-Za-z\n]+` matched a
+    // bare space before any spinner verb, so ordinary prose uses of the verb
+    // ("the model's reasoning stream") were deleted and the surrounding words
+    // were glued together ("model'sstream"). Ticker fragments always carry a
+    // non-alphanumeric glyph (kaomoji/emoji/braille frame) before the verb;
+    // plain prose separators (spaces, apostrophes, digits) must not match.
+    const prose = [
+      "...displayed in the user's TUI as their Qwen model’s reasoning stream",
+      'Before we proceed, careful reasoning is required to avoid errors',
+      'The spinner keeps pondering through long calls',
+      'I want to think about the words reasoning, analyzing, and similar words'
+    ].join('\n')
+
+    expect(cleanThinkingText(prose)).toBe(prose)
+  })
+
+  it('still strips ticker fragments whose frame is a symbol or braille cell', () => {
+    expect(cleanThinkingText('⠋ pondering... now inspecting the file\nfollow-up')).toBe(
+      'now inspecting the file\nfollow-up'
+    )
+    expect(cleanThinkingText('✿ processing...tail glued after the ticker')).toBe('tail glued after the ticker')
+  })
 })
