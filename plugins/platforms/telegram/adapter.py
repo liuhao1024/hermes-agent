@@ -6646,8 +6646,18 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if existing is None:
             pending[key] = event
             return
+
+        def _padded_inline_flags(msg: MessageEvent) -> list[Optional[bool]]:
+            flags = list(getattr(msg, "media_text_inlined", []) or [])
+            return flags + [None] * (len(msg.media_urls) - len(flags))
+
+        # Native admission refuses the merged event unless the inline flags line up with
+        # the urls; photos carry no flags while documents do, so pad each side with None
+        # (same contract as merge_pending_message_event) before extending the lists.
+        existing.media_text_inlined = _padded_inline_flags(existing)
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        existing.media_text_inlined.extend(_padded_inline_flags(event))
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
 
