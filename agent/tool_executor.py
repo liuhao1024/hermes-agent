@@ -755,7 +755,12 @@ def _dispatch_authorized_once(
     from tools.connectors.data_use import collect_data_use
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+            result = _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+            # A human grant for this call (plugin-escalated approval, computer_use, protected
+            # writes) leaves a pending note; fold it into the result so the model sees the
+            # approval a denial's BLOCKED text would have shown (#142867).
+            from tools.approval_context import annotate_result_with_human_grant
+            return annotate_result_with_human_grant(result)
         finally:
             state.data_use = frozenset(data_use)
 

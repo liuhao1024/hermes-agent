@@ -6,6 +6,7 @@ gate in :mod:`tools.approval`.
 """
 
 import contextvars
+import json
 import logging
 import os
 from agent.i18n import t
@@ -49,6 +50,52 @@ def _is_interactive_cli() -> bool:
     """True for an interactive CLI/ACP session (contextvar first, env fallback)."""
     ctx_val = _hermes_interactive_ctx.get()
     return is_truthy_value(ctx_val) if ctx_val is not None else env_var_enabled("HERMES_INTERACTIVE")
+
+
+# A human grant (as opposed to yolo/allowlist/unattended auto-approve) recorded by
+# tools.approval._human_decision.grant just before the gate returns. Read-and-cleared once by
+# the tool-result layer, so the model sees "the user answered a card" exactly where a denial's
+# BLOCKED text would have appeared (#142867).
+_human_grant_note: contextvars.ContextVar[str | None] = contextvars.ContextVar("human_grant_note", default=None)
+
+
+def note_human_grant(note: str) -> None:
+    """Record that a person just approved a gated action in this context."""
+    _human_grant_note.set(note)
+
+
+def take_human_grant_note() -> str | None:
+    """Read-and-clear: one approval note annotates exactly one tool result."""
+    note = _human_grant_note.get()
+    if note is not None:
+        _human_grant_note.set(None)
+    return note
+
+
+def annotate_result_with_human_grant(result):
+    """Fold a pending human-grant note into a tool result (identity without one).
+
+    A JSON-object result gains an ``approval`` field (the terminal-tool precedent); plain text
+    gets one bracketed first line. JSON results are never prefixed, so consumers that
+    ``json.loads`` the result (failure detection, summaries) keep working.
+    """
+    note = take_human_grant_note()
+    if not note:
+        return result
+    if isinstance(result, dict):
+        return {**result, "approval": note}
+    if isinstance(result, str) and result.lstrip().startswith("{"):
+        try:
+            data = json.loads(result)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data["approval"] = note
+            return json.dumps(data, ensure_ascii=False)
+        return f"[{note}]\n{result}"
+    if isinstance(result, str):
+        return f"[{note}]\n{result}"
+    return result
 
 
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
