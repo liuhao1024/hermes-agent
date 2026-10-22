@@ -2894,6 +2894,11 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[dict[str, Any]] = None) -> None:
         """Apply Matrix reply/thread relation metadata to an outbound payload."""
         thread_id = str((metadata or {}).get("thread_id") or "")
+        # Only real Matrix event ids ('$' sigil) may ride the wire: desktop-originated turns
+        # hand us the session store's internal message UID, and rust-sdk clients reject the
+        # whole event over a malformed m.in_reply_to id — losing the reply text (#143137).
+        if reply_to and not reply_to.startswith("$"):
+            reply_to = None
         if reply_to:
             msg_content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to}}
         if thread_id:
