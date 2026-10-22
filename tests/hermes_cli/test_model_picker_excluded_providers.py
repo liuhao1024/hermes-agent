@@ -219,3 +219,35 @@ def test_unconfigured_rows_empty_excluded_is_noop():
     empty = {r["slug"].lower() for r in _append_unconfigured_rows([], _picker_ctx(excluded=[]))}
     none = {r["slug"].lower() for r in _append_unconfigured_rows([], _picker_ctx(excluded=None))}
     assert base == empty == none
+
+
+def test_excluded_providers_hides_user_defined_rows():
+    """#142961: ``list_authenticated_providers`` must honor the exclusion for
+    user-defined rows too — a ``providers:`` dict entry (bare-key row) and a
+    ``custom_providers:`` entry (``custom:``-prefixed row). The per-builder
+    ``_skip`` gate only covered the built-in/overlay/canonical sections, so a
+    provider parked behind ``fallback_providers`` stayed listed by ``/model``."""
+    import hermes_cli.providers as providers_mod
+    from hermes_cli.model_switch import list_authenticated_providers
+    from unittest.mock import patch
+
+    with patch("agent.models_dev.fetch_models_dev", dict), \
+         patch.object(providers_mod, "HERMES_OVERLAYS", {}), \
+         patch("hermes_cli.models.fetch_api_models", lambda *a, **k: []):
+        rows = list_authenticated_providers(
+            user_providers={
+                "com": {"base_url": "http://127.0.0.1:56673/v1", "model": "deepseek-flash"},
+                "back1": {"base_url": "http://127.0.0.1:52718/v1", "model": "some-model"},
+            },
+            custom_providers=[
+                {"name": "back2", "base_url": "https://example.internal/v1", "model": "other-model"},
+            ],
+            excluded_providers=["back1", "back2"],
+            max_models=5,
+            probe_custom_providers=False,
+        )
+
+    slugs = {str(p["slug"]) for p in rows}
+    assert "back1" not in slugs, f"excluded providers: entry still listed: {sorted(slugs)}"
+    assert "custom:back2" not in slugs, f"excluded custom_providers: entry still listed: {sorted(slugs)}"
+    assert "com" in slugs, f"a non-excluded entry must stay listed: {sorted(slugs)}"

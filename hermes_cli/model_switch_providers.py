@@ -1298,7 +1298,25 @@ def list_authenticated_providers(
     if custom_providers and isinstance(custom_providers, list):
         _lap_custom_provider_rows(b, custom_providers)
 
-    return _finalize_picker_rows(b.results, user_providers, current_model)
+    rows = _finalize_picker_rows(b.results, user_providers, current_model)
+    if b.excluded:
+        # ``_skip`` gates the built-in/overlay/canonical builders only; user-defined rows
+        # (sections 3/3b/4) slip through, so re-check at the single exit — one excluded entry
+        # hides the provider under every key it surfaces as, bare or ``custom:``-prefixed (#142961).
+        rows = [
+            r for r in rows
+            if _exclusion_key(r.get("slug")) not in b.excluded
+            and _exclusion_key(r.get("provider_id")) not in b.excluded
+        ]
+    return rows
+
+
+def _exclusion_key(value) -> str:
+    """Lowercase a row key for ``model_catalog.excluded_providers`` matching, dropping a
+    ``custom:`` prefix: a ``providers:`` entry surfaces as its bare key in section 3 but as
+    ``custom:<key>`` in section 4 and the GUI, and the raw slug never matches the config entry."""
+    key = str(value or "").strip().lower()
+    return key.split(":", 1)[1] if key.startswith("custom:") else key
 
 
 def _finalize_picker_rows(results: list, user_providers, current_model: str) -> list:
