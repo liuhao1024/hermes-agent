@@ -99,6 +99,23 @@ _EXCLUDED_ROOT_DIRS = LOCAL_RUNTIME_ROOT_DIRS | (PM_RUNTIME_ROOT_DIRS - {"cache"
 # do not fold into LOCAL_RUNTIME_ROOT_DIRS (clone-all identity contract).
 _EXCLUDED_BACKUP_ROOT_DIRS = frozenset({"browser_profiles"})
 
+# Kanban per-task scratch (``kanban/workspaces``, ``kanban/attachments`` and the same names
+# under each ``kanban/boards/<slug>/``) is regenerable and can hold multi-GB task output; the
+# quick path already skips both (see ``_QUICK_STATE_FILES``). Scoped to the kanban tree: a dir
+# of the same name elsewhere (a skill's ``workspaces/``) is user data. Board databases and
+# ``kanban/boards`` metadata stay in the backup.
+_KANBAN_SCRATCH_SUBDIRS = frozenset({"workspaces", "attachments"})
+
+
+def _in_kanban_scratch(rel_path: Path) -> bool:
+    """True inside a kanban-managed scratch subtree (``kanban/workspaces`` and friends)."""
+    parts = rel_path.parts
+    if len(parts) < 2 or parts[0] != "kanban":
+        return False
+    if parts[1] in _KANBAN_SCRATCH_SUBDIRS:
+        return True
+    return parts[1] == "boards" and len(parts) >= 4 and parts[3] in _KANBAN_SCRATCH_SUBDIRS
+
 # ``cache/`` at those same roots mixes regenerable state (model/plugin catalogs, stamps, browser
 # profiles with locked SQLite, tool-output spill) with durable artifacts nothing can rebuild: media
 # the gateway delivered to or received from the user (``gateway.platforms.base``'s media-delivery
@@ -314,7 +331,7 @@ def _is_link_path(path: Path) -> bool:
 def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
     parts = rel_path.parts
-    if _in_excluded_root_dir(rel_path):
+    if _in_excluded_root_dir(rel_path) or _in_kanban_scratch(rel_path):
         return True
     # ``hermes-agent`` only matches at the root level; nested same-named dirs are preserved.
     if any(p in _EXCLUDED_DIRS and (p != "hermes-agent" or p == parts[0]) for p in parts):
@@ -336,7 +353,8 @@ def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional
         kept = [
             d for d in dirnames
             if (d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root))
-            and not _in_excluded_root_dir(rel_dir / d)]
+            and not _in_excluded_root_dir(rel_dir / d)
+            and not _in_kanban_scratch(rel_dir / d)]
         if skipped_dirs is not None:
             skipped_dirs.update(str(rel_dir / d) for d in set(dirnames) - set(kept))
         # No walk may follow a junction.

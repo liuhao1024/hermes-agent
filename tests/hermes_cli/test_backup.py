@@ -207,6 +207,21 @@ class TestShouldExclude:
         # Other .bak files are user data and stay.
         assert not _should_exclude(Path("config.yaml.bak"))
 
+    def test_excludes_kanban_scratch_but_keeps_boards_and_namesakes(self):
+        """Kanban per-task scratch (workspaces/, attachments/, including the same
+        names under each board) is regenerable and can hold multi-GB task output;
+        board databases and same-named dirs outside the kanban tree are user data."""
+        from hermes_cli.backup import _should_exclude
+        assert _should_exclude(Path("kanban/workspaces/t-1/out.bin"))
+        assert _should_exclude(Path("kanban/attachments/t-1/receipt.pdf"))
+        assert _should_exclude(Path("kanban/boards/alpha/workspaces/t-2/scratch.bin"))
+        assert _should_exclude(Path("kanban/boards/alpha/attachments/t-2/att.bin"))
+        assert not _should_exclude(Path("kanban/kanban.db"))
+        assert not _should_exclude(Path("kanban/boards/alpha/board.db"))
+        # Same-named dirs outside the kanban tree are user data.
+        assert not _should_exclude(Path("skills/ws-guide/workspaces/notes.md"))
+        assert not _should_exclude(Path("projects/demo/attachments/brief.pdf"))
+
 
 # ---------------------------------------------------------------------------
 # _iter_backup_files tests
@@ -323,6 +338,44 @@ class TestIterBackupFiles:
             selected = {str(rel) for _, rel in _iter_backup_files(root, tmp_path / "out.zip")}
 
         assert "gateway.sock" not in selected
+
+    def test_prunes_kanban_scratch_trees(self, tmp_path):
+        """A full backup archives kanban board data but not the regenerable per-task
+        scratch (workspaces/ + attachments/, incl. per-board copies) that grows to
+        multi-GB on task-heavy installs — matching the quick path's skip (#143211).
+        The walk prunes (never descends) the scratch roots and reports them skipped."""
+        from hermes_cli.backup import _iter_backup_files
+
+        root = tmp_path / ".hermes"
+        root.mkdir()
+        (root / "kanban").mkdir()
+        (root / "kanban" / "kanban.db").write_bytes(b"db")
+        (root / "kanban" / "workspaces" / "t-1").mkdir(parents=True)
+        (root / "kanban" / "workspaces" / "t-1" / "out.bin").write_bytes(b"\x00" * 64)
+        (root / "kanban" / "attachments").mkdir()
+        (root / "kanban" / "attachments" / "t-1.pdf").write_bytes(b"\x00" * 64)
+        board = root / "kanban" / "boards" / "alpha"
+        board.mkdir(parents=True)
+        (board / "board.db").write_bytes(b"db")
+        (board / "workspaces" / "t-2").mkdir(parents=True)
+        (board / "workspaces" / "t-2" / "scratch.bin").write_bytes(b"\x00" * 64)
+        # A dir named workspaces outside the kanban tree is user data.
+        namesake = root / "skills" / "ws-guide" / "workspaces"
+        namesake.mkdir(parents=True)
+        (namesake / "notes.md").write_text("keep\n")
+
+        skipped: set = set()
+        selected = {str(rel) for _, rel in _iter_backup_files(root, tmp_path / "out.zip", skipped)}
+
+        assert str(Path("kanban/kanban.db")) in selected
+        assert str(Path("kanban/boards/alpha/board.db")) in selected
+        assert str(Path("skills/ws-guide/workspaces/notes.md")) in selected
+        assert not any(
+            s.startswith("kanban/") and ("/workspaces/" in s or "/attachments/" in s)
+            for s in selected
+        )
+        assert "kanban/workspaces" in skipped
+        assert "kanban/boards/alpha/workspaces" in skipped
 
 
 # ---------------------------------------------------------------------------
