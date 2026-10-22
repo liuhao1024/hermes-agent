@@ -565,6 +565,9 @@ export default function App() {
           className={cn(
             "lg:hidden fixed inset-0 z-40 p-0 block",
             "bg-black/70",
+            // iOS keeps translating touches on the dimmed area into scrolls of
+            // the page behind it unless the gesture is opted out entirely.
+            "touch-none",
           )}
         />
       )}
@@ -654,7 +657,7 @@ export default function App() {
             <ProfileSwitcher collapsed={isDesktopCollapsed} />
 
             <nav
-              className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden border-t border-current/10 py-2"
+              className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-hidden overscroll-contain border-t border-current/10 py-2"
               aria-label={t.app.navigation}
             >
               <ul className="flex flex-col">
@@ -757,7 +760,7 @@ export default function App() {
             </div>
           </aside>
 
-          <PageHeaderProvider pluginTabs={pluginTabMeta}>
+          <PageHeaderProvider pluginTabs={pluginTabMeta} scrollLocked={mobileOpen}>
             <div
               className={cn(
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",

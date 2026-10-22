@@ -8,9 +8,13 @@ import { useI18n } from "@/i18n";
 export function PageHeaderProvider({
   children,
   pluginTabs,
+  scrollLocked = false,
 }: {
   children: ReactNode;
   pluginTabs: { path: string; label: string }[];
+  /** Freeze <main>'s scroll (mobile nav open) — see App.tsx; body-level
+   *  overflow locks never reach this container, which owns page scrolling. */
+  scrollLocked?: boolean;
 }) {
   const { pathname } = useLocation();
   const { t } = useI18n();
@@ -125,7 +129,7 @@ export function PageHeaderProvider({
             "min-h-0 w-full min-w-0 flex-1 flex flex-col",
             // Bottom inset for scrolled pages lives on the route outlet wrapper in
             // `App.tsx` (`w-full min-w-0`) so it pads scrollable content, not flex chrome.
-            isChatRoute
+            isChatRoute || scrollLocked
               ? "overflow-hidden"
               : "overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]",
           )}
