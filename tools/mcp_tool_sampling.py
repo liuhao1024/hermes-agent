@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import time
@@ -277,21 +278,54 @@ class ElicitationHandler:
         """Kwargs to pass to ClientSession for elicitation support."""
         return {"elicitation_callback": self}
 
-    def _result(self, action: str, metric: str):
-        """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content)."""
+    def _result(self, action: str, metric: str, persist: str | None = None):
+        """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content, plus the
+        selected persistence mode in ``_meta`` when the server asked for one)."""
         self.metrics[metric] += 1
-        return _core.ElicitResult(action=action, **({"content": {}} if action == "accept" else {}))
+        kwargs = {"content": {}} if action == "accept" else {}
+        if persist:
+            kwargs["_meta"] = {"persist": persist}
+        return _core.ElicitResult(action=action, **kwargs)
 
-    def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
+    def _remember_key(self, message: str) -> str:
+        """Approval key scoping a remembered elicitation choice to this server and this exact
+        request text, so an "always allow" for Chrome does not wave through Safari."""
+        digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
+        return f"mcp_elicitation/{self.server_name}/{digest}"
+
+    def _persist_scope(self, remember_key: str) -> str | None:
+        """Which stored scope now covers *remember_key* (``"always"``/``"session"``), or None when
+        the latest answer was one-shot. Runs inside the consent thunk so it reads the same
+        contextvars (and thus the same session key) the consent router saw."""
+        from tools import approval as _approval
+        from tools import approval_context as _ctx
+        try:
+            if _approval._is_permanently_approved(remember_key):
+                return "always"
+            if _approval.is_approved(_ctx.get_current_session_key(), remember_key):
+                return "session"
+        except Exception:  # pragma: no cover -- defensive: an unreadable store reads as one-shot
+            logger.debug("Elicitation persist-scope lookup failed for %s", remember_key, exc_info=True)
+        return None
+
+    def _consent_thunk(self, message: str, description: str) -> Callable[[], tuple[str, str | None]]:
         """Sync consent call replaying the agent's contextvars snapshot when the owning task captured one
         (the recv-loop task does NOT inherit them; gateway-platform detection needs them).
-        ``Context.run`` runs a context once, so it is copied per elicitation."""
+        ``Context.run`` runs a context once, so it is copied per elicitation. Returns the consent
+        verdict plus the persistence scope a ``session``/``always`` answer stored (issue #142803)."""
         from tools.approval_prompt import request_elicitation_consent
 
-        consent = functools.partial(request_elicitation_consent, message, description,
-                                    timeout_seconds=int(self.timeout), surface=f"mcp-elicitation/{self.server_name}")
+        remember_key = self._remember_key(message)
+
+        def invoke() -> tuple[str, str | None]:
+            answer = request_elicitation_consent(
+                message, description, timeout_seconds=int(self.timeout),
+                surface=f"mcp-elicitation/{self.server_name}", remember_key=remember_key)
+            scope = self._persist_scope(remember_key) if answer == "accept" else None
+            return answer, scope
+
         captured = self._call_context()
-        return consent if captured is None else (lambda: captured.copy().run(consent))
+        return invoke if captured is None else (lambda: captured.copy().run(invoke))
 
     async def __call__(self, context, params):
         """SDK elicitation callback (``ElicitationFnT``). Returns ElicitResult or ErrorData."""
@@ -305,6 +339,11 @@ class ElicitationHandler:
         # ``requestedSchema`` on mcp 1.x, ``requested_schema`` on 2.0 (aliases don't apply to attribute
         # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
+        # ``_meta.persist`` (attribute name ``meta`` on both SDK generations): the persistence scopes
+        # the server understands. A session/always answer is echoed back in that vocabulary, and only
+        # to servers that asked — silently inventing _meta fields a server never offered breaks it.
+        request_meta = getattr(params, "meta", None)
+        persist_modes = request_meta.get("persist") if isinstance(request_meta, dict) else None
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
         try:  # lazy import inside avoids import-order coupling with early-bootstrap tools.approval
             invoke_consent = self._consent_thunk(message, _format_elicitation_schema_summary(schema, self.server_name))
@@ -312,7 +351,7 @@ class ElicitationHandler:
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")
         try:  # off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it
-            answer = await asyncio.wait_for(
+            answer, scope = await asyncio.wait_for(
                 asyncio.to_thread(invoke_consent), timeout=self.timeout + self._OUTER_TIMEOUT_GRACE_SECONDS)
         except TimeoutError:
             logger.warning("MCP server '%s' elicitation timed out after %ds", self.server_name, int(self.timeout))
@@ -320,4 +359,11 @@ class ElicitationHandler:
         except Exception as exc:
             logger.error("MCP server '%s' elicitation failed: %s", self.server_name, exc, exc_info=True)
             return self._result("decline", "errors")
+        if answer == "accept" and scope and isinstance(persist_modes, list):
+            # Echo the stored scope in the server's own vocabulary: as-is when offered, else the
+            # shorter scope it understands (a permanent grant satisfies a session-only server).
+            # Servers that never advertised persistence modes keep their one-shot reply shape.
+            persist = scope if scope in persist_modes else (
+                "session" if scope == "always" and "session" in persist_modes else None)
+            return self._result("accept", "accepted", persist=persist)
         return self._result(*self._ANSWER_RESULTS.get(answer, ("decline", "declined")))

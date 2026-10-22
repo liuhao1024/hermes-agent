@@ -414,6 +414,14 @@ def _persist_choice(session_key: str, choice: str, keys: list[str]) -> None:
             save_permanent_allowlist(grants)
 
 
+def persist_elicitation_choice(session_key: str, choice: str, remember_key: str) -> None:
+    """Keep an elicitation consent's ``session``/``always`` choice under *remember_key* so the
+    next identical request short-circuits (``is_approved``). Public twin of :func:`_persist_choice`
+    for the elicitation router in ``tools.approval_prompt``, which owns a single key, not a
+    pattern-keys list. ``once`` still persists nothing."""
+    _persist_choice(session_key, choice, [remember_key])
+
+
 # --- Config persistence for permanent allowlist ---------------------------------------------------------------------
 
 def _read_permanent_allowlist() -> set:

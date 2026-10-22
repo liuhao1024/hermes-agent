@@ -224,6 +224,45 @@ class TestTrustGateApprovalRouting:
         assert seen[0]["pattern_key"] == "mcp_elicitation"
         assert seen[0]["request_id"]
 
+    def test_mcp_trust_consent_offers_no_dead_scopes(self, monkeypatch):
+        """The trust gate keeps no elicitation choice, so its consent must not offer
+        session/always scopes the client would pick and then silently lose (#142803)."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools import approval, approval_prompt
+        from tools.approval_context import (
+            reset_current_session_key,
+            set_current_session_key,
+        )
+
+        session_key = "api-run-mcp-trust-dead-scopes"
+        seen = []
+        monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval",
+                            lambda *_args, **_kwargs: "deny")
+
+        def notify(approval_data):
+            seen.append(dict(approval_data))
+            assert approval.resolve_gateway_approval(
+                session_key, "once", request_id=approval_data["request_id"]) == 1
+
+        session_tokens = set_session_vars(
+            platform="api_server", session_key=session_key, async_delivery=False
+        )
+        key_token = set_current_session_key(session_key)
+        approval.register_gateway_notify(session_key, notify)
+        try:
+            assert approval_prompt.request_elicitation_consent(
+                "MCP tool 'write' on UNTRUSTED server 'srv' wants to run.",
+                "Approve once or deny.", surface="mcp-trust/srv",
+            ) == "accept"
+        finally:
+            approval.unregister_gateway_notify(session_key)
+            reset_current_session_key(key_token)
+            clear_session_vars(session_tokens)
+
+        assert len(seen) == 1
+        assert seen[0]["allow_session"] is False
+        assert seen[0]["allow_permanent"] is False
+
     @pytest.mark.parametrize("platform,cron,single_query", [
         ("webhook", "", False),
         ("telegram", "1", False),

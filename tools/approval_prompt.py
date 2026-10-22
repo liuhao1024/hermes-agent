@@ -286,19 +286,28 @@ def _consent(choice, unresolved: str) -> str:
 
 def request_elicitation_consent(message: str, description: str, *,
                                 timeout_seconds: int | None = None,
-                                surface: str = "mcp-elicitation", title: str = "Confirm this action?") -> str:
+                                surface: str = "mcp-elicitation", title: str = "Confirm this action?",
+                                remember_key: str | None = None) -> str:
     """Route an MCP elicitation request to the surface owning the active session:
     gateway sessions through ``_await_gateway_decision``, CLI/TUI through
     ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in a
     gateway session, timeouts, and exceptions map to ``"decline"`` so a server
     treats them as "user did not approve" rather than retrying or hanging.
-    Returns ``"accept" | "decline" | "cancel"``."""
+    Returns ``"accept" | "decline" | "cancel"``.
+
+    *remember_key* lets a caller keep a ``session``/``always`` answer: a stored
+    approval short-circuits to ``"accept"`` without prompting, and a fresh
+    session/always choice is persisted under that key (issue #142803). Without
+    one the prompt offers only once/deny — a scope the caller discards would
+    make every later request re-prompt and reads as broken."""
     from tools import approval as _a
     try:
         session_key = _ctx.get_current_session_key()
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
+    if remember_key and _a.is_approved(session_key, remember_key):
+        return "accept"  # the user already answered this exact request (session or permanent scope)
     # A finite gateway turn (``chat -q`` / ``-z`` over the daemon) has no one to answer: parking the prompt
     # would detach the viewer mid-turn instead of failing closed like the in-process ``-q`` input() path.
     if _ctx._is_single_query_approval_context():
@@ -320,10 +329,14 @@ def request_elicitation_consent(message: str, description: str, *,
                            "notify_cb is registered — failing closed", session_key)
             return "decline"
         try:
-            decision = _gw._await_gateway_decision(
-                session_key, notify_cb, {"command": message, "description": description,
-                                         "pattern_key": "mcp_elicitation",
-                                         "pattern_keys": ["mcp_elicitation"]}, surface=surface)
+            approval_data = {"command": message, "description": description,
+                             "pattern_key": "mcp_elicitation",
+                             "pattern_keys": ["mcp_elicitation"]}
+            if not remember_key:
+                # No caller-side storage: offering session/always would promise a scope that is
+                # dropped on the floor, so every client menu collapses to once/deny.
+                approval_data.update(allow_session=False, allow_permanent=False)
+            decision = _gw._await_gateway_decision(session_key, notify_cb, approval_data, surface=surface)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"
@@ -331,7 +344,10 @@ def request_elicitation_consent(message: str, description: str, *,
             return "decline"
         if not decision.get("resolved") or decision.get("cancelled"):
             return "cancel"  # nobody answered (timeout / prompt withdrawn) — not a user refusal
-        return _consent(decision.get("choice"), "decline")
+        choice = decision.get("choice")
+        if remember_key and choice in ("session", "always"):
+            _a.persist_elicitation_choice(session_key, choice, remember_key)
+        return _consent(choice, "decline")
 
     # Nobody can answer a -q, cron or unattended-platform worker. A `hermes chat -q` turn still has the CLI's
     # panel callback registered, which would wait the full approval timeout before failing closed.
@@ -347,12 +363,16 @@ def request_elicitation_consent(message: str, description: str, *,
     hook_choice = "cancelled"
     try:
         from tools.terminal_tool import _get_approval_callback
-        # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
-        # Pass the agent thread's panel callback: without it prompt_toolkit fails the prompt closed unseen.
+        # Without a remember_key elicitation is a per-call confirmation — no scope to keep, so
+        # once/deny only. Pass the agent thread's panel callback: without it prompt_toolkit fails
+        # the prompt closed unseen.
         choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
-                                           allow_permanent=False, title=title,
+                                           allow_permanent=remember_key is not None,
+                                           allow_session=remember_key is not None, title=title,
                                            approval_callback=_get_approval_callback())
         hook_choice = choice
+        if remember_key and choice in ("session", "always"):
+            _a.persist_elicitation_choice(session_key, choice, remember_key)
     except Exception as exc:
         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
         return "decline"

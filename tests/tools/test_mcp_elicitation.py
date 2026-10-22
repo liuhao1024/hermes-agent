@@ -21,7 +21,7 @@ from mcp.types import ElicitResult
 from tools.mcp_tool_sampling import ElicitationHandler
 
 
-def _form_params(message="please confirm", schema=None):
+def _form_params(message="please confirm", schema=None, meta=None):
     """Build a stand-in for ElicitRequestFormParams.
 
     We use a plain object (not the SDK type directly) so the test doesn't
@@ -33,6 +33,7 @@ def _form_params(message="please confirm", schema=None):
         mode="form",
         message=message,
         requested_schema=schema or {},
+        meta=meta,
     )
 
 
@@ -257,3 +258,118 @@ class TestRequestedSchemaFieldName:
         # An empty schema renders the generic "Approval requested by ..."
         # fallback, so the field name is what proves the schema was read.
         assert "card_number" in (captured.get("description") or ""), captured
+
+
+def _remember_key(server: str, message: str) -> str:
+    """The handler's approval key for a remembered elicitation choice."""
+    import hashlib
+    digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"mcp_elicitation/{server}/{digest}"
+
+
+class TestConsentRemembersSessionChoice:
+    """Issue #142803: ``request_elicitation_consent`` keeps a ``session``/``always`` answer
+    under the caller's remember_key, and the next identical request short-circuits to
+    ``accept`` without re-prompting. A ``once`` answer persists nothing."""
+
+    def test_once_persists_nothing_then_session_persists_and_short_circuits(self, monkeypatch):
+        """Full consent-router round trip on the api_server gateway path: a client resolving
+        with ``once`` stores nothing; resolving with ``session`` stores the key, and the
+        very next identical consent returns ``accept`` with no second prompt."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools import approval, approval_prompt
+        from tools.approval_context import (
+            reset_current_session_key,
+            set_current_session_key,
+        )
+
+        session_key = "elicitation-remember"
+        seen = []
+        # Fail fast instead of waiting on the CLI input timeout if routing goes wrong.
+        monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval",
+                            lambda *_args, **_kwargs: "deny")
+
+        def notify(approval_data):
+            seen.append(dict(approval_data))
+            assert approval.resolve_gateway_approval(
+                session_key, notify.choice, request_id=approval_data["request_id"]) == 1
+
+        session_tokens = set_session_vars(
+            platform="api_server", session_key=session_key, async_delivery=False
+        )
+        key_token = set_current_session_key(session_key)
+        approval.register_gateway_notify(session_key, notify)
+        key = _remember_key("codex", "Allow Computer Use?")
+        try:
+            notify.choice = "once"
+            assert approval_prompt.request_elicitation_consent(
+                "Allow Computer Use?", "d", remember_key=key) == "accept"
+            assert not approval.is_approved(session_key, key), "once must persist nothing"
+
+            notify.choice = "session"
+            assert approval_prompt.request_elicitation_consent(
+                "Allow Computer Use?", "d", remember_key=key) == "accept"
+            assert approval.is_approved(session_key, key), "session must persist the key"
+
+            # Stored choice: answered without a third prompt.
+            assert approval_prompt.request_elicitation_consent(
+                "Allow Computer Use?", "d", remember_key=key) == "accept"
+        finally:
+            approval.unregister_gateway_notify(session_key)
+            reset_current_session_key(key_token)
+            clear_session_vars(session_tokens)
+            approval.clear_session(session_key)
+
+        assert len(seen) == 2, f"expected exactly two prompts, got {len(seen)}"
+        assert seen[0].get("allow_session") is not False, (
+            "a rememberable consent must keep offering the session scope"
+        )
+
+
+class TestPersistScopeEcho:
+    """Issue #142803: an ``accept`` covered by a stored scope echoes that scope back in
+    ``_meta.persist`` -- but only in the vocabulary the server advertised."""
+
+    def _run(self, message, meta, stored_scope, handler_name="codex"):
+        from tools import approval
+        from tools.approval_context import (
+            reset_current_session_key,
+            set_current_session_key,
+        )
+        handler = ElicitationHandler(handler_name, {"timeout": 5})
+        params = _form_params(message, meta=meta)
+        key = _remember_key(handler_name, message)
+        session_key = "elicitation-scope-echo"
+        token = set_current_session_key(session_key)
+        try:
+            if stored_scope == "session":
+                approval.approve_session(session_key, key)
+            elif stored_scope == "always":
+                approval.approve_permanent(key)
+            with patch("tools.approval_prompt.request_elicitation_consent", return_value="accept"):
+                return asyncio.run(handler(context=None, params=params))
+        finally:
+            reset_current_session_key(token)
+            approval.clear_session(session_key)
+            approval._permanent_set().discard(key)
+
+    def test_session_scope_echoed_when_server_offers_both_modes(self):
+        result = self._run("Allow Computer Use to use 'Google Chrome'?",
+                          {"persist": ["session", "always"]}, "session")
+        assert result.action == "accept"
+        assert result.meta == {"persist": "session"}
+
+    def test_permanent_scope_downgrades_for_a_session_only_server(self):
+        result = self._run("Allow Computer Use?", {"persist": ["session"]}, "always")
+        assert result.meta == {"persist": "session"}
+
+    def test_scope_not_echoed_when_server_never_asked_for_modes(self):
+        result = self._run("Allow Computer Use?", meta=None, stored_scope="session")
+        assert result.action == "accept"
+        assert result.meta is None
+
+    def test_one_shot_accept_carries_no_meta(self):
+        result = self._run("Allow Computer Use?", {"persist": ["session", "always"]},
+                           stored_scope=None)
+        assert result.action == "accept"
+        assert result.meta is None
