@@ -613,7 +613,9 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     return system
 
 
-def _thinking_kwargs(reasoning_config: dict[str, Any], model: str, effective_max_tokens: int) -> dict[str, Any]:
+def _thinking_kwargs(
+    reasoning_config: dict[str, Any], model: str, effective_max_tokens: int, base_url: str | None = None
+) -> dict[str, Any]:
     """Map ``reasoning_config`` to Anthropic thinking kwargs. Adaptive models (Claude 4.6+,
     Kimi/Moonshot) get ``thinking.type=adaptive`` + ``output_config.effort``; older models and
     manual-only compat endpoints (MiniMax) get budget_tokens. Haiku through 4.5 gets none. On
@@ -635,11 +637,16 @@ def _thinking_kwargs(reasoning_config: dict[str, Any], model: str, effective_max
             adaptive_effort = "max"
         return {"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": adaptive_effort}}
     budget = THINKING_BUDGET.get(effort, 8000)
-    return {
+    manual_kwargs = {
         "thinking": {"type": "enabled", "budget_tokens": budget},
         "temperature": 1,  # required when thinking is enabled on older models
         "max_tokens": max(effective_max_tokens, budget + 4096),
     }
+    if _is_minimax_anthropic_endpoint(base_url):
+        # MiniMax parses budget_tokens but ignores it; the documented knob is output_config.effort
+        # (#143065). "enabled" stays — the endpoint 400s on every other thinking type.
+        manual_kwargs["output_config"] = {"effort": ADAPTIVE_EFFORT_MAP.get(effort, "medium")}
+    return manual_kwargs
 
 
 # OpenAI tool_choice -> Anthropic; any other string is a forced tool name.
@@ -698,7 +705,7 @@ def build_anthropic_kwargs(
     # reasoning blocks stay populated — matching 4.6 behavior and preserving the activity-feed UX during
     # long tool runs.
     if reasoning_config and isinstance(reasoning_config, dict):
-        kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens))
+        kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens, base_url=base_url))
     # Safety net so upstream 4.6 -> 4.7 migrations don't need coordinated edits everywhere callers
     # (auxiliary_client, ...) set sampling params.
     if _forbids_sampling_params(model):

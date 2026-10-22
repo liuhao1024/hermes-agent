@@ -52,8 +52,62 @@ class TestMinimaxThinkingSupport:
         assert "thinking" in kwargs
         assert kwargs["thinking"]["type"] == "enabled"
         assert "budget_tokens" in kwargs["thinking"]
-        # MiniMax should NOT get adaptive thinking or output_config
+        # Without the endpoint there is no MiniMax contract to honour, so no effort knob either.
         assert "output_config" not in kwargs
+
+
+class TestMinimaxEffortKnob:
+    """#143065: MiniMax's Anthropic endpoint parses budget_tokens but ignores it — the
+    documented knob is output_config.effort (low/medium/high/xhigh/max). The manual-thinking
+    block keeps its shape on that endpoint ("enabled" is the only accepted thinking type) and
+    the real knob rides along; the no-base_url path above stays unchanged."""
+
+    @staticmethod
+    def _kwargs(effort, base_url="https://api.minimaxi.com/anthropic"):
+        from agent.anthropic_adapter import build_anthropic_kwargs
+        return build_anthropic_kwargs(
+            model="MiniMax-M3.1-Flash",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": effort},
+            base_url=base_url,
+        )
+
+    def test_minimax_endpoint_sends_output_config_effort(self):
+        kwargs = self._kwargs("low")
+        assert kwargs["thinking"]["type"] == "enabled"  # harmless scaffolding stays
+        assert kwargs["thinking"]["budget_tokens"] == 4000
+        assert kwargs["output_config"] == {"effort": "low"}
+
+    def test_effort_levels_map_to_minimax_documented_levels(self):
+        # xhigh survives (MiniMax documents five levels — the xhigh->max downgrade is a Claude
+        # 4.6 limitation); the legacy "ultra" alias maps to max; an unknown level falls back.
+        assert self._kwargs("xhigh")["output_config"] == {"effort": "xhigh"}
+        assert self._kwargs("ultra")["output_config"] == {"effort": "max"}
+        assert self._kwargs("turbo")["output_config"] == {"effort": "medium"}
+
+    def test_disabled_reasoning_omits_everything(self):
+        # M3.1 400s on thinking.type="disabled"; the disable path already omits the thinking
+        # block for non-Claude models, so nothing effort-shaped is sent either.
+        from agent.anthropic_adapter import build_anthropic_kwargs
+        kwargs = build_anthropic_kwargs(
+            model="MiniMax-M3.1-Flash",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": False, "effort": "low"},
+            base_url="https://api.minimaxi.com/anthropic",
+        )
+        assert "thinking" not in kwargs
+        assert "output_config" not in kwargs
+
+    def test_non_minimax_endpoint_gets_no_effort_knob(self):
+        # Regression fence: the knob is keyed to the endpoint, not the model name, so other
+        # manual-thinking compat endpoints keep the exact pre-#143065 payload.
+        kwargs = self._kwargs("low", base_url="https://api.deepseek.example/anthropic")
+        assert "output_config" not in kwargs
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4000}
 
 
 
