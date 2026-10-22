@@ -42,13 +42,21 @@ logger = logging.getLogger("gateway.run")
 
 
 def _acp_launch(runner, source) -> bool:
-    """An editor session: ACP shows no reasoning event yet, so its reply keeps the projected block."""
+    """An editor session: its reply keeps the projected block while the editor has no live
+    reasoning stream that already showed it."""
     from gateway.session_setting_commands import local_policy
     from hermes_state_runtime import RuntimeStoreError
     try:
         return getattr(local_policy(runner, source), "source", None) == "acp"
     except RuntimeStoreError:  # a local route with no restored policy is not an editor launch
         return False
+
+
+def _acp_live_reasoning(runner, source) -> bool:
+    """An editor session the adapter switched to live reasoning: its reasoning already streamed to
+    the client as reasoning.delta thought chunks, so the projected block would duplicate it."""
+    from gateway.session_setting_commands import local_live
+    return getattr(local_live(runner, source), "show_reasoning", None) is True
 
 
 class GatewayTurnPersistenceMixin:
@@ -156,6 +164,10 @@ class GatewayTurnPersistenceMixin:
         if source.platform == Platform.LOCAL and not _acp_launch(self, source):
             # Local viewers receive reasoning.delta through their event stream; projecting it into
             # the final response duplicates it and leaks messaging-platform formatting into Desktop.
+            return response
+        if source.platform == Platform.LOCAL and _acp_live_reasoning(self, source):
+            # The adapter asked for live reasoning on attach, so this block already streamed as
+            # reasoning.delta thought chunks; folding it into the reply delivers it twice (#141919).
             return response
         from gateway.run import _load_gateway_config, _platform_config_key, _resolve_gateway_display_bool
         try:
