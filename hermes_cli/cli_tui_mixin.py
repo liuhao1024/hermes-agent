@@ -539,6 +539,34 @@ class CLITuiMixin:
             term_rows = _term_rows()
         scroll_offset, visible = HermesCLI._compute_model_picker_viewport(
             selected, state.get("_scroll_offset", 0), len(labels), term_rows)
+        # That budget counts entries, but a long label ("command — description") wraps to a
+        # continuation row, so the rendered panel grows past the rows the terminal left for it
+        # and the input area overlaps the bottom items (#143140). Re-clamp the window in
+        # wrapped-row space; the 6 matches the viewport's ``panel_chrome`` (borders, blanks, hint).
+        budget_rows = max(1, term_rows - _PANEL_RESERVED_BELOW - 6)
+        heights = [
+            len(_prefix_wrapped_rows(_wrap_panel_text, label, label_width, "  ", indent))
+            for label in labels
+        ]
+        count, used = 0, 0
+        for idx in range(scroll_offset, min(scroll_offset + visible, len(labels))):
+            if count and used + heights[idx] > budget_rows:
+                break
+            used += heights[idx]
+            count += 1
+        visible = count
+        if not scroll_offset <= selected < scroll_offset + visible:
+            # The clamp pushed the selection off-screen: rebuild the window around it,
+            # filling downward first, then upward only with rows to spare.
+            end, used = selected + 1, heights[selected]
+            while end < len(labels) and used + heights[end] <= budget_rows:
+                used += heights[end]
+                end += 1
+            start = selected
+            while start > 0 and used + heights[start - 1] <= budget_rows:
+                used += heights[start - 1]
+                start -= 1
+            scroll_offset, visible = start, end - start
         state["_scroll_offset"] = scroll_offset
 
         panel = _Panel('class:clarify-border', box_width, title, 'class:clarify-title')

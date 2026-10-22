@@ -6,7 +6,7 @@ model id such as MLX Core's ``peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-MLX-oQ4e
 strand ``❯`` on a row of its own when selected, and lose its indent when not.
 """
 from cli import _panel_box_width
-from hermes_cli.cli_tui_mixin import CLITuiMixin
+from hermes_cli.cli_tui_mixin import _PANEL_RESERVED_BELOW, CLITuiMixin
 
 LONG_LABEL = "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-MLX-oQ4e-MTP"
 PICKER_TITLE = "⚙ Model Picker — MLX Core (LAN)"
@@ -58,3 +58,39 @@ def test_palette_rows_align_on_the_cursor_cell_and_wrap_with_its_indent():
     rows = [r.rstrip() for r in _render([token, "/help  —  Help"], 0, indent="    ", min_width=50,
                                         max_width=90, title="⚙ Command Palette", hint=hint)]
     assert rows == [f"❯ {token}", "  /help  —  Help"], rows
+
+
+def _pin_term_rows(monkeypatch, rows):
+    """Force the renderer's fallback terminal size: importing ``cli`` installs a
+    DummyApplication, so ``get_app().output.get_size()`` would otherwise win with the
+    host process's rows instead of the pinned ones."""
+    monkeypatch.setattr("hermes_cli.cli_tui_mixin._term_rows", lambda: rows)
+
+    def _no_app():
+        raise RuntimeError("no app in test")
+
+    monkeypatch.setattr("prompt_toolkit.application.get_app", _no_app)
+
+
+def test_wrapped_labels_keep_the_panel_inside_the_terminal_row_budget(monkeypatch):
+    """:issue:`143140` — the viewport budget counts entries, but a wrapped label renders two
+    rows, so a palette full of long "command — description" rows grew the panel past the rows
+    the terminal left for it and the input area overlapped the bottom items."""
+    _pin_term_rows(monkeypatch, 24)
+    labels = [f"/cmd-{i:02d}  —  " + "x" * 100 for i in range(12)]  # every entry wraps
+    frags = _Host()._render_scroll_list_panel(
+        {"selected": 0}, "⚙ Command Palette", "Type to filter 12 commands", labels,
+        min_width=50, max_width=90, indent="    ")
+    text = "".join(t for _style, t in frags)
+    panel_height = len(text.splitlines())
+    assert panel_height <= 24 - _PANEL_RESERVED_BELOW  # the input area keeps its rows
+
+
+def test_tail_selection_survives_the_wrapped_row_window(monkeypatch):
+    _pin_term_rows(monkeypatch, 24)
+    labels = [f"/cmd-{i:02d}  —  " + "x" * 100 for i in range(12)]
+    frags = _Host()._render_scroll_list_panel(
+        {"selected": 11, "_scroll_offset": 0}, "⚙ Command Palette", "Type to filter 12 commands",
+        labels, min_width=50, max_width=90, indent="    ")
+    text = "".join(t for _style, t in frags)
+    assert any("❯ /cmd-11" in line for line in text.splitlines())
