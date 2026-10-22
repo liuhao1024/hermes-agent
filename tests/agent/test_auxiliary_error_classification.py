@@ -90,3 +90,13 @@ def test_upstream_capacity_429_is_not_a_credential_to_bench(monkeypatch, body, b
     if benches_pool:
         assert pool.rotate_calls[0]["status_code"] == 429
         assert pool.rotate_calls[0]["api_key_hint"] == "sk-failed"
+
+
+def test_nous_free_period_ended_404_reaches_the_stale_model_self_heal():
+    """A Portal-recommended :free model whose free window closed 404s on every call (#143038);
+    the cached pick is dead until refreshed, so the error must classify as model-not-found
+    (the Nous rung force-refreshes the recommendation and retries) instead of falling through
+    to the plain provider fallback — and payment must not claim it (no billing phrasing)."""
+    exc = _Err("Error code: 404 - \"This model's free period has ended.\"", 404)
+    assert ac._is_model_not_found_error(exc)
+    assert not ac._is_payment_error(exc)

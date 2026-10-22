@@ -3475,7 +3475,7 @@ def _is_model_not_found_error(exc: Exception) -> bool:
         "model does not exist", "does not exist in our configuration", "openrouter catalog",
         "is not a valid model", "no such model", "model not found",
         "the model `",            # OpenAI-style: "The model `X` does not exist"
-        "model_not_found", "unknown model",
+        "model_not_found", "unknown model", "free period has ended",
     ))
 
 
