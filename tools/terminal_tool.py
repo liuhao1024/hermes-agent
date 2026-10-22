@@ -1092,6 +1092,10 @@ def _run_approval_guards(command: str, env_type: str, config: dict[str, Any], *,
         raise _Rejected(_error_json(approval.get("message", fallback_msg), status="blocked",
                                     **({"user_summary": approval["user_summary"]} if approval.get("user_summary") else {})))
     desc = approval.get("description", "flagged as dangerous")
+    # The verdict note below already covers a human grant; drop the shared pending note so the
+    # generic tool-result annotator does not add a second approval line (#142867).
+    from tools.approval_context import take_human_grant_note
+    take_human_grant_note()
     if approval.get("user_approved"):
         return _ApprovalVerdict(
             note=f"Command required approval ({desc}) and was approved by the user.",

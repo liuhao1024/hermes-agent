@@ -743,10 +743,11 @@ _EXECUTE_CODE_GATE = _GateSpec(
     ),
     smart_log="Smart approval: auto-approved execute_code for session {session_key}",
 )
-# Plugin-escalated tool calls / protected writes: no transport, no breaker,
-# no user_approved marker (parity with the historical gate).
+# Plugin-escalated tool calls / protected writes: no transport, no breaker. The user_approved
+# marker now applies here too: every human grant must be distinguishable from "no card was
+# needed" (#142867), parity with the command/code gates.
 _ACTION_GATE = _GateSpec(
-    noun="action", transport=False, user_approved=False, redact_cli=False, pending_keys=False,
+    noun="action", transport=False, user_approved=True, redact_cli=False, pending_keys=False,
     notify_failed="BLOCKED: Failed to send approval request to user. Do NOT retry.",
     gateway_refused="BLOCKED: Action {reason}.{reason_addendum}" + _STOP_ACTION
                     + "{timeout_addendum}",
@@ -828,9 +829,13 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
         # A smart-DENY owner override is always one operation, even if an older client returns "session" or "always".
         if not smart_denied:
             _persist_choice(session_key, choice, pattern_keys)
-        if spec.user_approved:
-            return _user_approved(session_key, description)
-        return _approved()
+        result = _user_approved(session_key, description)
+        # A person's yes must reach the model as clearly as a denial's BLOCKED line: without a
+        # message the agent cannot tell "approved after a card" from "no card was needed" (#142867).
+        scope = "once" if smart_denied else choice
+        result["message"] = f"Approved by the user ({scope}) after an approval request."
+        approval_context.note_human_grant(result["message"])
+        return result
 
     if spec.transport:
         attempt = _present_with_selected_transport(
