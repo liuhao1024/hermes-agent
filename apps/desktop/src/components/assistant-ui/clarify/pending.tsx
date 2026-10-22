@@ -12,6 +12,8 @@ import {
   type ClarifyQuestion,
   type ClarifyRequest,
   clearClarifyRequest,
+  lockedAnswer,
+  settleClarify,
   skipClarify
 } from '@/store/clarify'
 import { $gateway } from '@/store/gateway'
@@ -209,7 +211,21 @@ export function ClarifyToolPending({
 
       triggerHaptic('submit')
       onAnswered()
-      // tool.complete lands next → ClarifyToolSettled.
+      // tool.complete usually swaps in the server's settled result next; settle
+      // from the staged answers too, so a lost event or a stopped turn still
+      // shows what was answered instead of collapsing the card (#142811).
+      settleClarify(request, {
+        outcome: 'submitted',
+        responses: questions.map(question => {
+          const answer = stagedAnswer(question)
+
+          return {
+            question: question.question,
+            status: answer === null ? 'unanswered' : 'answered',
+            user_response: answer === null ? null : lockedAnswer(question, answer)
+          }
+        })
+      })
       clearClarifyRequest(request.requestId, request.sessionId)
     } catch (error) {
       notifyError(error, copy.sendFailed)

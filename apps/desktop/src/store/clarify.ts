@@ -152,7 +152,7 @@ function forgetSettledClarify(requestId: string): void {
   }
 }
 
-function settleClarify(request: ClarifyRequest, result: Record<string, unknown>): void {
+export function settleClarify(request: ClarifyRequest, result: Record<string, unknown>): void {
   $settledClarifyResults.set({ ...$settledClarifyResults.get(), [request.requestId]: result })
 }
 
@@ -209,7 +209,7 @@ export function clearSettledClarifyRequest(sessionId: string | null): void {
 }
 
 /** A locked answer as the server's result carries it: a multi-select answer is stored as a JSON list. */
-function lockedAnswer(question: ClarifyQuestion, raw: string): string | string[] {
+export function lockedAnswer(question: ClarifyQuestion, raw: string): string | string[] {
   if (!question.multiSelect) {
     return raw
   }

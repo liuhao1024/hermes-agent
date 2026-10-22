@@ -8,7 +8,7 @@ import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { hiddenPaneProps } from '@/components/pane-shell/pane-visibility'
 import { $activeTreeGroup, $hoveredTreeGroup } from '@/components/pane-shell/tree/store'
 import { I18nProvider } from '@/i18n'
-import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
+import { $settledClarifyResults, clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { $gateway } from '@/store/gateway'
 import { $profiles } from '@/store/profile'
 import { hasOpenServerRequest, rememberServerRequest, resetServerRequestsForTests } from '@/store/server-requests'
@@ -51,6 +51,9 @@ function liveServerRequest(id: string) {
 
 beforeEach(() => {
   resetServerRequestsForTests()
+  // Submits settle too now (#142811): a previous case's answers must not
+  // render as this case's settled card.
+  $settledClarifyResults.set({})
 })
 
 afterEach(() => {
@@ -153,7 +156,7 @@ describe('ClarifyTool live card stays mounted across settle', () => {
     expect(screen.queryByRole('button', { name: /Confirm and continue/ })).toBeNull()
   })
 
-  it('holds the card through the gap between answering and the settled result', async () => {
+  it('settles the card from the staged answers before tool.complete lands (#142811)', async () => {
     const { request, rerender } = renderLiveClarify()
 
     fireEvent.click(screen.getByRole('button', { name: /staging/ }))
@@ -163,12 +166,14 @@ describe('ClarifyTool live card stays mounted across settle', () => {
       expect(request).toHaveBeenCalled()
     })
 
-    // tool.complete is what swaps in the settled card; the turn can already
-    // read as not-running in that gap.
+    // The submit settles from the staged answers immediately, so the answered
+    // Q&A renders through the gap where tool.complete has not yet swapped in
+    // the server's result — even once the turn reads as not-running.
     messageRunning = false
     rerender(clarifyTree(<ClarifyTool {...liveClarifyProps()} />))
 
-    expect(document.querySelector('form[data-clarify-batch]')).toBeTruthy()
+    expect(document.querySelector('[data-clarify-settled]')).toBeTruthy()
+    expect(document.querySelector('[data-clarify-answer]')?.textContent).toBe('staging')
   })
 
   it('demotes when the turn is stopped after the card was live but never answered', () => {

@@ -47,9 +47,11 @@ function ClarifyToolLive(props: ToolCallMessagePartProps) {
   const [answered, setAnswered] = useState(false)
   const settledResults = useStore($settledClarifyResults)
   const requestId = requestIdByToolCall.get(rowKey)
-  const settledResult = requestId && request?.requestId !== requestId ? settledResults[requestId] : undefined
+  // A one-at-a-time batch reuses this row: an open follow-up request outranks
+  // the previous question's settled answers.
+  const settledResult = !request && requestId ? settledResults[requestId] : undefined
 
-  if (request && !settledResult && request.requestId !== requestId) {
+  if (request && request.requestId !== requestId) {
     requestIdByToolCall.set(rowKey, request.requestId)
   }
 
