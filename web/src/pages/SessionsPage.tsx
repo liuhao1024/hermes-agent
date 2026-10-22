@@ -798,6 +798,7 @@ export default function SessionsPage() {
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
   const { activeAction, actionStatus, dismissLog } = useSystemActions();
+  const navigate = useNavigate();
   const resumeInChatEnabled = isDashboardEmbeddedChatEnabled();
   const selectedSources = sourceSelectionsByCategory[sessionCategory];
 
@@ -2083,7 +2084,16 @@ export default function SessionsPage() {
                 {recentSessions.map((s) => (
                   <div
                     key={s.id}
-                    className="flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+                    data-session-id={s.id}
+                    onClick={
+                      resumeInChatEnabled
+                        ? () =>
+                            navigate(
+                              `/chat?resume=${encodeURIComponent(s.id)}`,
+                            )
+                        : undefined
+                    }
+                    className={`flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between ${resumeInChatEnabled ? "cursor-pointer transition-colors hover:border-current/40 hover:bg-secondary/30" : ""}`}
                   >
                     <div className="flex min-w-0 flex-1 flex-col gap-1">
                       <span

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
@@ -257,5 +257,92 @@ describe("structured reasoning rendering (#59957)", () => {
     expect(text).toContain("<action>tool_call</action>");
     expect(text).toContain('<result>{"ok":true}</result>');
     expect(document.querySelectorAll("pre code").length).toBe(0);
+  });
+});
+
+describe("Sessions Overview recent cards (#142835)", () => {
+  const recent = (id: string) => ({
+    id, profile: "default", source: "cli", model: null, title: "Recent one", started_at: 1,
+    ended_at: null, last_active: 1, is_active: false, message_count: 2, tool_call_count: 0,
+    input_tokens: 1, output_tokens: 1, preview: "hi",
+  });
+  let routerPath: () => string;
+
+  async function renderOverview(rows: Record<string, unknown>[]) {
+    apiMocks.getSessions.mockImplementation(async (limit: number) => ({
+      sessions: limit >= 50 ? rows : [],
+      total: limit >= 50 ? rows.length : 0,
+      limit,
+      offset: 0,
+    }));
+    const [{ default: SessionsPage }, { I18nProvider }, { SystemActionsProvider }, { ProfileProvider }, { PageHeaderProvider }] =
+      await Promise.all([
+        import("./SessionsPage"),
+        import("@/i18n"),
+        import("@/contexts/SystemActions"),
+        import("@/contexts/ProfileProvider"),
+        import("@/contexts/PageHeaderProvider"),
+      ]);
+    function Probe() {
+      const { pathname, search } = useLocation();
+      routerPath = () => pathname + search;
+      return null;
+    }
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <I18nProvider>
+          <MemoryRouter>
+            <SystemActionsProvider>
+              <ProfileProvider>
+                <PageHeaderProvider pluginTabs={[]}>
+                  <Probe />
+                  <SessionsPage />
+                </PageHeaderProvider>
+              </ProfileProvider>
+            </SystemActionsProvider>
+          </MemoryRouter>
+        </I18nProvider>,
+      ),
+    );
+    await waitFor(() =>
+      (document.body.textContent ?? "").includes("Recent one"),
+    );
+  }
+
+  function recentCard(id: string): HTMLDivElement {
+    const card = document.querySelector<HTMLDivElement>(
+      `[data-session-id="${id}"]`,
+    );
+    if (!card) throw new Error("recent card not rendered");
+    return card;
+  }
+
+  it("opens the session in chat when a recent-sessions card is clicked", async () => {
+    await renderOverview([recent("sid-recent-1")]);
+
+    expect(recentCard("sid-recent-1").className).toContain("cursor-pointer");
+
+    await act(async () => click(recentCard("sid-recent-1")));
+    expect(routerPath()).toBe("/chat?resume=sid-recent-1");
+  });
+
+  it("renders inert when the embedded chat is unavailable", async () => {
+    const flags = await import("@/lib/dashboard-flags");
+    const spy = vi
+      .spyOn(flags, "isDashboardEmbeddedChatEnabled")
+      .mockReturnValue(false);
+    try {
+      await renderOverview([recent("sid-recent-2")]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(recentCard("sid-recent-2").className).not.toContain("cursor-pointer");
+
+    await act(async () => click(recentCard("sid-recent-2")));
+    expect(routerPath()).toBe("/");
   });
 });
