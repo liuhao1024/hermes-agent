@@ -74,15 +74,16 @@ def resolve_ledger_path(explicit: str | None = None) -> Path:
 def normalize_url(url: str) -> str:
     """Canonicalize a URL for ledger identity.
 
-    Strips the fragment and a trailing slash so ``/page``, ``/page/`` and
-    ``/page#section`` are one source.  Query strings are significant and are
-    kept — they usually select different content.
+    Strips surrounding whitespace and the fragment so ``/page`` and
+    ``/page#section`` are one source.  Path and query bytes — including a
+    trailing slash — are kept exactly as given: ``/page`` and ``/page/`` can
+    serve different content, and merging them without retrieval evidence
+    silently collapses distinct sources (#142871).
     """
     u = (url or "").strip()
     if "#" in u:
         u = u.split("#", 1)[0]
-    stripped = u.rstrip("/")
-    return stripped or u
+    return u
 
 
 def load_ledger(path: Path) -> dict[str, Any]:
@@ -105,12 +106,14 @@ def save_ledger(path: Path, data: dict[str, Any]) -> None:
 
 
 class _LedgerLock:
-    """Best-effort cross-process lock (O_EXCL lockfile, stdlib only).
+    """Cross-process lock (O_EXCL lockfile, stdlib only).
 
     Parallel subagents can share one ledger via --ledger; without a lock two
-    concurrent ``add`` calls can assign the same id.  Falls through after the
-    timeout rather than blocking a task forever — a stale lock must never
-    wedge the ledger.
+    concurrent ``add`` calls can assign the same id.  A held lock is never
+    broken open: on timeout the acquire fails loudly instead of entering the
+    critical section without exclusive ownership (#142871).  A crashed
+    writer's lock stays in place as an explicit error until controlled
+    offline recovery — confirm the writer exited, then remove only its lock.
     """
 
     def __init__(self, path: Path, timeout: float = 5.0) -> None:
@@ -127,22 +130,28 @@ class _LedgerLock:
                 return self
             except FileExistsError:
                 if time.monotonic() >= deadline:
-                    # Assume a stale lock from a crashed run.
-                    try:
-                        self.lock_path.unlink()
-                    except OSError:
-                        return self
-                    continue
+                    raise SystemExit(
+                        f"error: ledger lock at {self.lock_path} is held by another writer "
+                        f"(waited {self.timeout:.1f}s); if that writer crashed, confirm it "
+                        "exited and remove the lock file by hand"
+                    )
                 time.sleep(0.05)
 
     def __exit__(self, *_exc: object) -> None:
-        if self.fd is not None:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
         try:
-            self.lock_path.unlink()
+            # Remove only the lock file we still own: if another writer
+            # already replaced it, its inode must survive our exit.
+            owned = os.fstat(fd)
+            current = os.stat(str(self.lock_path))
+            if (owned.st_dev, owned.st_ino) == (current.st_dev, current.st_ino):
+                self.lock_path.unlink()
+        except OSError:
+            pass
+        try:
+            os.close(fd)
         except OSError:
             pass
 

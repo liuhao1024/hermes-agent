@@ -53,10 +53,24 @@ def test_ids_are_stable_and_sequential(sources_mod, ledger: Path) -> None:
     assert again[0]["id"] == 1
 
 
-def test_url_normalization_collapses_fragment_and_trailing_slash(sources_mod, ledger: Path) -> None:
+def test_url_normalization_collapses_fragments_only(sources_mod, ledger: Path) -> None:
     base = sources_mod.add_sources(ledger, ["https://x.example/page"])[0]["id"]
-    for variant in ("https://x.example/page/", "https://x.example/page#part"):
+    for variant in ("https://x.example/page#part", " https://x.example/page\t"):
         assert sources_mod.add_sources(ledger, [variant])[0]["id"] == base
+
+
+def test_url_normalization_preserves_trailing_slash_identity(sources_mod, ledger: Path) -> None:
+    # /page and /page/ can serve different content; without retrieval
+    # evidence of equivalence they must keep separate ledger ids (#142871).
+    base = sources_mod.add_sources(ledger, ["https://x.example/page"])[0]["id"]
+    slashed = sources_mod.add_sources(ledger, ["https://x.example/page/"])[0]["id"]
+    assert slashed != base
+
+
+def test_url_normalization_never_touches_query_data(sources_mod, ledger: Path) -> None:
+    a = sources_mod.add_sources(ledger, ["https://x.example/s?q=value"])[0]["id"]
+    b = sources_mod.add_sources(ledger, ["https://x.example/s?q=value/"])[0]["id"]
+    assert a != b
 
 
 def test_query_string_is_significant(sources_mod, ledger: Path) -> None:
@@ -548,3 +562,50 @@ def test_stats_reports_provenance_total_matching_coverage(sources_mod, ledger: P
     stats = warnings[0]
     # 4 sentences, 3 with provenance (the both-marked sentence counts once).
     assert "4 prose sentence(s), 3 with declared provenance (75%)" in stats
+
+
+# ---------------------------------------------------------------------------
+# Ledger lock (fail-closed)
+# ---------------------------------------------------------------------------
+
+
+def _lock_path(sources_mod, ledger: Path) -> Path:
+    return ledger.with_suffix(ledger.suffix + ".lock")
+
+
+def test_lock_timeout_fails_closed_and_keeps_the_foreign_lock(sources_mod, ledger: Path) -> None:
+    lock = _lock_path(sources_mod, ledger)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock.open("w")  # another live writer owns the lock
+    try:
+        with pytest.raises(SystemExit) as exc:
+            with sources_mod._LedgerLock(ledger, timeout=0.0):
+                raise AssertionError("critical section entered without the lock")
+        assert str(lock) in str(exc.value)
+        assert lock.exists()  # a live writer's lock is never unlinked (#142871)
+    finally:
+        holder.close()
+        lock.unlink(missing_ok=True)
+
+
+def test_lock_exit_does_not_remove_a_replaced_lock(sources_mod, ledger: Path) -> None:
+    lock = _lock_path(sources_mod, ledger)
+    with sources_mod._LedgerLock(ledger):
+        lock.unlink()
+        with lock.open("w") as replacement:
+            replacement.write("other writer\n")
+    # release removed only the inode it created; the replacement survives
+    assert lock.read_text(encoding="utf-8") == "other writer\n"
+    lock.unlink()
+
+
+def test_lock_release_allows_the_next_writer(sources_mod, ledger: Path) -> None:
+    lock = _lock_path(sources_mod, ledger)
+    guard = sources_mod._LedgerLock(ledger)
+    with guard:
+        assert lock.exists()
+    guard.__exit__(None, None, None)  # a second release must be a no-op
+    assert not lock.exists()
+    with sources_mod._LedgerLock(ledger, timeout=1.0):
+        assert lock.exists()
+    assert not lock.exists()
