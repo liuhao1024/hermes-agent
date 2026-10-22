@@ -155,8 +155,23 @@ def _probe_anthropic() -> ProbeResult:
     key = get_anthropic_key()
     if not key:
         return _skip(name)
+    base = os.getenv("ANTHROPIC_BASE_URL", "").strip()
+    if not base and str(_model_cfg().get("provider") or "").strip().lower() == "anthropic":
+        base = str(_model_cfg().get("base_url") or "").strip()
+    if base.rstrip("/").lower() == "https://api.anthropic.com":
+        base = ""  # the native host keeps the OAuth-aware /v1/models probe below
     try:
         import httpx
+        if base:
+            # Custom gateway (ANTHROPIC_BASE_URL or model.base_url): the runtime posts to
+            # /v1/messages there, and gateways commonly have no GET /v1/models (#66756) —
+            # probing api.anthropic.com instead 401s the gateway token as "invalid API key" (#143023).
+            r = _anthropic_messages_probe(base, key)
+            if r.status_code in (200, 400):  # an Anthropic-shaped 400 still proves route + auth
+                return _row(name, "ok")
+            if r.status_code in (401, 403):
+                return _row(name, "fail", "(invalid API key)" if r.status_code == 401 else "(access denied)")
+            return _row(name, "warn", f"(HTTP {r.status_code})")
         from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
         from agent.anthropic_credentials import _is_oauth_token
         is_oauth = _is_oauth_token(key)
