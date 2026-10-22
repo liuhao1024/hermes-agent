@@ -263,6 +263,60 @@ class TestMattermostSend:
 
 
 # ---------------------------------------------------------------------------
+# Typing indicator
+# ---------------------------------------------------------------------------
+
+class TestMattermostTyping:
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._bot_user_id = "bot_user_id"
+
+    @pytest.mark.asyncio
+    async def test_typing_in_thread_mode_targets_thread_root(self):
+        """In thread mode the typing event must carry parent_id (the thread root)."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        await self.adapter.send_typing("channel_1", metadata={"thread_id": "root_post"})
+
+        url, payload = self.adapter._api_post.call_args[0]
+        assert url == "users/bot_user_id/typing"
+        assert payload == {"channel_id": "channel_1", "parent_id": "root_post"}
+
+    @pytest.mark.asyncio
+    async def test_typing_accepts_root_id_metadata_key(self):
+        """metadata["root_id"] is an equally valid thread root (#142958)."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        await self.adapter.send_typing("channel_1", metadata={"root_id": "root_post"})
+
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload == {"channel_id": "channel_1", "parent_id": "root_post"}
+
+    @pytest.mark.asyncio
+    async def test_typing_without_thread_metadata_stays_channel_level(self):
+        """No thread metadata keeps the channel-level typing event."""
+        self.adapter._reply_mode = "thread"
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        await self.adapter.send_typing("channel_1")
+
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload == {"channel_id": "channel_1"}
+
+    @pytest.mark.asyncio
+    async def test_typing_in_flat_mode_never_sends_parent_id(self):
+        """Flat reply mode keeps typing channel-level even with thread metadata present."""
+        self.adapter._api_post = AsyncMock(return_value={})
+
+        await self.adapter.send_typing("channel_1", metadata={"thread_id": "root_post"})
+
+        payload = self.adapter._api_post.call_args[0][1]
+        assert payload == {"channel_id": "channel_1"}
+
+
+# ---------------------------------------------------------------------------
 # WebSocket event parsing
 # ---------------------------------------------------------------------------
 
