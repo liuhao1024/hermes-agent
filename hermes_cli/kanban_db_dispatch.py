@@ -2130,6 +2130,17 @@ def _dispatch_lane_task(
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
+            ssh_mismatch = _worktree_ssh_mismatch(claimed, assignee)
+            if ssh_mismatch is not None:
+                # No retry can heal this (the profile's backend decides where
+                # the worker's tools run), so trip now instead of spending the
+                # failure budget on identical spawn failures (#143249).
+                if _record_task_failure(
+                    conn, claimed.id, ssh_mismatch,
+                    outcome="spawn_failed", force_trip=True, release_claim=True, end_run=True,
+                ):
+                    result.auto_blocked.append(claimed.id)
+                return False
             workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
@@ -2638,6 +2649,44 @@ def _worker_profile_scope(hermes_home: str, *, bind_home: bool = True):
             reset_secret_scope(secret_token)
         if home_token is not None:
             reset_hermes_home_override(home_token)
+
+
+def _worktree_ssh_mismatch(task: Task, assignee: str) -> Optional[str]:
+    """Refuse a ``worktree`` workspace for an ssh-backed assignee (#143249).
+
+    The dispatcher materializes worktree tasks through the HOST git, so the
+    linked checkout's ``.git`` pointer names a host-side gitdir. A worker whose
+    profile runs ``terminal.backend: ssh`` executes its tools in a remote shell
+    that cannot resolve that pointer (``fatal: not a git repository``) while the
+    board keeps reporting the card healthy. Container backends translate host
+    paths in the tool layer and are not refused here; a profile whose config
+    cannot be read fails open (the spawn path then reports whatever breaks).
+    Returns the error string, or None to proceed with the dispatch.
+    """
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+        profile_home = resolve_profile_env(normalize_profile_name(assignee))
+    except Exception:
+        return None
+    try:
+        from hermes_cli.config import read_raw_config_readonly
+
+        with _worker_profile_scope(profile_home):
+            terminal_cfg = read_raw_config_readonly().get("terminal")
+    except Exception:
+        return None
+    if not isinstance(terminal_cfg, dict):
+        return None
+    if str(terminal_cfg.get("backend") or "").strip() != "ssh":
+        return None
+    return (
+        f"task {task.id} has workspace_kind=worktree but assignee profile "
+        f"{assignee!r} runs terminal.backend=ssh: the dispatcher materializes "
+        "worktrees with the host git, and an SSH worker cannot resolve the "
+        "host-side gitdir pointer (fatal: not a git repository). Use "
+        "--workspace dir:<worker-visible absolute path> or a scratch workspace."
+    )
 
 
 def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
