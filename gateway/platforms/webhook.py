@@ -520,8 +520,19 @@ class WebhookAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _profile_scope(profile: Optional[str]):
-        """Runtime scope for a resolved ``/p/<profile>/`` prefix; bare routes get a no-op."""
+        """Runtime scope for a resolved ``/p/<profile>/`` prefix. A bare route is default-bound
+        (see ``_route_allows_profile``), so with multiplexing active it enters the launch home's
+        scope — an unscoped caller fails its first passthrough credential read with
+        UnscopedSecretError, killing a route script before the interpreter even spawns (#143233;
+        the api_server's listener got the same fix in #61276). Single-profile gateways keep the
+        no-op: ``get_secret`` falls through to ``os.environ`` there."""
         if not profile or not isinstance(profile, str):
+            with suppress(Exception):
+                from agent.secret_scope import is_multiplex_active
+                if is_multiplex_active():
+                    from gateway.run import _profile_runtime_scope
+                    from hermes_constants import get_hermes_home
+                    return _profile_runtime_scope(get_hermes_home())
             return nullcontext()
         from gateway.run import _profile_runtime_scope
         from hermes_cli.profiles import get_profile_dir
