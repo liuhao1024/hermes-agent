@@ -437,6 +437,15 @@ DANGEROUS_PATTERNS = [
     # script-execution pattern above (which targets code evaluation, not file mutation). Pairs the sed -i
     # coverage from #14639.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    # sed's `w` command (`sed -n "w ~/.ssh/config" payload`) and the `s///w` flag write the pattern
+    # space to a file using neither -i nor shell redirection syntax, so every rule above (tee,
+    # redirection, cp/mv/install, in-place) missed them and cron's fail-closed deny never fired
+    # (#143198). A `w` word inside the sed command line is the write target's own spelling: reads
+    # (`sed 's/hello/world/' ~/.ssh/config`) keep `w` inside a word, and a `w` before a pipe is
+    # another command's argument. Ordinary `w /tmp/out` destinations stay ungated.
+    (rf'\bsed\b[^;|&\n]*\bw\s+["\']?{_USER_SENSITIVE_WRITE_TARGET}[^\s"\']*', "write to sensitive credential/SSH/shell-rc path via sed w command"),
+    (rf'\bsed\b[^;|&\n]*\bw\s+["\']?{_SYSTEM_CONFIG_PATH}', "write to system config via sed w command"),
+    (rf'\bsed\b[^;|&\n]*\bw\s+["\']?(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "write to Hermes config/env via sed w command"),
     # Interpreter heredocs are handled by _execution_flag_findings(); only shell heredocs stay
     # regex-based. `bash <<'EOF'` runs arbitrary commands without triggering the `bash -c` path.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<<', "shell execution via heredoc"),
