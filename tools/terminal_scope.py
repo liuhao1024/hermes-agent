@@ -172,6 +172,15 @@ def build_profile_terminal_scope(
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
+            # `${VAR}` refs expand where the config is loaded everywhere else (load_config,
+            # gateway config_loader); this direct read froze them verbatim and a gateway/routed
+            # session handed the docker backend literal `-v ${MOUNT_DIR}...` (exit 125).
+            # _env_ref_lookup resolves against the profile secret scope when one is bound
+            # (every install point binds it first) and os.environ otherwise — same policy as
+            # the CLI load; unresolved refs stay literal.
+            from hermes_cli.config import _expand_env_vars
+
+            raw_terminal = _expand_env_vars(raw_terminal)
             _apply_terminal_mapping(scope, raw_terminal)
             image_pinned = image_pinned or "docker_image" in raw_terminal
     scope["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if image_pinned else "0"
