@@ -800,6 +800,64 @@ function escapeCurrencyDollarsPreservingMath(text: string): string {
 const CJK_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\uff00-\uffef]/u
 
 /**
+ * True when `body` carries East Asian script OUTSIDE `\text{…}` runs. The
+ * standard LaTeX way to label math with CJK — `$D_{\text{外}}$` — keeps every
+ * CJK glyph inside a `\text` group, and KaTeX typesets that shape fine, so it
+ * is real math rather than CJK prose (#143506). A body whose CJK also (or
+ * only) sits bare — `$x = 变量$` — keeps its prose classification.
+ */
+function hasCjkOutsideTextRuns(body: string): boolean {
+  const groupIsTextRun: boolean[] = []
+  let pendingTextLabel = false
+
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]
+
+    if (char === '\\') {
+      const word = body.slice(index + 1).match(/^[A-Za-z]+/u)
+
+      if (word) {
+        pendingTextLabel = word[0] === 'text'
+        index += word[0].length
+
+        continue
+      }
+
+      pendingTextLabel = false
+      index += 1 // skip the escaped character (`\$`, `\\`, `\{`…)
+
+      continue
+    }
+
+    if (char === '{') {
+      groupIsTextRun.push(pendingTextLabel)
+      pendingTextLabel = false
+
+      continue
+    }
+
+    if (char === '}') {
+      groupIsTextRun.pop()
+      pendingTextLabel = false
+
+      continue
+    }
+
+    if (char === ' ' || char === '\t') {
+      continue // `\text {外}` — whitespace between the word and brace is legal
+    }
+
+    pendingTextLabel = false
+
+    if (CJK_RE.test(char) && !groupIsTextRun.some(isTextRun => isTextRun)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+/**
  * Escape the opening `$` of any same-line single-dollar span whose body
  * contains East Asian script or punctuation, so remark-math reads it as a
  * literal dollar instead of pairing it with the later `$` and typesetting the
@@ -813,14 +871,15 @@ const CJK_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufa
  * non-Latin text, so a CJK body is prose with near certainty.
  *
  * Escaping only the OPENING `$` is enough: the closing `$` loses its partner
- * and renders literally. Real math is untouched — its body carries no CJK —
- * and `$$` display runs are skipped by the same `$$`-run guard the currency
- * escape uses. A non-CJK span is consumed through its closer: otherwise that
- * closer is scanned as the next opener, and CJK prose between two formulas
- * makes the escape land on the first equation's real closing `$`. The one
- * accepted tradeoff: genuine inline math whose body names a CJK variable
- * (`$x = 变量$`) renders as literal prose. Losing one equation is far cheaper
- * than corrupting a sentence's copy-out.
+ * and renders literally. A span whose CJK lives entirely inside `\text{}`
+ * runs is real math and is exempt (#143506); `$$` display runs are skipped by
+ * the same `$$`-run guard the currency escape uses. A non-CJK span is
+ * consumed through its closer: otherwise that closer is scanned as the next
+ * opener, and CJK prose between two formulas makes the escape land on the
+ * first equation's real closing `$`. The one accepted tradeoff: genuine
+ * inline math whose body names a CJK variable bare (`$x = 变量$`) renders as
+ * literal prose. Losing one equation is far cheaper than corrupting a
+ * sentence's copy-out.
  */
 function escapeCjkProseDollars(text: string): string {
   let out = ''
@@ -839,7 +898,7 @@ function escapeCjkProseDollars(text: string): string {
 
     const body = text.slice(cursor + 1, closingIndex)
 
-    if (!CJK_RE.test(body)) {
+    if (!hasCjkOutsideTextRuns(body)) {
       cursor = closingIndex
 
       continue
