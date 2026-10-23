@@ -149,3 +149,59 @@ class TestMinimaxOauthAliases:
         for alias in ("minimax_oauth", "minimax-portal", "minimax-global"):
             resolved = providers.get_provider_profile(alias)
             assert resolved is not None and resolved.name == "minimax-oauth", alias
+
+
+class TestMinimaxLiveCatalogEndpoint:
+    """API-key MiniMax profiles must probe the vendor's real catalog path.
+
+    The anthropic-compatible base URLs (``/anthropic``) serve the model
+    catalog at ``/anthropic/v1/models``; the generic ``{base_url}/models``
+    fallback probes ``/anthropic/models``, which both hosts 404 — so the
+    live catalog fetch always failed and the picker silently froze on the
+    curated static list (#143643). The CN host mirrors the same layout
+    (verified 2026-10-23: ``/anthropic/v1/models`` answers 401 without
+    auth, ``/anthropic/models`` answers 404 on both api.minimax.io and
+    api.minimaxi.com).
+    """
+
+    @pytest.mark.parametrize(
+        "provider_id,expected_url",
+        [
+            ("minimax", "https://api.minimax.io/anthropic/v1/models"),
+            ("minimax-cn", "https://api.minimaxi.com/anthropic/v1/models"),
+        ],
+    )
+    def test_default_fetch_probes_models_url_not_base_models(
+        self, monkeypatch, provider_id, expected_url
+    ):
+        import providers
+        from hermes_cli import urllib_security
+
+        profile = providers.get_provider_profile(provider_id)
+        assert profile is not None, f"{provider_id} provider profile must be registered"
+
+        captured = {}
+
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"data": [{"id": "MiniMax-M3.1-Flash"}]}'
+
+        def fake_open(req, timeout=0):
+            captured["url"] = req.full_url
+            return _FakeResp()
+
+        monkeypatch.setattr(urllib_security, "open_credentialed_url", fake_open)
+        result = profile.fetch_models(api_key="k")
+        assert result == ["MiniMax-M3.1-Flash"], (
+            f"{provider_id} fetch_models must parse the catalog payload"
+        )
+        assert captured["url"] == expected_url, (
+            f"{provider_id} probed {captured['url']!r} — without models_url the "
+            "fallback probes {base_url}/models, which the vendor 404s (#143643)"
+        )
