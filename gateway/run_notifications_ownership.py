@@ -165,6 +165,28 @@ class GatewayNotificationOwnershipMixin:
         )
         return True
 
+    async def _watch_route_identity_drifted(self, evt: dict, source) -> bool:
+        """True when the notice's own routing snapshot no longer rebuilds to the key it addresses.
+
+        The session authority refuses a notice whose source derives a different session key than
+        the route it is pinned to (``_owner``'s identity check). That mismatch lives in the queued
+        snapshot itself — a participant rename, a thread re-key, or a later keying-config flip — so
+        every redelivery rebuilds the same source and is refused the same way forever (#143720).
+        Unlike a notice pinned to a session the route does not currently run (which a /resume can
+        reopen) there is nothing on the route side that can re-derive the snapshot: proof of this
+        drift is proof the retry cannot succeed.
+        """
+        pinned_key = str(evt.get("session_key") or "").strip()
+        if not pinned_key.startswith("agent:") or source is None:
+            return False
+        store = getattr(cast(Any, self), "session_store", None)
+        if store is None:
+            return False
+        try:
+            return await asyncio.to_thread(store._generate_session_key, source) != pinned_key
+        except Exception:
+            return False  # An unprovable drift stays transient: only proof may end a retry loop.
+
     async def _resolve_async_delegation_session(
         self, session_entry: SessionEntry, pinned_session_id: str, proven_session_id: str = "",
         completion_ids: Sequence[str] = (),

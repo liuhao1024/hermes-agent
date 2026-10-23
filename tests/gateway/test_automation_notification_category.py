@@ -249,3 +249,65 @@ async def test_refused_watch_wake_logs_the_refusal_code(tmp_path, monkeypatch, c
             'Watch notification not admitted for discord chat=42: admission_conflict']
     finally:
         authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_route_drifted_wake_refusal_counts_toward_the_drop_cap(tmp_path, monkeypatch, caplog):
+    """A wake whose source no longer rebuilds the key it addresses is refused forever, so the
+    refusal must be permanent (#143720): the drain's 8-attempt cap gets to drop it instead of
+    requeueing every 60 s indefinitely."""
+    import queue
+    import logging
+    from gateway.session_identity import replace_source
+    runner, authority, _adapter, source, metadata = await _native_owner(tmp_path, monkeypatch, 'human')
+    try:
+        route = metadata['gateway_session_key']
+        # The route's persisted origin was rewritten around the drift: the snapshot restored from it
+        # rebuilds agent:…:dm:43 while the event stays pinned to agent:…:dm:42 (#143720).
+        runner.session_store._entries[route].origin = replace_source(source, chat_id='43')
+        evt = {'type': 'completion', 'session_id': 'proc_x', 'session_key': route, 'platform': 'discord',
+               'chat_id': '42', 'chat_type': 'dm', 'exit_code': 0, 'output': 'done', 'started_at': 1.0,
+               'parent_session_id': metadata['gateway_session_id']}
+        with caplog.at_level(logging.WARNING, logger='gateway.run'):
+            delivered = await runner._inject_watch_notification('[done]', evt)
+        assert delivered is False
+        assert evt['_refusal_permanent'] is True
+        # The drain's refusal loop: each round the refusal re-proves the drift, the cap drops the event.
+        completion_queue = queue.Queue()
+        for round_no in range(8):
+            runner._requeue_refused_watch_event(completion_queue, evt)
+            assert evt['_watch_injection_attempts'] == round_no + 1
+            if round_no < 7:
+                evt = completion_queue.get_nowait()
+                evt['_refusal_permanent'] = True  # the next refusal re-proves the drift
+        assert completion_queue.qsize() == 0
+        assert any('dropping the queued event' in r.getMessage() for r in caplog.records)
+    finally:
+        authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_route_identity_drift_detection_is_precise(tmp_path, monkeypatch):
+    """Only a snapshot that provably rebuilds a different key than the one it addresses counts as
+    drift. A matching snapshot — even one whose pinned session is not the route's current session,
+    the d6635ffe03b case a /resume can still recover — and a keyless event stay transient."""
+    runner, authority, _adapter, source, metadata = await _native_owner(tmp_path, monkeypatch, 'human-1')
+    try:
+        from gateway.session_identity import replace_source
+        route = metadata['gateway_session_key']
+        matching = {'type': 'watch_match', 'session_id': 'proc_x', 'session_key': route, 'platform': 'discord',
+                    'chat_id': '42', 'chat_type': 'dm', 'user_id': '42', 'user_name': 'human',
+                    'exit_code': 0, 'output': 'done', 'started_at': 1.0,
+                    'parent_session_id': '20260101_000000_elsewhere'}  # foreign pin, undrifted source
+        # The synthetic source is restored from the persisted route origin, not the event fields.
+        undrifted_source = runner._build_process_event_source(matching)
+        assert undrifted_source is not None
+        assert await runner._watch_route_identity_drifted(matching, undrifted_source) is False
+        keyless = dict(matching, session_key='legacy-freeform-tag')
+        assert await runner._watch_route_identity_drifted(keyless, undrifted_source) is False
+        # Drift is a rewritten route origin whose rebuilt key no longer matches the pinned key.
+        runner.session_store._entries[route].origin = replace_source(source, chat_id='43')
+        drifted_source = runner._build_process_event_source(matching)
+        assert await runner._watch_route_identity_drifted(matching, drifted_source) is True
+    finally:
+        authority.db.close()
