@@ -252,6 +252,44 @@ def test_config_list_and_dict_values_are_json_not_repr(tmp_path):
         assert cfg["docker_extra_args"] == ["--network=host"]
 
 
+def test_config_yaml_env_refs_expand_from_profile_dotenv(tmp_path):
+    """terminal.* ``${VAR}`` refs must resolve against the profile's own .env on the
+    gateway path (load_config()'s expansion pass already gives the CLI bridge this);
+    raw, docker run gets ``-v ${MOUNT_DIR}workspace:/workspace`` and exits 125 (#143505)."""
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    home = _profile(
+        tmp_path,
+        "docker-refs",
+        "terminal:\n"
+        "  backend: docker\n"
+        "  docker_image: ${ISOLATION_IMAGE}\n"
+        '  docker_volumes:\n    - "${MOUNT_DIR}workspace:/workspace"\n',
+        "MOUNT_DIR=/srv/hermes/profiles/x/\nISOLATION_IMAGE=alpine:3.20\n",
+    )
+    scope = build_profile_terminal_scope(home)
+    assert scope["TERMINAL_DOCKER_IMAGE"] == "alpine:3.20"
+    assert json.loads(scope["TERMINAL_DOCKER_VOLUMES"]) == [
+        "/srv/hermes/profiles/x/workspace:/workspace"
+    ]
+
+
+def test_config_yaml_env_refs_never_resolve_from_process_env(tmp_path, monkeypatch):
+    """A ref absent from the profile's .env stays verbatim even when the MULTIPLEXER's
+    process env defines it: reading os.environ here is the cross-profile authority
+    leak this module closes (#68559)."""
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    monkeypatch.setenv("ISOLATION_IMAGE", "launch-profile-image:latest")
+    home = _profile(
+        tmp_path,
+        "docker-refs-miss",
+        "terminal:\n  backend: docker\n  docker_image: ${ISOLATION_IMAGE}\n",
+    )
+    scope = build_profile_terminal_scope(home)
+    assert scope["TERMINAL_DOCKER_IMAGE"] == "${ISOLATION_IMAGE}"
+
+
 def test_dotenv_json_strings_stay_json_strings(tmp_path):
     """The .env path already stores JSON text; str() must keep that payload."""
     from tools.terminal_scope import build_profile_terminal_scope

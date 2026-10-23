@@ -101,6 +101,38 @@ def _apply_terminal_mapping(scope: dict[str, str], mapping: dict[str, Any]) -> N
             scope[env_var] = _terminal_env_value(value)
 
 
+def _expand_profile_env_refs(value: Any, profile_env: dict[str, str], key: str = "") -> Any:
+    """Expand ``${VAR}`` / ``${env:VAR}`` refs in config.yaml ``terminal.*`` values against the
+    profile's OWN ``.env`` — the substitution ``load_config()``'s expansion pass already gives the
+    standalone CLI bridge. The lookup stops at the profile file: the multiplexer's ambient
+    ``os.environ`` belongs to whichever profile launched the process, and reading it here is the
+    cross-profile authority leak this module closes. Unresolved refs stay verbatim, with a warning
+    naming the key — unexpanded, docker run receives ``-v ${MOUNT_DIR}workspace:/workspace`` and
+    exits 125 with no hint about the cause (#143505)."""
+    from hermes_cli.config import _ENV_REF_RE, _env_ref_var_name
+
+    def _sub(match: "re.Match[str]") -> str:
+        name = _env_ref_var_name(match.group(1))
+        if name is None:
+            return match.group(0)
+        resolved = profile_env.get(name)
+        if resolved is None:
+            logger.warning(
+                "terminal.%s: %s is not defined in this profile's .env; keeping %s verbatim",
+                key, name, match.group(0))
+            return match.group(0)
+        return resolved
+
+    if isinstance(value, str):
+        return _ENV_REF_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _expand_profile_env_refs(v, profile_env, f"{key}.{k}" if key else str(k))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_profile_env_refs(item, profile_env, key) for item in value]
+    return value
+
+
 def default_terminal_scope() -> dict[str, str]:
     """Code-default ``TERMINAL_*`` policy: what a profile-bypassing session freezes instead of
     reading ``.env``/``config.yaml``. Total like the profile projection, minus the profile."""
@@ -146,6 +178,7 @@ def build_profile_terminal_scope(
         # it spells the default (same rule apply_terminal_config_to_env applies to a set env var).
         image_pinned = "TERMINAL_DOCKER_IMAGE" in profile_env
     else:
+        profile_env = {}
         image_pinned = False
     if env_overlay:
         scope.update((k, str(v)) for k, v in env_overlay.items()
@@ -172,7 +205,7 @@ def build_profile_terminal_scope(
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
-            _apply_terminal_mapping(scope, raw_terminal)
+            _apply_terminal_mapping(scope, _expand_profile_env_refs(raw_terminal, profile_env))
             image_pinned = image_pinned or "docker_image" in raw_terminal
     scope["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if image_pinned else "0"
     _resolve_scope_cwd_placeholder(scope)
