@@ -336,6 +336,25 @@ def test_native_launchd_ambiguous_domains_cannot_start(tmp_path, monkeypatch):
     assert len(calls) == 2 and all(argv[1] == "print" for argv in calls)
 
 
+@pytest.mark.platforms("macos")
+def test_native_launchd_headless_gui_domain_answers_absent_not_unavailable(tmp_path, monkeypatch):
+    """A user without a GUI login session (LaunchDaemon UserName=, sudo -u) gets 125 ("domain does
+    not support specified action") from gui/<uid> probes: with no installed plist, nothing in an
+    unhostable domain can serve or block this home, so discovery must answer None (unmanaged
+    start) instead of aborting ensure with service_manager_unavailable (#143657)."""
+    from hermes_cli.gateway_runtime_service import discover_existing_gateway_service
+    probed = []
+
+    def launchctl(argv, **kwargs):
+        assert argv[:2] == ["launchctl", "print"]
+        probed.append(argv[2])
+        return subprocess.CompletedProcess(argv, 125, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", launchctl)
+    assert discover_existing_gateway_service(tmp_path.resolve(), deadline=time.monotonic()+5) is None
+    assert len(probed) == 2  # both gui/<uid> and user/<uid> probed; both unhostable, neither fatal
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.spawns_gateway_lookalike  # stub interpreter records the resolved home then exits; reaped below
 def test_unmanaged_root_home_child_ignores_sticky_active_profile(tmp_path, monkeypatch):
