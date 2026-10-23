@@ -174,6 +174,93 @@ def test_promote_replica_continues_room_at_next_epoch(tmp_path, monkeypatch):
         replicas.replica_state(rdb, room_id="room-1")
 
 
+def _seed_disbanded_room(db, *, gateway_id=AUTH_A, n_events=3, room_id="room-1"):
+    """Seed a live room, disband it, and return the terminal page (ends in room.disbanded)."""
+    _seed_room(db, gateway_id=gateway_id, n_events=n_events, room_id=room_id)
+    rooms.disband_room(
+        db, room_id=room_id, expected_gateway_id=gateway_id, expected_epoch=1)
+    return rooms.read_events(db, room_id=room_id, since_seq=0, limit=100, include_disbanded=True)
+
+
+def test_ingest_accepts_terminal_disbanded_page(tmp_path):
+    """A page ending in room.disbanded is a legitimate replica target and replays idempotently."""
+    page = _seed_disbanded_room(_authority_db(tmp_path))
+    rdb = _replica_db(tmp_path)
+    result = replicas.ingest_page(
+        rdb, room_id="room-1", room_name="Field Room", members=MEMBERS, page=page)
+    assert result["stored_seq"] == 4
+    again = replicas.ingest_page(
+        rdb, room_id="room-1", room_name="Field Room", members=MEMBERS, page=page)
+    assert again["ingested"] == 0
+    state = replicas.replica_state(rdb, room_id="room-1")
+    assert state["last_seq"] == 4
+
+
+def test_ingest_refuses_events_after_disbanded(tmp_path):
+    """A replica that stored room.disbanded must not accept later events from a
+    takeover host that never saw the disband (#143382)."""
+    page = _seed_disbanded_room(_authority_db(tmp_path))
+    rdb = _replica_db(tmp_path)
+    replicas.ingest_page(
+        rdb, room_id="room-1", room_name="Field Room", members=MEMBERS, page=page)
+
+    # Gateway B, promoted from an older copy, appends at seq 5 under epoch 2.
+    revived = {
+        "events": [{
+            "seq": 5, "event_id": "b-work", "kind": "message.user", "actor": USER,
+            "authority_epoch": 2, "payload": {"text": "revived"},
+        }],
+        "authority": {"gateway_id": AUTH_B, "epoch": 2},
+    }
+    with pytest.raises(replicas.ReplicaDisbandedError):
+        replicas.ingest_page(
+            rdb, room_id="room-1", room_name="Field Room", members=MEMBERS, page=revived)
+
+    # The rejection is fail-closed: the replica stays frozen at the disband.
+    state = replicas.replica_state(rdb, room_id="room-1")
+    assert state["last_seq"] == 4
+
+
+def test_ingest_refuses_page_continuing_past_disbanded(tmp_path):
+    """A page that itself carries events after room.disbanded is rejected outright."""
+    bad_page = {
+        "events": [
+            {"seq": 1, "event_id": "d1", "kind": "room.disbanded", "actor": USER,
+             "authority_epoch": 1, "payload": {"room_id": "room-1"}},
+            {"seq": 2, "event_id": "after", "kind": "message.user", "actor": USER,
+             "authority_epoch": 1, "payload": {"text": "past the end"}},
+        ],
+        "authority": {"gateway_id": AUTH_A, "epoch": 1},
+    }
+    with pytest.raises(replicas.ReplicaDisbandedError):
+        replicas.ingest_page(
+            _replica_db(tmp_path),
+            room_id="room-1",
+            room_name="Field Room",
+            members=MEMBERS,
+            page=bad_page,
+        )
+
+
+def test_promote_refuses_disbanded_replica(tmp_path, monkeypatch):
+    """Promoting a replica that copied the host's disband must not resurrect the
+    room as live (#143383)."""
+    page = _seed_disbanded_room(_authority_db(tmp_path))
+    rdb = _replica_db(tmp_path)
+    replicas.ingest_page(
+        rdb, room_id="room-1", room_name="Field Room", members=MEMBERS, page=page)
+    monkeypatch.setattr(replicas, "local_authority_gateway_id", lambda: AUTH_B)
+
+    with pytest.raises(replicas.ReplicaDisbandedError):
+        replicas.promote_replica(rdb, room_id="room-1")
+
+    # Fail-closed: the replica is untouched and no live room exists locally.
+    state = replicas.replica_state(rdb, room_id="room-1")
+    assert state["last_seq"] == 4
+    with pytest.raises(rooms.HostedRoomError):
+        rooms.room_state(rdb, room_id="room-1")
+
+
 def test_promote_refuses_when_room_exists_locally(tmp_path, monkeypatch):
     db = _authority_db(tmp_path)
     page = _seed_room(db)

@@ -1,9 +1,10 @@
 """Replica store and takeover primitives for hosted Group Chat rooms.
 
 Non-authority gateways keep a durable local copy of the room log (``ingest_page()``: idempotent,
-gap- and epoch-regression-safe) plus fenced primitives to continue the room when the authority host
+gap-, epoch-regression- and disband-safe) plus fenced primitives to continue the room when the authority host
 dies: ``promote_replica()`` resumes locally at ``epoch + 1`` with a lineage-proving ``authority.claimed``
-event; ``demote_room()`` records ``authority.lost`` when a returning stale authority is shown a newer
+event — unless the copied history already ended in the host's ``room.disbanded``, which is terminal and
+never revivable; ``demote_room()`` records ``authority.lost`` when a returning stale authority is shown a newer
 epoch. Storage primitives only: the caller decides *when* takeover is safe.
 """
 
@@ -32,6 +33,7 @@ _SELECT_REPLICA = "SELECT * FROM hosted_room_replicas WHERE room_id=?"
 class ReplicaError(HostedRoomError): """Base class for invalid or conflicting replica operations."""
 class ReplicaGapError(ReplicaError): """A page does not start at the replica's next expected sequence."""
 class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries an older authority epoch than stored."""
+class ReplicaDisbandedError(ReplicaError): """A page or replica records ``room.disbanded``, which is terminal."""
 
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
@@ -110,6 +112,9 @@ def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             raise ReplicaError("event.actor must be an object")
         if "payload" not in event:
             raise ReplicaError("event.payload is required")
+    disband_index = next((i for i, e in enumerate(events) if e["kind"] == "room.disbanded"), None)
+    if disband_index is not None and disband_index < len(events) - 1:
+        raise ReplicaDisbandedError("page continues past room.disbanded, which is terminal")
     return events, {"gateway_id": gateway_id, "epoch": epoch}
 
 
@@ -144,7 +149,8 @@ def _store_replica(
 def ingest_page(
     db_path: DbPath, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
 ) -> dict[str, Any]:
-    """Persist one verbatim ``read_events()`` page idempotently; refuses seq gaps and epoch regressions."""
+    """Persist one verbatim ``read_events()`` page idempotently; refuses seq gaps, epoch regressions,
+    and any events past a terminal ``room.disbanded`` (in the page or already stored)."""
     room_id = _room_id(room_id)
     room_name = _validate_room_name(room_name)
     _, members_json = _validate_members(members)
@@ -157,6 +163,11 @@ def ingest_page(
         new_events = [e for e in events if int(e["seq"]) > last_seq]
         if new_events and int(new_events[0]["seq"]) != last_seq + 1:
             raise ReplicaGapError("page skips sequences the replica has not stored")
+        if new_events and conn.execute(
+            "SELECT 1 FROM hosted_room_replica_events WHERE room_id=? AND kind='room.disbanded'",
+            (room_id,)).fetchone():
+            raise ReplicaDisbandedError(
+                "replica already stores room.disbanded; a disbanded room cannot take further events")
         added_bytes = 0
         for event in new_events:
             size = _event_bytes(event)
@@ -202,6 +213,8 @@ def promote_replica(
 
     Copies the replica log into the authoritative store and appends a lineage-proving ``authority.claimed``
     event, so wherever the claim replicates the old epoch is stale and every fenced primitive rejects it.
+    A replica whose history contains the host's ``room.disbanded`` is refused: disband is terminal, and
+    takeover must not resurrect a room the owner ended.
     The caller decides takeover is safe; this makes it atomic and provable.
     """
     room_id = _room_id(room_id)
@@ -219,6 +232,11 @@ def promote_replica(
             raise RoomConflictError("room_id already exists in the local authoritative store")
         if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
             raise RoomConflictError("room_id belongs to a disbanded room")
+        if conn.execute(
+            "SELECT 1 FROM hosted_room_replica_events WHERE room_id=? AND kind='room.disbanded'",
+            (room_id,)).fetchone():
+            raise ReplicaDisbandedError(
+                "replica records the host's room.disbanded; a disbanded room cannot be revived")
         previous_gateway, previous_epoch = str(replica["authority_gateway_id"]), int(replica["authority_epoch"])
         target_epoch, claim_seq = previous_epoch + 1, int(replica["last_seq"]) + 1
         claim = _control_event("claimed", target_epoch, {
