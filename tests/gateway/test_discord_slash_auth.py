@@ -367,6 +367,21 @@ import os
 # ---------------------------------------------------------------------------
 
 
+def test_gate_late_binds_discord_after_install_race(adapter, monkeypatch):
+    """Regression for #143642: on a first startup the plugin registry installs
+    discord.py AFTER this module was imported, so its module-level ImportError
+    fallback binds a stale ``discord = None`` for the whole process — and every
+    slash command crashed on ``discord.DMChannel`` until a restart. The gate
+    must resolve the real module at call time, like adapter.py's use sites."""
+    import plugins.platforms.discord.adapter_slash_auth as slash_auth
+
+    monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    monkeypatch.setattr(slash_auth, "discord", None)  # the first-startup race state
+    interaction = _make_interaction("100200300", in_dm=True)
+    allowed, reason = adapter._evaluate_slash_authorization(interaction)
+    assert (allowed, reason) == (True, None)
+
+
 @pytest.mark.parametrize(
     "env_name",
     ["GATEWAY_ALLOW_ALL_USERS", "DISCORD_ALLOW_ALL_USERS"],

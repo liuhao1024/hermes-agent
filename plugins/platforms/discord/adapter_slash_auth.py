@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional, Tuple
 
 try:
     import discord
-except ImportError:  # the adapter does not start without discord.py
+except ImportError:  # the registry may install discord.py mid-startup, AFTER this import (#143642)
     discord = None
 
 
@@ -27,6 +27,11 @@ class DiscordSlashAuthMixin:
         Shared with side-effect-free callers (``/skill`` autocomplete returns [] per keystroke).
         Fail closed on malformed payloads: with an allowlist, a missing channel id/user REJECTS.
         """
+        # Late-bound like adapter.py's use sites: on a first startup the registry installs
+        # discord.py after this module's import, so the module-level fallback above holds a
+        # stale None for the process lifetime and every slash command crashed on
+        # ``discord.DMChannel`` (#143642).
+        import discord
         chan_obj = getattr(interaction, "channel", None)
         in_dm = isinstance(chan_obj, discord.DMChannel) if chan_obj is not None else False
         channel_ids: set = set()
