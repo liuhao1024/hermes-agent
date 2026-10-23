@@ -171,3 +171,58 @@ def test_explicit_provider_stale_timeout_wins_over_context_tier_and_reasoning_fl
 
     _write_config(tmp_path, "")
     assert _derive_stream_stale_timeout(agent, api_kwargs) == 600.0
+
+
+# ── large-context prefill tiers (#143486) ─────────────────────────────────
+
+
+def test_context_tier_scales_past_300s_for_1m_window_prefills():
+    """Pre-first-token silence scales with input size: ~260k/500k-token prefills on
+    1M-context cloud models exceed the old flat 300s ceiling, so the stale detector
+    killed healthy streams mid-prefill (#143486)."""
+    from agent.chat_completion_helpers import _scale_stale_timeout_for_context
+
+    assert _scale_stale_timeout_for_context(180.0, 0) == 180.0
+    assert _scale_stale_timeout_for_context(180.0, 60_000) == 240.0
+    assert _scale_stale_timeout_for_context(180.0, 120_000) == 300.0
+    assert _scale_stale_timeout_for_context(180.0, 259_764) == 600.0  # the #143486 stale kill
+    assert _scale_stale_timeout_for_context(180.0, 500_000) == 900.0
+    # A larger configured base is never shortened by a tier.
+    assert _scale_stale_timeout_for_context(1200.0, 500_000) == 1200.0
+
+
+def test_cloud_stream_stale_detector_gets_prefill_tier_for_non_reasoning_model(monkeypatch, tmp_path):
+    """End-to-end through the stream resolver: the observed #143486 payload (~262k
+    estimated tokens, non-reasoning mimo-v2.6-flash, no explicit config) resolves to
+    600s instead of the 300s that killed it mid-prefill."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_STREAM_STALE_TIMEOUT", raising=False)
+    _write_config(tmp_path, "")
+
+    from agent.chat_completion_helpers import _derive_stream_stale_timeout
+
+    api_kwargs = {"model": "mimo-v2.6-flash",
+                  "messages": [{"role": "user", "content": "word " * 210_000}]}  # ~262k tokens
+    agent = SimpleNamespace(provider="opencode-go", model="mimo-v2.6-flash",
+                            base_url="https://opencode.ai/zen/go/v1")
+    assert _derive_stream_stale_timeout(agent, api_kwargs) == 600.0
+
+
+def test_explicit_stale_timeout_still_wins_over_prefill_tier(monkeypatch, tmp_path):
+    """``providers.<id>.stale_timeout_seconds`` keeps precedence (#115024): an
+    explicit 60s deadline is honored even for a ~525k-token prefill."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_STREAM_STALE_TIMEOUT", raising=False)
+    from agent.chat_completion_helpers import _derive_stream_stale_timeout
+
+    api_kwargs = {"model": "mimo-v2.6-flash",
+                  "messages": [{"role": "user", "content": "word " * 420_000}]}  # ~525k tokens
+    agent = SimpleNamespace(provider="opencode-go", model="mimo-v2.6-flash",
+                            base_url="https://opencode.ai/zen/go/v1")
+
+    _write_config(tmp_path, "providers:\n  opencode-go:\n    stale_timeout_seconds: 60\n")
+    assert _derive_stream_stale_timeout(agent, api_kwargs) == 60.0

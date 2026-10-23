@@ -649,10 +649,9 @@ def _local_stream_stale_timeout_default() -> float:
 def _scale_stale_timeout_for_context(base: float, est_tokens: int) -> float:
     """Large contexts: slow models think for minutes before the first token;
     scale the threshold or the detector kills healthy streams."""
-    if est_tokens > 100_000:
-        return max(base, 300.0)
-    if est_tokens > 50_000:
-        return max(base, 240.0)
+    for threshold, floor in ((400_000, 900.0), (200_000, 600.0), (100_000, 300.0), (50_000, 240.0)):
+        if est_tokens > threshold:
+            return max(base, floor)
     return base
 
 
