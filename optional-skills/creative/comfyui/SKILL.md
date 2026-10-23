@@ -442,12 +442,20 @@ comfy model download \
   --url "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors" \
   --relative-path models/checkpoints
 
-# CivitAI (set token first):
+# CivitAI (CIVITAI_API_TOKEN already supplied through the controlled environment):
 comfy model download \
   --url "https://civitai.com/api/download/models/128713" \
-  --relative-path models/checkpoints \
-  --set-civitai-api-token "YOUR_TOKEN"
+  --relative-path models/checkpoints
 ```
+
+For authenticated downloads, have the authorized caller supply `HF_API_TOKEN`
+(for Hugging Face) or `CIVITAI_API_TOKEN` (for CivitAI) through the controlled
+process environment, then run the normal download command above. Environment
+values are transient and are not saved to comfy-cli's configuration. Do not put
+token values in command arguments, source-map files, shell history, or logs.
+The `--set-hf-api-token` / `--set-civitai-api-token` options intentionally save
+tokens to comfy-cli's `config.ini`; use them only when persistent configuration
+has been explicitly chosen, not as the default download-authentication path.
 
 List installed: `comfy model list`.
 

@@ -184,9 +184,22 @@ comfy model remove --relative-path models/checkpoints --model-names "model.safet
 | `--url` | Download URL (CivitAI, HuggingFace, direct) |
 | `--relative-path` | Subdirectory under workspace (e.g. `models/checkpoints`) |
 | `--filename` | Custom save filename |
-| `--set-civitai-api-token` | Persist CivitAI token |
-| `--set-hf-api-token` | Persist HuggingFace token |
+| `--set-civitai-api-token` | Intentionally save a CivitAI token to `config.ini`; only for explicitly chosen persistent configuration |
+| `--set-hf-api-token` | Intentionally save a HuggingFace token to `config.ini`; only for explicitly chosen persistent configuration |
 | `--downloader` | `httpx` (default) or `aria2` |
+
+For transient authentication, have the authorized caller supply `HF_API_TOKEN`
+or `CIVITAI_API_TOKEN` through the controlled process environment before running
+the normal download command. These environment values are not saved to
+comfy-cli's configuration. Do not put token values in command arguments, files,
+shell history, or logs. For example, with `CIVITAI_API_TOKEN` already supplied:
+
+```bash
+comfy model download --url "https://civitai.com/api/download/models/128713" --relative-path models/checkpoints
+```
+
+The `--set-*` token options above remain available for deliberately persistent
+configuration, not the default transient download-authentication path.
 
 Standard model directories:
 ```

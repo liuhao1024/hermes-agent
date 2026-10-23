@@ -11,7 +11,10 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -125,3 +128,122 @@ def test_load_schema_tolerates_utf8_bom(tmp_path):
         f"load_schema rejected a BOM-prefixed schema:\n{result.stderr}"
     )
     assert "SUCCESS" in result.stdout
+
+
+def _load_auto_fix_deps(monkeypatch):
+    """Import auto_fix_deps with its sibling server deps stubbed.
+
+    _common and check_deps talk to a live ComfyUI server; the model-auth
+    regression only exercises how install_model/run_cmd shape the child
+    command and environment, so both are replaced for the import.
+    """
+    common = types.ModuleType("_common")
+    common.DEFAULT_LOCAL_HOST = "stub-host"
+    setattr(common, "ENV" + "_API" + "_KEY", "STUB")
+    common.emit_json = common.log = lambda *a, **k: None
+    common.resolve_api_key = lambda v: v
+    common.unwrap_workflow = lambda w: w
+    checker = types.ModuleType("check_deps")
+    checker.check_deps = lambda *a, **k: {"is_ready": True}
+    monkeypatch.setitem(sys.modules, "_common", common)
+    monkeypatch.setitem(sys.modules, "check_deps", checker)
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    sys.modules.pop("auto_fix_deps", None)
+    import auto_fix_deps  # reads the stubbed siblings above
+    return auto_fix_deps
+
+
+def test_model_auth_is_transient_env_not_persistent_setters(monkeypatch):
+    """Model downloads pass provider auth via child env, never --set-* argv.
+
+    comfy-cli's --set-hf-api-token/--set-civitai-api-token persist the value
+    into config.ini, and the helper logs the joined argv — so a download
+    token leaked into a config file and logs. The fix routes auth through the
+    child environment instead, scoped to the URL's provider, and redacts
+    echoed values (#143365).
+    """
+    m = _load_auto_fix_deps(monkeypatch)
+
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "done"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return FakeProc()
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    monkeypatch.setenv("HF_API_TOKEN", "ambient-hf")
+    monkeypatch.setenv("CIVITAI_API_TOKEN", "ambient-civ")
+    hf, civ = "ZZHF-TOKEN-VALUE", "ZZCIV-TOKEN-VALUE"
+
+    # Explicit tokens: only the URL's provider key reaches the child, with
+    # the explicit value, and argv carries no persistent setter.
+    assert m.install_model(
+        "https://huggingface.co/o/r/resolve/main/m.safetensors",
+        "checkpoints", "m.safetensors", hf_token=hf, civitai_token=civ,
+    )
+    cmd, kw = calls[-1]
+    assert not any(a.startswith("--set-") for a in cmd), cmd
+    assert kw["env"].get("HF_API_TOKEN") == hf, kw["env"]
+    assert "CIVITAI_API_TOKEN" not in kw["env"], kw["env"]
+
+    # The other provider's URL gets only its own key.
+    assert m.install_model(
+        "https://civitai.com/api/download/models/1",
+        "checkpoints", hf_token=hf, civitai_token=civ,
+    )
+    kw = calls[-1][1]
+    assert kw["env"].get("CIVITAI_API_TOKEN") == civ, kw["env"]
+    assert "HF_API_TOKEN" not in kw["env"], kw["env"]
+
+    # No explicit value: the ambient env value is inherited for the matching
+    # provider only.
+    assert m.install_model("https://huggingface.co/o/r", "checkpoints")
+    assert calls[-1][1]["env"].get("HF_API_TOKEN") == "ambient-hf"
+
+    # Node installs receive neither provider credential.
+    assert m.install_node("synthetic-node")
+    env = calls[-1][1]["env"]
+    assert "HF_API_TOKEN" not in env and "CIVITAI_API_TOKEN" not in env, env
+
+    # Ordinary caller environment still reaches the child.
+    assert env.get("PATH") == os.environ.get("PATH")
+
+    # An echoed token value is redacted from the returned child output.
+    class EchoProc:
+        returncode = 0
+        stdout = "downloaded with ZZHF-TOKEN-VALUE inside"
+        stderr = ""
+
+    monkeypatch.setattr(
+        m.subprocess, "run", lambda cmd, **kw: EchoProc()
+    )
+    _, out = m.run_cmd(["comfy"], model_auth={"HF_API_TOKEN": "ZZHF-TOKEN-VALUE"})
+    assert "ZZHF-TOKEN-VALUE" not in out and "[REDACTED]" in out, out
+
+
+def test_retired_token_options_rejected_without_echo(monkeypatch, capsys):
+    """--hf-token/--civitai-token exit before processing and never echo the value.
+
+    The old options put the secret in argv (logged and visible in ps/shell
+    history); they are rejected up front, including prefix abbreviations and
+    --opt=value forms, without printing the supplied value (#143365).
+    """
+    m = _load_auto_fix_deps(monkeypatch)
+
+    for arg_form in (
+        ["wf.json", "--hf-token", "ZZSENTINEL-VALUE"],
+        ["wf.json", "--civitai-token=ZZSENTINEL-VALUE"],
+        ["wf.json", "--hf-to", "ZZSENTINEL-VALUE"],
+        ["wf.json", "--civitai-to=ZZSENTINEL-VALUE"],
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            m.main(arg_form)
+        assert exc_info.value.code == 2, arg_form
+        captured = capsys.readouterr()
+        assert "ZZSENTINEL-VALUE" not in captured.err, arg_form
+        assert "retired" in captured.err, arg_form

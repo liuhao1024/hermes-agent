@@ -19,16 +19,23 @@ Usage:
     python3 auto_fix_deps.py workflow_api.json
     python3 auto_fix_deps.py workflow_api.json --models-from-file urls.json
     python3 auto_fix_deps.py workflow_api.json --dry-run
+
+Model authentication: supply HF_API_TOKEN or CIVITAI_API_TOKEN through the
+controlled process environment, not command-line values. The old --hf-token
+and --civitai-token options are rejected. Only the matching model download
+receives its provider token; node installs do not receive either token.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import (
@@ -36,6 +43,12 @@ from _common import (
 )
 from check_deps import check_deps
 from _common import unwrap_workflow
+
+
+# comfy-cli's own model-auth env inputs (comfy_cli/constants.py). The helper owns
+# only these two: child processes otherwise inherit the caller's environment
+# unchanged (mirrors, proxies, indexes, git/ssh, locale), as before.
+_MODEL_AUTH_KEYS = ("HF_API_TOKEN", "CIVITAI_API_TOKEN")
 
 
 def comfy_cli_available() -> str | None:
@@ -47,14 +60,21 @@ def comfy_cli_available() -> str | None:
     return None
 
 
-def run_cmd(cmd: list[str], *, dry_run: bool = False) -> tuple[int, str]:
+def run_cmd(cmd: list[str], *, dry_run: bool = False,
+            model_auth: dict[str, str] | None = None) -> tuple[int, str]:
     if dry_run:
         return 0, "[dry-run]"
+    env = {k: v for k, v in os.environ.items() if k not in _MODEL_AUTH_KEYS}
+    # Only install_model supplies this small provider-specific mapping.
+    env.update({k: v for k, v in (model_auth or {}).items() if k in _MODEL_AUTH_KEYS})
     log(f"$ {' '.join(cmd)}")
     # health: allow HX006 -- node installs and multi-GB model downloads have no fair upper bound
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace',
-                          check=False, stdin=subprocess.DEVNULL)
+                          check=False, stdin=subprocess.DEVNULL, env=env)
     out = (proc.stdout or "") + (proc.stderr or "")
+    # Preserve normal diagnostics while not returning an echoed provider token.
+    for token in sorted({env[key] for key in _MODEL_AUTH_KEYS if env.get(key)}, key=len, reverse=True):
+        out = out.replace(token, "[REDACTED]")
     return proc.returncode, out
 
 
@@ -67,6 +87,13 @@ def install_node(package: str, *, dry_run: bool = False, comfy_cmd: str = "comfy
 def install_model(url: str, folder: str, filename: str | None = None,
                   *, dry_run: bool = False, comfy_cmd: str = "comfy",
                   hf_token: str | None = None, civitai_token: str | None = None) -> bool:
+    """Use transient comfy-cli env auth, never --set-* (which persists tokens).
+
+    An explicit API value overrides the matching ambient environment value;
+    None inherits it, and an empty string explicitly disables that credential
+    (including comfy-cli's stored-config fallback). Other providers get no token.
+    Env auth is verified against Comfy-Org/comfy-cli 1d88fe1329f8789d7060f5d6f9260dd752e4942a.
+    """
     cmd = comfy_cmd.split() + [
         "--skip-prompt", "model", "download",
         "--url", url,
@@ -74,28 +101,51 @@ def install_model(url: str, folder: str, filename: str | None = None,
     ]
     if filename:
         cmd.extend(["--filename", filename])
-    if hf_token:
-        cmd.extend(["--set-hf-api-token", hf_token])
-    if civitai_token:
-        cmd.extend(["--set-civitai-api-token", civitai_token])
-    code, _ = run_cmd(cmd, dry_run=dry_run)
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        host = ""  # Leave malformed-URL diagnostics to comfy-cli, without auth.
+    model_auth: dict[str, str] = {}
+    if host in ("huggingface.co", "huggingface.com"):
+        key, explicit = "HF_API_TOKEN", hf_token
+    elif host in ("civitai.com", "civitai.red") or host.endswith((".civitai.com", ".civitai.red")):
+        key, explicit = "CIVITAI_API_TOKEN", civitai_token
+    else:
+        key, explicit = "", None
+    if key:
+        if explicit is not None:
+            model_auth[key] = explicit
+        elif key in os.environ:
+            model_auth[key] = os.environ[key]
+    code, _ = run_cmd(cmd, dry_run=dry_run, model_auth=model_auth)
     return code == 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Run check_deps and install whatever is missing")
+    p = argparse.ArgumentParser(
+        description="Run check_deps and install whatever is missing",
+        epilog="Model auth: use controlled HF_API_TOKEN / CIVITAI_API_TOKEN environment inputs. "
+               "Retired and rejected: --hf-token / --civitai-token; never put secrets in argv.",
+    )
     p.add_argument("workflow")
     p.add_argument("--host", default=DEFAULT_LOCAL_HOST)
     p.add_argument("--api-key", help=f"or set ${ENV_API_KEY}")
     p.add_argument("--models-from-file",
                    help="JSON file mapping {model_filename: download_url} for models that need install")
-    p.add_argument("--hf-token", help="HuggingFace token for downloads")
-    p.add_argument("--civitai-token", help="CivitAI token for downloads")
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would be installed without doing it")
     p.add_argument("--no-restart", action="store_true",
                    help="Don't suggest restarting the server after node install")
-    args = p.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    # Check before argparse can echo an unknown argument/value. Include the old
+    # parser's long-option abbreviations and --option=value forms. A value already
+    # supplied in parent argv cannot be retroactively removed from OS/history.
+    if any(part.startswith("--") and len(part) > 2
+           and any(option.startswith(part) for option in ("--hf-token", "--civitai-token"))
+           for part in (arg.partition("=")[0] for arg in raw_args)):
+        p.error("--hf-token / --civitai-token are retired; use controlled "
+                "HF_API_TOKEN / CIVITAI_API_TOKEN environment inputs instead")
+    args = p.parse_args(raw_args)
 
     api_key = resolve_api_key(args.api_key)
 
@@ -177,7 +227,6 @@ def main(argv: list[str] | None = None) -> int:
         ok = install_model(
             url, entry["folder"], filename,
             dry_run=args.dry_run, comfy_cmd=comfy_cmd,
-            hf_token=args.hf_token, civitai_token=args.civitai_token,
         )
         (actions if ok else failures).append({
             "kind": "model", "filename": filename, "folder": entry["folder"],
@@ -204,7 +253,6 @@ def main(argv: list[str] | None = None) -> int:
         ok = install_model(
             url, "embeddings", target_filename,
             dry_run=args.dry_run, comfy_cmd=comfy_cmd,
-            hf_token=args.hf_token, civitai_token=args.civitai_token,
         )
         (actions if ok else failures).append({
             "kind": "embedding", "name": emb_name, "url": url, "ok": ok,
