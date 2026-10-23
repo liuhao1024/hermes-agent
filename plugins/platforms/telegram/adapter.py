@@ -6654,8 +6654,18 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if existing is None:
             pending[key] = event
             return
+
+        def _flags(ev: MessageEvent) -> list[Optional[bool]]:
+            # One flag per URL (None = unspecified, per the MessageEvent contract) or admission
+            # refuses the merged album with invalid_params(media_text_inlined_length): the
+            # document branch sets a single-element list while photo branches set none.
+            flags = list(ev.media_text_inlined or [])
+            return flags + [None] * (len(ev.media_urls) - len(flags))
+
+        merged_flags = _flags(existing) + _flags(event)
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        existing.media_text_inlined = merged_flags
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
 
