@@ -48,6 +48,10 @@ _POST_WITH_FILE_ERROR = "Failed to post with file"
 _MEDIA_MSG_TYPES = (("image/", MessageType.PHOTO), ("audio/", MessageType.VOICE))  # first match wins
 _INBOUND_CACHE_EXT = {"image/": ".png", "audio/": ".ogg"}  # mime prefix → default extension for cached media
 
+# A leading "@user" token: the post opens by addressing that user (room-wide @channel/@here/@all
+# are broadcast mentions, not a person — see _mattermost_reply_expected).
+_LEADING_MENTION_RE = re.compile(r"^\s*@([A-Za-z0-9_.-]+)")
+
 
 def _with_mentions_disabled(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a post payload that prevents Mattermost from firing mentions."""
@@ -515,6 +519,38 @@ class MattermostAdapter(BasePlatformAdapter):
                 message_text = re.sub(re.escape(pattern), "", message_text, flags=re.IGNORECASE).strip()
         return message_text
 
+    def _is_free_response_channel(self, channel_id: str) -> bool:
+        """Does ``channel_id`` admit posts without an @mention? (the gating rule, restated for
+        reply routing)"""
+        require_mention = str(_extra_or_secret(self.config.extra, "require_mention", "MATTERMOST_REQUIRE_MENTION", "true", blank_is_unset=False)
+                              ).lower() not in {"false", "0", "no"}
+        free_channels = _channel_id_set(
+            _extra_or_secret(self.config.extra, "free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", blank_is_unset=False))
+        return not require_mention or channel_id in free_channels
+
+    def _mattermost_reply_expected(
+        self, *, is_dm: bool, is_command: bool, raw_text: str, root_id: str, channel_id: str,
+    ) -> Optional[bool]:
+        """``MessageEvent.reply_expected`` for an admitted post, the contract Slack already follows
+        (#123271). True (a bare silence marker still gets the visible notice) for DMs, /commands
+        and posts that @mention this bot. False (the marker may stand silent) for posts that open
+        by @mentioning someone else, and for an unaddressed top-level post that only a
+        free-response channel admitted as the start of its own thread. A plain unaddressed thread
+        follow-up is None: it is usually meant for the bot, so the gateway keeps the visible
+        fallback (#110952)."""
+        if is_dm or is_command:
+            return True
+        text = raw_text or ""
+        self_names = {str(v).lower() for v in (self._bot_username, self._bot_user_id) if v}
+        if any(f"@{name}" in text.lower() for name in self_names):
+            return True
+        # @channel/@here/@all address the room, not a person (mirrors Slack's <!here> rule).
+        match = _LEADING_MENTION_RE.match(text)
+        if match and match.group(1).lower() not in self_names | {"channel", "here", "all"}:
+            return False
+        opens_own_session = not root_id and self._reply_mode == "thread"
+        return False if opens_own_session and self._is_free_response_channel(channel_id) else None
+
     async def _download_attachments(self, file_ids: list[str]) -> tuple[list[str], list[str]]:
         """Download attachments now (URLs need auth headers downstream tools lack) → (paths, mime types)."""
         import aiohttp
@@ -562,6 +598,7 @@ class MattermostAdapter(BasePlatformAdapter):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
+        raw_text = message_text  # mention routing needs the pre-strip text (reply_expected)
         if not is_dm:  # DMs need no gating; channels are mention-gated.
             message_text = self._apply_channel_gating(channel_id, message_text)
             if message_text is None:
@@ -588,7 +625,10 @@ class MattermostAdapter(BasePlatformAdapter):
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
             media_urls=media_urls, media_types=media_types,
-            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
+            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None),
+            reply_expected=self._mattermost_reply_expected(
+                is_dm=is_dm, is_command=msg_type == MessageType.COMMAND, raw_text=raw_text,
+                root_id=post.get("root_id") or "", channel_id=channel_id)))
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---

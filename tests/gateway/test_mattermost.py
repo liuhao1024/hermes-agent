@@ -395,6 +395,95 @@ class TestMattermostMentionBehavior:
 
 
 # ---------------------------------------------------------------------------
+# reply_expected (the #123271 contract: a bare silence marker may stand only
+# where a reply was not expected)
+# ---------------------------------------------------------------------------
+
+class TestMattermostReplyExpected:
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._bot_user_id = "bot_user_id"
+        self.adapter._bot_username = "hermes-bot"
+        self.adapter.handle_message = AsyncMock()
+        for var in ("MATTERMOST_REQUIRE_MENTION", "MATTERMOST_FREE_RESPONSE_CHANNELS"):
+            os.environ.pop(var, None)
+
+    def _make_event(self, message, channel_type="O", channel_id="chan_456", root_id=""):
+        post_data = {
+            "id": "post_reply_expected",
+            "user_id": "user_123",
+            "channel_id": channel_id,
+            "message": message,
+            "root_id": root_id,
+        }
+        return {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": channel_type,
+                "sender_name": "@alice",
+            },
+        }
+
+    async def _reply_expected(self, event):
+        await self.adapter._handle_ws_event(event)
+        assert self.adapter.handle_message.called
+        return self.adapter.handle_message.call_args[0][0].reply_expected
+
+    @pytest.mark.asyncio
+    async def test_dm_expects_reply(self):
+        """A DM is always addressed to the bot."""
+        assert await self._reply_expected(self._make_event("hello", channel_type="D")) is True
+
+    @pytest.mark.asyncio
+    async def test_channel_post_mentioning_bot_expects_reply(self):
+        """A channel post that @mentions this bot is addressed to it."""
+        assert await self._reply_expected(self._make_event("@hermes-bot hello")) is True
+
+    @pytest.mark.asyncio
+    async def test_command_expects_reply(self):
+        """A /command is an explicit request."""
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            assert await self._reply_expected(self._make_event("/new")) is True
+
+    @pytest.mark.asyncio
+    async def test_post_addressed_to_other_user_allows_silence(self):
+        """A post that opens by @mentioning someone else is not for this bot."""
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            assert await self._reply_expected(self._make_event("@alice can you check this?")) is False
+
+    @pytest.mark.asyncio
+    async def test_unaddressed_top_level_post_in_free_channel_allows_silence(self):
+        """The shared-channel storm case (#143420): with require_mention off, an unaddressed
+        top-level post in thread mode opens its own thread, so NO_REPLY may stand."""
+        self.adapter._reply_mode = "thread"
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            assert await self._reply_expected(self._make_event("anyone around?")) is False
+
+    @pytest.mark.asyncio
+    async def test_unaddressed_top_level_post_in_free_response_channel_allows_silence(self):
+        """Same for an explicit free_response_channels entry with require_mention on."""
+        self.adapter._reply_mode = "thread"
+        with patch.dict(os.environ, {"MATTERMOST_FREE_RESPONSE_CHANNELS": "chan_456"}):
+            assert await self._reply_expected(self._make_event("anyone around?")) is False
+
+    @pytest.mark.asyncio
+    async def test_unaddressed_thread_followup_keeps_visible_fallback(self):
+        """A plain unaddressed follow-up inside an existing thread may still be for the bot,
+        so the gateway keeps its silence-marker notice (#110952), as Slack does."""
+        self.adapter._reply_mode = "thread"
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            assert await self._reply_expected(self._make_event("thanks!", root_id="root_1")) is None
+
+    @pytest.mark.asyncio
+    async def test_room_mention_addresses_the_room_not_a_person(self):
+        """@channel is a broadcast, not addressed to another user, so it must not be treated
+        as 'for someone else'; in flat reply mode it keeps the visible fallback."""
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            assert await self._reply_expected(self._make_event("@channel good morning")) is None
+
+
+# ---------------------------------------------------------------------------
 # File upload (send_image)
 # ---------------------------------------------------------------------------
 
