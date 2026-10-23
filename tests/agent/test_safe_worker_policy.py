@@ -131,9 +131,15 @@ def test_safe_worker_never_discovers_or_invokes_customizations(tmp_path, mode):
             from agent.safe_worker_policy import _bind_safe_worker_policy
             _bind_safe_worker_policy(safe_mode=mode == "safe", ignore_user_config=True, config={"plugins": {"enabled": ["sentinel"]}})
         reads = []
+        home_str = str(home)
         def audit(event, args):
-            if event == "open" and "plugins" in Path(str(args[0])).parts and args[1] != "w":
-                reads.append(str(args[0]))
+            # Only $HERMES_HOME plugin paths count: safe mode must not import the
+            # user's plugins, but it does resolve first-party bundled providers
+            # shipped under the checkout's plugins/ (#143527).
+            path = str(args[0])
+            if (event == "open" and path.startswith(home_str)
+                    and "plugins" in Path(path).parts and args[1] != "w"):
+                reads.append(path)
         sys.addaudithook(audit)
         import providers
         from hermes_cli import plugins, lifecycle

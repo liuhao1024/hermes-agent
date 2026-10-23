@@ -149,6 +149,13 @@ def provider_source(name: str) -> str | None:
     ``"user"`` is what lets a ``$HERMES_HOME`` plugin re-registering a bundled name win in
     ``hermes_cli.auth.PROVIDER_REGISTRY`` too — a bundled profile never rewrites a built-in row.
     """
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        # Bundled-only resolution in safe mode: reading the home layer would
+        # import a ``$HERMES_HOME`` plugin, the user customization it bypasses.
+        canonical = _ALIASES.get(name, name)
+        return "bundled" if _SOURCES.get(canonical) == "bundled" else None
     layer = _home_layer()
     canonical = layer.aliases.get(name) or _ALIASES.get(name, name)
     if canonical in layer.registry:
@@ -196,10 +203,26 @@ def get_provider_profile(name: str) -> ProviderProfile | None:
     """
     from agent.safe_worker_policy import safe_worker_enabled
 
-    if safe_worker_enabled():
-        return None
+    safe_mode = safe_worker_enabled()
     if not _discovered:
         _discover_providers()
+    if safe_mode:
+        # Safe mode resolves first-party bundled profiles only: importing a
+        # ``$HERMES_HOME`` plugin is exactly the user customization it bypasses
+        # (#143527). Runtime registrations (direct register_provider calls,
+        # plugin-host loads) are customizations too and stay invisible.
+        # ``custom:<route>`` keeps falling back to the bundled generic "custom"
+        # profile; the named-custom-provider tier reads user config, which safe
+        # mode does not load either.
+        def safe_lookup(n: str) -> ProviderProfile | None:
+            canonical = _ALIASES.get(n, n)
+            profile = _REGISTRY.get(canonical)
+            return profile if profile is not None and _SOURCES.get(canonical) == "bundled" else None
+
+        profile = safe_lookup(name)
+        if profile is None and isinstance(name, str) and name.lower().startswith("custom:"):
+            profile = safe_lookup("custom")
+        return profile
     layer, home, key = _bound_home_layer()
     checked = _refresh_home_layer(layer, home, key)
 
@@ -262,12 +285,9 @@ def list_providers() -> list[ProviderProfile]:
     ``$HERMES_HOME`` plugins shadow process-wide profiles of the same name."""
     from agent.safe_worker_policy import safe_worker_enabled
 
-    if safe_worker_enabled():
-        return []
     global _PROVIDER_LIST_CACHE
     if not _discovered:
         _discover_providers()
-    layer = _home_layer()
     if _PROVIDER_LIST_CACHE is None:
         # Deduplicate: _REGISTRY has canonical names; _ALIASES points to same objects
         seen: set[int] = set()
@@ -277,6 +297,12 @@ def list_providers() -> list[ProviderProfile]:
                 seen.add(id(profile))
                 cache.append(profile)
         _PROVIDER_LIST_CACHE = cache
+    if safe_worker_enabled():
+        # Bundled first-party profiles only: the bound home's ``$HERMES_HOME``
+        # plugins and runtime registrations are user customizations safe mode
+        # bypasses (#143527).
+        return [p for p in _PROVIDER_LIST_CACHE if _SOURCES.get(p.name) == "bundled"]
+    layer = _home_layer()
     result = [p for p in _PROVIDER_LIST_CACHE if p.name not in layer.registry]
     result.extend({id(p): p for p in layer.registry.values()}.values())
     return result
@@ -650,18 +676,20 @@ def _discover_providers() -> None:
     Each step imports its plugins, which call ``register_provider()`` at
     module-level. Later steps win on name collision. ``$HERMES_HOME`` plugins are
     per profile home and load through :func:`_home_layer` at lookup time.
+
+    Safe mode keeps only the bundled pass: ``plugins/model-providers/`` ships with
+    hermes-agent, so it is first-party code, not a user customization, and a
+    troubleshooting worker must still resolve those providers (#143527).
     """
     from agent.safe_worker_policy import safe_worker_enabled
 
-    if safe_worker_enabled():
-        return
     global _discovered, _discovering
     if _discovered:
         return
     _discovered = True
     _discovering = True
     try:
-        _run_discovery_steps()
+        _run_discovery_steps(safe_mode=safe_worker_enabled())
     finally:
         _discovering = False
         # hermes_cli.auth may have been imported by a plugin during discovery and snapshotted a
@@ -669,8 +697,12 @@ def _discover_providers() -> None:
         _sync_auth_registry()
 
 
-def _run_discovery_steps() -> None:
-    """The discovery passes, in precedence order (see :func:`_discover_providers`)."""
+def _run_discovery_steps(*, safe_mode: bool = False) -> None:
+    """The discovery passes, in precedence order (see :func:`_discover_providers`).
+
+    ``safe_mode`` runs the bundled pass only: pip entry points and out-of-tree
+    legacy modules are third-party code a troubleshooting worker must not import.
+    """
     # 0. Pip-installed plugins — entry points in the ``hermes_agent.plugins``
     #    group (the same group the general PluginManager uses). The manager
     #    records model-provider manifests for introspection but deliberately
@@ -685,7 +717,8 @@ def _run_discovery_steps() -> None:
     #    third-party package from silently hijacking a first-party provider
     #    name (e.g. ``openrouter``) while still letting pip packages add
     #    genuinely new providers.
-    _discover_entry_point_providers()
+    if not safe_mode:
+        _discover_entry_point_providers()
 
     # 1. Bundled plugins — shipped with hermes-agent.
     if _BUNDLED_PLUGINS_DIR.is_dir():
@@ -697,6 +730,8 @@ def _run_discovery_steps() -> None:
     # 2. Legacy single-file profiles at providers/<name>.py. Kept for
     #    back-compat — if someone drops a ``providers/foo.py`` into an
     #    editable install, it still works without the plugin layout.
+    if safe_mode:
+        return
     try:
         import pkgutil
 
