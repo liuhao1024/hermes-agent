@@ -727,6 +727,59 @@ export function createVersionResolver(fetchVersionFn, {
   };
 }
 
+/**
+ * Outbound phone-number JID resolver (#143578).
+ *
+ * Baileys 7 does not populate the device/LID mapping for a phone-number JID
+ * the bot has never exchanged messages with, so `sock.sendMessage()` on such
+ * a JID resolves with a message id but WhatsApp silently drops the message —
+ * the caller sees a false success. Resolving the number through
+ * `sock.onWhatsApp()` first (a usync query) makes the first send deliverable,
+ * and is also the only way to fail loudly when the number has no WhatsApp
+ * account at all.
+ *
+ * Only bare `<digits>@s.whatsapp.net` JIDs are looked up; LID JIDs, group,
+ * newsletter and broadcast targets pass through untouched, as does anything
+ * already resolved (bounded FIFO cache, because a number→JID mapping never
+ * changes within a bridge lifetime). A lookup that throws is downgraded to a
+ * pass-through so a transient usync failure cannot block sends that would
+ * otherwise work; an explicit "does not exist" answer stays a hard error so
+ * the gateway surfaces it instead of reporting delivery.
+ */
+export function createOutboundJidResolver(lookupFn, {
+  log = console.warn,
+  maxCacheEntries = 1024,
+} = {}) {
+  const cache = new Map();
+
+  async function resolveOutboundJid(chatId) {
+    if (typeof chatId !== 'string' || !chatId.endsWith('@s.whatsapp.net')) return chatId;
+    const number = chatId.split('@')[0].split(':')[0];
+    if (!/^\d+$/.test(number)) return chatId;
+    if (cache.has(number)) return cache.get(number);
+
+    let results;
+    try {
+      results = (await lookupFn(number)) || [];
+    } catch (err) {
+      log(`[bridge] onWhatsApp lookup failed for +${number}, sending as-is: ${err?.message || err}`);
+      return chatId;
+    }
+    const hit = results.find((r) => r && r.exists);
+    if (!hit) {
+      throw new Error(`The number +${number} has no WhatsApp account`);
+    }
+    const jid = hit.jid || chatId;
+    cache.set(number, jid);
+    while (cache.size > maxCacheEntries) {
+      cache.delete(cache.keys().next().value);
+    }
+    return jid;
+  }
+
+  return resolveOutboundJid;
+}
+
 const pad = (value, width = 2) => String(value).padStart(width, '0');
 
 /** `2026-09-28 13:18:46,062` in local time: the asctime shape every file in logs/ uses. */

@@ -36,6 +36,7 @@ import { classifyOwnerMessageGate } from './owner_message_gate.js';
 import {
   addMentions,
   buildPollPayload,
+  createOutboundJidResolver,
   createReconnectScheduler,
   createVersionResolver,
   installConsoleStamps,
@@ -155,6 +156,20 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Resolve bare phone-number JIDs through onWhatsApp() before sending (#143578):
+// Baileys 7 lacks the device/LID mapping for contacts the bot has never
+// chatted with, and sendMessage() on such a JID returns a message id that is
+// silently dropped upstream — a false success the agent relays to the user.
+const resolveOutboundJid = createOutboundJidResolver(
+  async (number) => {
+    if (!sock || typeof sock.onWhatsApp !== 'function') {
+      return [{ exists: true, jid: `${number}@s.whatsapp.net` }];
+    }
+    return sock.onWhatsApp(number);
+  },
+  { log: (line) => console.warn(line) },
+);
+
 function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT_MS) {
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
@@ -164,7 +179,8 @@ function sendWithTimeout(chatId, payload, options = {}, timeoutMs = SEND_TIMEOUT
     );
   });
   return enqueueSend(() =>
-    Promise.race([sock.sendMessage(chatId, payload, options), timeoutPromise])
+    resolveOutboundJid(chatId)
+      .then(target => Promise.race([sock.sendMessage(target, payload, options), timeoutPromise]))
       .finally(() => clearTimeout(timer))
   );
 }
