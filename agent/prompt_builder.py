@@ -789,6 +789,18 @@ def _plugin_backend_is_remote(backend: str) -> bool:
                 and _plugin_backend_attr(backend, "is_remote", False))
 
 
+def runtime_backend_identity() -> str:
+    """Backend identity the environment block renders for NOW: the backend's own name when it is
+    remote (the ``Terminal backend:`` lead), else ``local`` (the Host block every non-remote
+    backend shares).  Read through :func:`_tenv_read` — the same authoritative source
+    ``build_environment_hints`` uses — so a stored-prompt comparison flips exactly when the
+    rendered block would differ, on the multiplexing gateway's per-turn scope too."""
+    backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
+    if backend != "local" and (backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)):
+        return backend
+    return "local"
+
+
 def _windows_marketing_version() -> str:
     """"10"/"11" (``platform.release()`` says 10 for both; 11 is build >= 22000).
 

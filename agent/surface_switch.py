@@ -50,6 +50,17 @@ def runtime_host_value(prompt: str, label: str) -> str:
     return ""
 
 
+def runtime_backend_value(prompt: str) -> str:
+    """Backend identity the persisted runtime block was stamped for: the ``Terminal backend:``
+    name for remote/sandbox backends, ``local`` for a Host block (non-remote backends share it),
+    "" when the boundary or its first line is unreadable (legacy prompts keep reusing)."""
+    runtime = split_runtime_boundary(prompt)[2]
+    first = runtime.split("\n", 1)[0].strip() if runtime else ""
+    if first.startswith("Terminal backend: "):
+        return first.split(":", 1)[1].split(".", 1)[0].strip().lower()
+    return "local" if first.startswith("Host: ") else ""
+
+
 def identity_line_value(prompt: str, label: str) -> str:
     """``Label: value`` from the trailer paragraph that ends the identity portion (the final
     runtime block is embedder prose, never identity).  Memory, context files and plugin prose

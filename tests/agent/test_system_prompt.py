@@ -327,6 +327,68 @@ def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, 
     assert not _stored_prompt_matches_runtime(_make_agent(session_id="child-sid", **fields), parent_prompt)
 
 
+def test_stored_prompt_stamped_for_switched_backend_is_not_restored(monkeypatch, tmp_path):
+    """#143724: ``config set terminal.backend`` while a chat stayed open must retire the stored
+    runtime block.  A remote block suppresses the host cwd line, so the cwd check alone never
+    fires; the backend identity must be compared against the same scope-aware read the builder
+    uses.  Both directions of the switch rebuild; an unchanged backend keeps reusing."""
+    import agent.prompt_builder as _pb
+    from agent.conversation_loop import _stored_prompt_matches_runtime
+
+    def _build_remote_prompt(backend):
+        monkeypatch.setenv("TERMINAL_ENV", backend)
+        # Static fallback: the live probe would try to spin up the sandbox.
+        monkeypatch.setattr(_pb, "_probe_remote_backend", lambda _t: None)
+        _pb._BACKEND_PROBE_CACHE.clear()
+        fields = dict(platform="desktop", model="test-model", provider="test-provider")
+        return build_system_prompt(_make_agent(**fields))
+
+    modal_prompt = _build_remote_prompt("modal")
+    assert "Terminal backend: modal." in modal_prompt
+    assert "Current working directory:" not in modal_prompt
+
+    # The switch under test: the profile's config now says local (a fresh terminal scope reads it;
+    # ambient env stands in here).  The stale Modal block must not survive the restore gate.
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    fields = dict(platform="desktop", model="test-model", provider="test-provider")
+    agent = _make_agent(**fields)
+    assert not _stored_prompt_matches_runtime(agent, modal_prompt)
+
+    # Same backend keeps reusing, both while the sandbox block is current...
+    monkeypatch.setenv("TERMINAL_ENV", "modal")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    assert _stored_prompt_matches_runtime(agent, modal_prompt)
+    # ...and for a different remote backend stamped and re-read under itself.
+    docker_prompt = _build_remote_prompt("docker")
+    assert "Terminal backend: docker." in docker_prompt
+    assert _stored_prompt_matches_runtime(agent, docker_prompt)
+    assert not _stored_prompt_matches_runtime(agent, modal_prompt)
+
+    # Local blocks reuse under local, and the local -> remote direction rebuilds too.
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    local_prompt = build_system_prompt(agent)
+    assert _stored_prompt_matches_runtime(agent, local_prompt)
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    assert not _stored_prompt_matches_runtime(agent, local_prompt)
+
+
+def test_stored_prompt_without_runtime_boundary_skips_backend_check(monkeypatch, tmp_path):
+    """Legacy persisted prompts (no runtime boundary) keep reusing: their backend cannot be
+    read back, and rebuilding every turn would break the prefix cache for no readable gain."""
+    from agent.conversation_loop import _stored_prompt_matches_runtime
+    from agent.surface_switch import runtime_backend_value
+
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    legacy = (f"Host: Example\nUser home directory: {tmp_path}\nCurrent working directory: {tmp_path}\n\n"
+              "# Project Context\n\nModel: test-model\nProvider: test-provider\nPlatform: cli")
+    assert runtime_backend_value(legacy) == ""
+    assert _stored_prompt_matches_runtime(_make_agent(platform="cli", model="test-model", provider="test-provider"), legacy)
+
+
 class TestExecutionGuidanceInjection:
     """Injection gate for OPENAI_MODEL_EXECUTION_GUIDANCE via
     ``agent.execution_guidance`` (auto/true/false/list).

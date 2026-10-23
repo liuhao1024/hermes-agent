@@ -32,7 +32,8 @@ from agent.prompt_caching import (
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
-    identity_line_value, note_inert_pinned_tools, runtime_host_value, stage_surface_switch_note,
+    identity_line_value, note_inert_pinned_tools, runtime_backend_value, runtime_host_value,
+    stage_surface_switch_note,
 )
 from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
 from hermes_cli.observability.shared_metrics_efficiency import record_cache_break, record_prompt_rebuild
@@ -980,6 +981,16 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     stored_cwd = runtime_host_value(prompt, "Current working directory")
     if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
         return False
+    # A terminal-backend switch (config set terminal.backend while the chat stayed open) is a real
+    # runtime change too: the whole environment block was stamped for the old backend.  A remote
+    # block suppresses the host cwd line, so the check above cannot catch it; a local block would
+    # otherwise describe a host the tools no longer touch (#143724).  Both sides read through the
+    # same scope-aware source, so a single-process CLI (ambient TERMINAL_ENV) keeps matching.
+    stored_backend = runtime_backend_value(prompt)
+    if stored_backend:
+        from agent.prompt_builder import runtime_backend_identity
+        if stored_backend != runtime_backend_identity():
+            return False
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by
     # agent.surface_switch.stage_surface_switch_note without touching the cached prefix (#104414).
