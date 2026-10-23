@@ -338,16 +338,22 @@ class SessionSessionsMixin:
     def _own_profile_name(self) -> Optional[str]:
         """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db`` → default,
         ``<root>/profiles/<name>/state.db`` → name): a gateway serving a NON-launch profile opens that
-        profile's store. None outside the profile tree — NULL beats a fabricated owner."""
+        profile's store. None outside the profile tree — NULL beats a fabricated owner. The store's
+        parent is matched as-opened first, then resolved, against the root as-configured and as-resolved:
+        a profile ``state.db`` symlinked out of the tree (Docker: SQLite on a native volume, #143713)
+        still belongs to the profile it was opened from, and resolving it first made every pre-upgrade
+        row stamped with the real profile name read as foreign."""
         try:
             from hermes_constants import get_default_hermes_root
-            root = get_default_hermes_root().resolve()
-            parent = Path(self.db_path).resolve().parent
-            if parent == root:
-                return "default"
-            is_profile_dir = parent.parent == root / "profiles"
-            if is_profile_dir and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", parent.name):
-                return parent.name
+            raw_root = get_default_hermes_root()
+            for parent in (Path(self.db_path).absolute().parent, Path(self.db_path).resolve().parent):
+                for root in (raw_root.absolute(), raw_root.resolve()):
+                    if parent == root:
+                        return "default"
+                    if parent.parent == root / "profiles" and re.fullmatch(
+                        r"[a-z0-9][a-z0-9_-]{0,63}", parent.name
+                    ):
+                        return parent.name
         except Exception:
             logger.debug("own-profile derivation failed", exc_info=True)
         return None
