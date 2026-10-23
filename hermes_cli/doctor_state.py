@@ -234,6 +234,13 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
 _UNPRUNED_CACHE_WARN_BYTES = 1 << 30
 _PRUNED_CACHE_DIRS = frozenset({"scratch", "terminal"})
 
+# pm-owned cache trees (pm.packages.uv_cache_dir(), pm.paths.partials_root()) still surface when
+# large, but the generic "move task files under scratch" advice does not apply to them (#143577).
+_PM_OWNED_CACHE_ADVICE = {
+    "uv": "pm's shared uv cache — deleting it only trades disk for re-downloads on the next update",
+    "partials": "pm's download partials — safe to delete when no update is running",
+}
+
 
 def unpruned_cache_hogs(hermes_home: Path, min_bytes: int = _UNPRUNED_CACHE_WARN_BYTES) -> list[tuple[str, int]]:
     """``(name, bytes)`` for ``cache/`` entries outside the pruned dirs that exceed *min_bytes*.
@@ -266,6 +273,10 @@ def _check_scratch_dir(hermes_home: Path, _DHH: str) -> None:
     for entry in stuck_entries(scratch):
         check_warn(f"{_DHH}/cache/scratch/{entry.name}/ holds files you may not delete, so the prune skips it — {removal_hint(entry)}")
     for name, nbytes in unpruned_cache_hogs(hermes_home):
+        advice = _PM_OWNED_CACHE_ADVICE.get(name)
+        if advice is not None:
+            check_warn(f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)}", advice)
+            continue
         check_warn(
             f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)} and outside every pruner "
             f"(only cache/scratch/ and cache/terminal/ are reaped) — move task files under "
