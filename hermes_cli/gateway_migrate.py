@@ -313,11 +313,62 @@ def _installed_services(home: Path) -> list[tuple[str, bool]]:
     with _home_env(home):
         if gw.supports_systemd_services():
             found.extend(("systemd", system) for system in (False, True) if gw.get_systemd_unit_path(system=system).exists())
-        if gw.is_macos() and gw.get_launchd_plist_path().exists():
+        if gw.is_macos() and (gw.get_launchd_plist_path().exists() or _legacy_launchd_plists(home)):
             found.append(("launchd", False))
         if gw.is_windows() and _windows_task_installed():
             found.append(("windows", False))
     return found
+
+
+def _legacy_launchd_plists(home: Path) -> list[Path]:
+    """LaunchAgent plists pinned to *home* whose label the per-profile naming scheme can't map.
+
+    A label the current ``ai.hermes.gateway-<profile>`` derivation never writes (an older scheme's
+    dot/hash suffix, the pre-rename ``io.nousresearch`` prefix) is invisible to
+    ``get_launchd_plist_path()``, so the fold never uninstalled the agent: launchd kept a
+    boot-startable standalone gateway that later reclaimed host ownership after the migration
+    reported convergence (#143390). Ownership is judged from the plist's pinned ``HERMES_HOME``
+    only, never from label shape, so another install's fleet is never enumerated (#41403) — the
+    same boundary as ``legacy_launchd_labels_for_install`` and the uninstall sweep."""
+    import plistlib
+    from hermes_cli import gateway as gw
+    from hermes_cli.uninstall import _LAUNCHD_GATEWAY_PLIST_PATTERNS
+
+    agents = gw.get_launchd_plist_path().parent
+    pinned_home = home.expanduser().resolve()
+    found = []
+    for pattern in _LAUNCHD_GATEWAY_PLIST_PATTERNS:
+        for plist_path in sorted(agents.glob(pattern)):
+            if plist_path in found:
+                continue
+            try:
+                data = plistlib.loads(plist_path.read_bytes())
+                pinned = Path(str(data["EnvironmentVariables"]["HERMES_HOME"])).expanduser().resolve()
+            except Exception:  # health: allow BLE001 -- fail-closed ownership probe: any unreadable/unpinned plist is "not ours", same boundary as legacy_launchd_labels_for_install
+                continue  # unreadable plist or no pinned home: not ours — fail closed
+            if pinned == pinned_home:
+                found.append(plist_path)
+    return found
+
+
+def _bootout_legacy_launchd(home: Path) -> list[str]:
+    """Boot out and delete every legacy-named LaunchAgent pinned to *home* (:func:`_legacy_launchd_plists`).
+
+    ``bootout`` in both the Aqua and per-user domains runs before the unlink so launchd never
+    respawns a job whose plist is gone (the uninstall sweep's ordering, #62209)."""
+    import subprocess
+    from hermes_cli import gateway as gw
+
+    removed = []
+    for plist_path in _legacy_launchd_plists(home):
+        label = plist_path.stem
+        uid = os.getuid()  # windows-footgun: ok — launchd agents exist only on macOS
+        for domain in (f"gui/{uid}", f"user/{uid}"):
+            subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                           check=False, timeout=90, **gw._CAPTURE_TEXT)
+        plist_path.unlink(missing_ok=True)
+        removed.append(label)
+    return removed
 
 
 def _windows_task_installed() -> bool:
@@ -948,6 +999,10 @@ def _remove_secondary_gateways(plan: MigrationPlan) -> None:
             _service_op(kind, system, "uninstall", p.home)
             done = "parked (down file)" if kind == "s6" else "removed"
             print(f"  ✓ {p.name}: stopped and {done} its {_service_label((kind, system))}")
+        # Labels the per-profile scheme can't map are absent from ``services`` and survive its
+        # uninstall pass; sweep them by pinned home or launchd respawns a standalone gateway later.
+        for label in _bootout_legacy_launchd(p.home):
+            print(f"  ✓ {p.name}: removed legacy LaunchAgent {label}")
         if p.pid is not None:
             _stop_gateway_process(p.home)
             print(f"  ✓ {p.name}: stopped standalone gateway (pid {p.pid})")
