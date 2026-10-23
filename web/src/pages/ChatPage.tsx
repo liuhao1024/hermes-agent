@@ -67,6 +67,7 @@ import {
   normalizePtyMobileInput,
   shouldTreatInputAsMobileReplacement,
 } from "@/lib/pty-mobile-input";
+import { makeXtermTextareaImeAttachable } from "@/lib/pty-ime-attach";
 import { computeKeyboardInset, keyboardRevealScrollDelta } from "@/lib/keyboard-inset";
 import {
   resolvePtyKeyboardShortcut,
@@ -831,6 +832,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       const isMobileLike =
         typeof navigator !== "undefined" &&
         /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+      if (isMobileLike) {
+        // Chromium on Android never raises the IME for xterm's hidden
+        // helper textarea, leaving /chat read-only on phones (#143761).
+        // Firefox and desktop attach the IME either way, so only lift the
+        // textarea on the touch surface.
+        makeXtermTextareaImeAttachable(textarea);
+      }
       const markReplacementInput = (ev: Event) => {
         const input = ev as InputEvent;
         if (

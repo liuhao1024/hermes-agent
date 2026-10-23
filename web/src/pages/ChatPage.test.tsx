@@ -30,9 +30,13 @@ class FakeWebglAddon {
 }
 
 class FakeTerminal {
+  static instances: FakeTerminal[] = [];
   options: Record<string, unknown>;
   rows = 24;
   cols = 80;
+  // xterm exposes its helper textarea after open(); ChatPage's mobile IME
+  // lift (#143761) writes inline styles onto this element.
+  textarea = document.createElement("textarea");
   parser = {
     registerOscHandler: vi.fn(),
   };
@@ -40,6 +44,7 @@ class FakeTerminal {
 
   constructor(options: Record<string, unknown>) {
     this.options = options;
+    FakeTerminal.instances.push(this);
   }
 
   attachCustomKeyEventHandler() {
@@ -214,6 +219,7 @@ async function render(ui: ReactNode) {
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
+  FakeTerminal.instances = [];
   webglInstances.length = 0;
   maybeReloadForLoopbackWsAuthFailure.mockClear();
   apiMocks.buildWsUrl.mockReset();
@@ -942,5 +948,63 @@ describe("ChatPage WebGL renderer gating", () => {
     });
 
     expect(webglInstances[0].disposed).toBe(true);
+  });
+});
+
+// Chromium on Android never raises the soft keyboard for xterm's hidden
+// helper textarea, leaving /chat read-only on phones (#143761).
+describe("ChatPage mobile IME textarea lift", () => {
+  const DESKTOP_CHROME_UA =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  const ANDROID_CHROME_UA =
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+  function stubUserAgent(value: string): void {
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value,
+      writable: true,
+    });
+  }
+
+  async function renderChat() {
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("lifts the helper textarea out of opacity:0/z-index:-5 hiding on Android (#143761)", async () => {
+    stubUserAgent(ANDROID_CHROME_UA);
+
+    await renderChat();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+    const textarea = FakeTerminal.instances[0].textarea;
+    expect(textarea.style.opacity).toBe("0.01");
+    expect(textarea.style.zIndex).toBe("0");
+    expect(textarea.style.color).toBe("transparent");
+    expect(textarea.style.pointerEvents).toBe("none");
+  });
+
+  it("leaves the helper textarea stock on desktop browsers", async () => {
+    stubUserAgent(DESKTOP_CHROME_UA);
+
+    await renderChat();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+    const textarea = FakeTerminal.instances[0].textarea;
+    expect(textarea.style.opacity).toBe("");
+    expect(textarea.style.zIndex).toBe("");
+    expect(textarea.style.pointerEvents).toBe("");
   });
 });
