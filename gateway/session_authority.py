@@ -86,6 +86,11 @@ class LiveSession:
     # Revision of the last ``session.control.update`` (gateway/session_control_actions.publish): a tool
     # completion republishes only when a tool actually moved the goal/loop/heartbeat state.
     control_revision: str = ""
+    # Subscription ids of viewers that submitted ``clarify_batch`` (#143477): the batch capability
+    # belongs to the live viewer, not only to the submit that carried it, so a turn the gateway
+    # admits itself (a background notice, no viewer submit) still gets the one ``clarify`` batch
+    # request while such a viewer stays attached; detach retires its id with its subscription.
+    clarify_batch: set = field(default_factory=set)
 
     def __post_init__(self):
         self.controls = PendingControls(self.event_stream)
@@ -363,6 +368,7 @@ class SessionAuthority:
         for subscription, member in list(live.subscribers.items()):
             if self.events.get(member.transport_id) is transport:
                 del live.subscribers[subscription]
+                live.clarify_batch.discard(subscription)
 
     async def detach(self, actor, subscription_id, *, end_reason=None):
         for session_id, live in self.sessions.items():
@@ -370,6 +376,7 @@ class SessionAuthority:
                 if live.subscribers[subscription_id] != actor:
                     raise RuntimeStoreError('permission_denied')
                 del live.subscribers[subscription_id]
+                live.clarify_batch.discard(subscription_id)
                 transport = self.events.get(actor.transport_id)
                 if transport is not None:
                     live.event_stream.fanout.detach(transport)

@@ -114,3 +114,74 @@ def test_a_tui_turn_that_asked_for_the_batch_gets_the_batch_panel(monkeypatch):
     with session_cli_turn.cli_turn_scope('adm-1', {'clarify_batch': True}):
         assert runner._clarify_callback_sync(QUESTIONS) == {'answers': {'q0': 'red'}, 'outcome': 'submitted'}
 
+
+def _batch_runner(live, admission_id='adm-notice'):
+    from gateway import run_turn_runner
+    runner = run_turn_runner.TurnRunner.__new__(run_turn_runner.TurnRunner)
+    runner._ctx = SimpleNamespace(inbound_message_id=admission_id,
+                                  source=SimpleNamespace(platform=Platform.LOCAL))
+    runner._approval_owner = (SimpleNamespace(sessions={'s1': live}), 's1', 1)
+    return runner
+
+
+def test_a_notice_woken_turn_batches_while_a_batch_viewer_stays_attached(monkeypatch):
+    """#143477: a turn the gateway admits itself (an ``async_delegation_complete`` / ``process_complete``
+    notice) has no viewer submit to carry ``clarify_batch``; the live viewer that declared it on an
+    earlier submit still answers the one batch ``clarify`` request, so the turn batches."""
+    from gateway import run_turn_progress, run_turn_runner, session_cli_turn
+    import gateway.session_clarify_batch as batch
+    monkeypatch.setattr(run_turn_progress, 'local_viewer_turn', lambda turn: True)
+    monkeypatch.setattr(run_turn_runner, '_finite_viewer_turn', lambda: False)
+    monkeypatch.setattr(batch, 'ask_clarify_batch',
+                        lambda turn, qs: {'answers': {'q0': 'red'}, 'outcome': 'submitted'})
+    live = SimpleNamespace(clarify_batch={'sub-1'}, subscribers={'sub-1': SimpleNamespace(transport_id='t1')})
+    runner = _batch_runner(live)
+    runner._ask_clarify_question = lambda *a, **k: (_ for _ in ()).throw(AssertionError('per-card path used'))
+    # A notice admission commits no ``cli_turn_v1`` and ``viewer_turn`` stays unset (no viewer input).
+    with session_cli_turn.cli_turn_scope('adm-notice', None):
+        assert runner._clarify_callback_sync(QUESTIONS) == {'answers': {'q0': 'red'}, 'outcome': 'submitted'}
+
+
+def test_a_notice_woken_turn_after_the_batch_viewer_detached_keeps_one_card_per_question(monkeypatch):
+    """The capability is the viewer's, not the session's forever: once the batch-capable viewer
+    detached (its subscription retired), a notice-woken turn asks the per-question cards again —
+    no attached viewer can answer the batch request."""
+    from gateway import run_turn_progress, run_turn_runner, session_cli_turn
+    import gateway.session_clarify_batch as batch
+    monkeypatch.setattr(run_turn_progress, 'local_viewer_turn', lambda turn: True)
+    monkeypatch.setattr(run_turn_runner, '_finite_viewer_turn', lambda: False)
+    monkeypatch.setattr(batch, 'ask_clarify_batch', lambda *a: (_ for _ in ()).throw(AssertionError('batch path used')))
+    live = SimpleNamespace(clarify_batch=set(), subscribers={})  # detach discarded 'sub-1'
+    runner = _batch_runner(live)
+    asked = []
+    runner._ask_clarify_question = lambda question, *a, **k: asked.append(question) or ('blue', True)
+    with session_cli_turn.cli_turn_scope('adm-notice', None):
+        reply = runner._clarify_callback_sync(QUESTIONS)
+    assert asked == ['colour?', 'size?']
+    assert reply == {'answers': {'q0': 'blue', 'q1': 'blue'}, 'outcome': 'submitted'}
+
+
+def test_a_viewer_submit_without_the_flag_keeps_cards_even_with_a_batch_viewer_attached(monkeypatch):
+    """The session-level capability never overrides a submitter's own declaration: a viewer that
+    submits without ``clarify_batch`` (an ACP editor, a raw WebSocket client) keeps per-question
+    cards on ITS turn even while a batch-capable viewer is attached to the same session."""
+    from gateway import run_turn_progress, run_turn_runner, session_cli_turn
+    from gateway.session_ingress import viewer_turn
+    import gateway.session_clarify_batch as batch
+    monkeypatch.setattr(run_turn_progress, 'local_viewer_turn', lambda turn: True)
+    monkeypatch.setattr(run_turn_runner, '_finite_viewer_turn', lambda: False)
+    monkeypatch.setattr(batch, 'ask_clarify_batch', lambda *a: (_ for _ in ()).throw(AssertionError('batch path used')))
+    live = SimpleNamespace(clarify_batch={'sub-1'}, subscribers={'sub-1': SimpleNamespace(transport_id='t1')})
+    runner = _batch_runner(live, admission_id='adm-2')
+    asked = []
+    runner._ask_clarify_question = lambda question, *a, **k: asked.append(question) or ('blue', True)
+    # A viewer input that committed no CLI fields: empty ``cli_turn``, but ``viewer_turn`` is bound.
+    with session_cli_turn.cli_turn_scope('adm-2', None):
+        token = viewer_turn.set(live)
+        try:
+            reply = runner._clarify_callback_sync(QUESTIONS)
+        finally:
+            viewer_turn.reset(token)
+    assert asked == ['colour?', 'size?']
+    assert reply == {'answers': {'q0': 'blue', 'q1': 'blue'}, 'outcome': 'submitted'}
+

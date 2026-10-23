@@ -161,10 +161,24 @@ def clarify_batch_turn(turn):
     """The clarify tool's batch goes to main's batch panel as one request: a local-viewer turn whose
     submitter declared it answers the whole set (``clarify_batch`` committed with its admission).
     Main's classic CLI, Ink TUI and Desktop all showed every question at once (TUI-18); a viewer that
-    never asks (an ACP editor, a raw WebSocket client) keeps one ``clarify.request`` card per question."""
+    never asks (an ACP editor, a raw WebSocket client) keeps one ``clarify.request`` card per question.
+    A turn the gateway admits itself (an ``async_delegation_complete`` / ``process_complete`` notice:
+    no viewer submit, ``viewer_turn`` unset) carries no flag to read, so the capability falls back to
+    the live viewers still attached (#143477): the batch request reaches exactly those viewers."""
     from gateway.run_turn_progress import local_viewer_turn
-    return local_viewer_turn(turn) and bool(
-        cli_turn(getattr(turn._ctx, 'inbound_message_id', None)).get('clarify_batch'))
+    if not local_viewer_turn(turn):
+        return False
+    committed = cli_turn(getattr(turn._ctx, 'inbound_message_id', None))
+    if committed.get('clarify_batch'):
+        return True
+    from gateway.session_ingress import viewer_turn
+    if committed or viewer_turn.get() is not None:
+        # This turn's own submitter sent no flag (or it is another producer's viewer input):
+        # per-question cards are that submitter's declaration, not the session's to override.
+        return False
+    authority, session_id, _generation = turn._approval_owner
+    live = authority.sessions.get(session_id)
+    return bool(getattr(live, 'clarify_batch', set()) & set(getattr(live, 'subscribers', {}) or {}))
 
 
 def take_cli_result_fields(result, *, aux_before=None, session_db=None, session_id=None):

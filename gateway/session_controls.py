@@ -765,6 +765,12 @@ class AuthorityConnection:
         from gateway.session_cli_turn import submit_cli_turn_fields
         payload = {'text': params.get('text'), **admit_finite(params, submitter=(self, ref)), **submit_surface_fields(params),
                    **submit_display_fields(params), **submit_cli_turn_fields(params)}
+        if payload.get('clarify_batch') is True:
+            # #143477: the capability belongs to the live viewer, not only to this turn — a later
+            # notice-woken turn (no viewer submit) batches while this subscription stays attached.
+            live = self.authority.sessions.get(ref.session_id)
+            if live is not None:
+                live.clarify_batch.add(self.subscriptions[ref.session_id])
         if 'attachments' in params:
             payload['attachments'] = params['attachments']
         return Submission(request_id, ref, payload, 'queue')
