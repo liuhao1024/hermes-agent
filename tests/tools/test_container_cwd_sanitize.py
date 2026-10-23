@@ -17,7 +17,11 @@ Both paths now share ``_is_unusable_container_cwd()``; these tests pin its
 behaviour so neither path can regress.
 """
 
+import ntpath
+from types import SimpleNamespace
+
 import tools.terminal_tool as tt
+import tools.terminal_tool_config as ttc
 
 class TestIsUnusableContainerCwd:
     def test_windows_backslash_host_path_rejected(self):
@@ -27,6 +31,31 @@ class TestIsUnusableContainerCwd:
 
     def test_posix_home_host_path_rejected(self):
         assert tt._is_unusable_container_cwd("/home/ben/projects") is True
+
+    def test_posix_absolute_container_cwd_accepted(self):
+        # A configured in-container path that is neither a host prefix nor
+        # relative must survive: it is a legal `docker run -w` target.
+        assert tt._is_unusable_container_cwd("/opt/data") is False
+
+    def test_windows_host_keeps_posix_container_cwd(self, monkeypatch):
+        # #143779: on a Windows host (ntpath), judging a container cwd with
+        # `os.path.isabs` treats `/Замітки` as drive-relative and discards it
+        # for /root. Simulate the Windows path module: the sanitizer must
+        # still accept the POSIX-absolute container cwd. If the guard ever
+        # regresses to os.path.isabs, this fails even on POSIX dev machines.
+        monkeypatch.setattr(ttc, "os", SimpleNamespace(path=ntpath))
+        assert tt._is_unusable_container_cwd("/Замітки") is False
+        assert tt._is_unusable_container_cwd("/opt/data") is False
+
+    def test_windows_host_host_shapes_still_rejected(self, monkeypatch):
+        # The Windows-host fix must not loosen the host/relative rejection:
+        # drive paths (both slash styles), relatives, and UNC paths stay
+        # unusable even when judged through ntpath.
+        monkeypatch.setattr(ttc, "os", SimpleNamespace(path=ntpath))
+        assert tt._is_unusable_container_cwd("C:/Users/someuser") is True
+        assert tt._is_unusable_container_cwd(r"D:\work") is True
+        assert tt._is_unusable_container_cwd("relative/sub") is True
+        assert tt._is_unusable_container_cwd(r"\\server\share") is True
 
 class TestOverrideCwdSanitizedAtCallSite:
     """E2E pin: a per-task cwd OVERRIDE that is a host path must NOT reach the
