@@ -689,7 +689,7 @@ _SUBCOMMANDS = (
              help="Snapshot id to restore (see `--list`); default: newest"),
         _arg("-y", "--yes", **_STORE_TRUE, help="Skip confirmation prompt")),
     (
-        "ledger", "List the per-mutation skill audit ledger (all actors: curator/agent/user)",
+        "ledger", "List the per-mutation skill audit ledger (all actors: curator/background_review/agent/user)",
         _cmd_ledger,
         _arg("--skill", default=None, help="Only show entries for this skill"),
         _arg("--limit", type=int, default=20, help="Max entries to show (default: 20)"),

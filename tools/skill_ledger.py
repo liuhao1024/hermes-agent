@@ -35,7 +35,7 @@ _ARCHIVE_TS_SUFFIX_RE = re.compile(r"^(.+)-\d{14}$")
 # Rollback of these must restore a COMPLETE package: consolidation may have re-homed
 # support files first, so a disk-only capture would restore a hollow skill.
 _PACKAGE_RESTORE_ACTIONS = frozenset({"delete", "archive", "purge"})
-_VALID_ACTORS = {"curator", "agent", "user"}
+_VALID_ACTORS = {"curator", "background_review", "agent", "user"}
 _DEFAULT_LEDGER_MAX_BYTES = 5 * 1024 * 1024  # skills.ledger_max_bytes default (5 MB)
 _BLOB_GC_GRACE_SECS = 3600  # blobs younger than this may belong to an in-flight capture: never GC them
 _NON_PACKAGE_TOPS = {".curator_backups", ".hub", ".archive", ".locks"}
@@ -66,14 +66,20 @@ def reset_ledger_actor(token: contextvars.Token) -> None:
 
 
 def derive_actor() -> str:
-    """Explicit override, else background-review provenance -> curator, else agent."""
+    """Explicit override, else background-review provenance -> background_review, else agent.
+
+    The post-turn background_review fork and the curator's LLM consolidation pass share the
+    "background_review" write origin (both must trigger the background-review write guards), so the
+    curator's own pass binds an explicit set_ledger_actor("curator") around run_conversation and
+    only the post-turn fork lands here (#143624).
+    """
     override = _actor_override.get()
     if override in _VALID_ACTORS:
         return override
     with suppress(Exception):
         from tools.skill_provenance import is_background_review
         if is_background_review():
-            return "curator"
+            return "background_review"
     return "agent"
 
 

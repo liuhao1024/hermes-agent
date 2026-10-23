@@ -57,8 +57,10 @@ def _create(name="my-skill", content=VALID_SKILL_CONTENT):
 
 
 def test_background_review_patch_ledgers_and_rolls_back(ledger_env, monkeypatch):
-    """A curator-pass patch lands in the ledger tagged 'curator', and a
-    single-entry rollback restores the exact pre-patch content."""
+    """A post-turn background_review patch lands in the ledger tagged
+    'background_review' (not 'curator' — the curator's own pass binds an
+    explicit actor override, #143624), and a single-entry rollback restores
+    the exact pre-patch content."""
     from tools import skill_ledger
     from tools.skill_manager_tool import skill_manage
     from tools.skill_provenance import (
@@ -94,12 +96,38 @@ def test_background_review_patch_ledgers_and_rolls_back(ledger_env, monkeypatch)
     patch_rows = [r for r in rows if r["action"] == "patch"]
     assert len(patch_rows) == 1
     entry = patch_rows[0]
-    assert entry["actor"] == "curator"
+    assert entry["actor"] == "background_review"
     assert any(i["path"].endswith("SKILL.md") for i in entry["before"])
 
     ok, msg = skill_ledger.rollback_entry(entry["id"])
     assert ok is True, msg
     assert skill_md.read_text(encoding="utf-8") == original
+
+
+def test_curator_actor_override_wins_over_background_review_origin(ledger_env):
+    """The curator's LLM consolidation pass shares the background_review write origin
+    (the skill write guards must still fire) but binds set_ledger_actor("curator")
+    around its run; only the post-turn review fork lands on the derived
+    'background_review' actor, so the two are distinguishable in the ledger (#143624)."""
+    from tools import skill_ledger
+    from tools.skill_provenance import (
+        BACKGROUND_REVIEW,
+        reset_current_write_origin,
+        set_current_write_origin,
+    )
+
+    token = set_current_write_origin(BACKGROUND_REVIEW)
+    try:
+        assert skill_ledger.derive_actor() == "background_review"
+        override_tok = skill_ledger.set_ledger_actor("curator")
+        try:
+            assert skill_ledger.derive_actor() == "curator"
+        finally:
+            skill_ledger.reset_ledger_actor(override_tok)
+        assert skill_ledger.derive_actor() == "background_review"
+    finally:
+        reset_current_write_origin(token)
+    assert skill_ledger.derive_actor() == "agent"
 
 
 def test_foreground_patch_is_ledgered_as_agent(ledger_env):

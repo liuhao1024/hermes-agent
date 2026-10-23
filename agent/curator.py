@@ -1135,9 +1135,18 @@ def _run_llm_review(prompt: str) -> dict[str, Any]:
 
             _reset_background_review_read_marks()
         # Silence the fork's tool-call chatter (CLI synchronous foreground runs).
-        with open(os.devnull, "w", encoding="utf-8") as devnull, \
-             contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            conv_result = review_agent.run_conversation(user_message=prompt)
+        # The fork shares the "background_review" write origin (guards must fire), so bind the
+        # ledger actor explicitly: without it derive_actor() would stamp these edits
+        # "background_review" and the consolidation pass would be indistinguishable from the
+        # post-turn review fork in .curator_ledger.jsonl (#143624). Same idiom as _archive_as_curator.
+        from tools.skill_ledger import reset_ledger_actor, set_ledger_actor
+        actor_tok = set_ledger_actor("curator")
+        try:
+            with open(os.devnull, "w", encoding="utf-8") as devnull, \
+                 contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                conv_result = review_agent.run_conversation(user_message=prompt)
+        finally:
+            reset_ledger_actor(actor_tok)
         final = str(conv_result.get("final_response") or "").strip() if isinstance(conv_result, dict) else ""
         result_meta["final"] = final
         result_meta["summary"] = (final[:240] + "…") if len(final) > 240 else (final or "no change")
