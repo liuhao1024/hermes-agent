@@ -204,7 +204,10 @@ def _ws_auth_reason(ws: WebSocket) -> tuple[Optional[str], str]:
     ``token_mismatch``, ``ticket_invalid``, ``internal_invalid``);
     ``credential`` names what was presented so the accept path can log *how*.
 
-    Loopback / ``--insecure``: legacy ``?token=`` (constant-time compared).
+    Loopback / ``--insecure``: legacy ``?token=`` (constant-time compared), or — on a
+    gateway-hosted listener, which never publishes that token — a one-use ``?ticket=``
+    minted on the owner-only control socket (``_redeem_bootstrap_ws_ticket``; the Desktop's
+    audio sibling streams cannot ride the subprotocol its ``/api/ws`` dial uses).
     Gated: ``?ticket=`` (browser-minted, single-use, 30s TTL) or ``?internal=``
     (process-lifetime, multi-use, only for server-spawned WS clients so the PTY
     child can reconnect; never injected into the SPA), or ``?token=`` holding a
@@ -332,12 +335,53 @@ def _ws_auth_reason(ws: WebSocket) -> tuple[Optional[str], str]:
 
         return "no_credential", "none"
 
+    # A gateway-hosted listener never publishes the SPA ``?token=`` (``withhold_session_token``):
+    # its local clients authenticate with one-use tickets minted on the owner-only control
+    # socket. The Desktop's dialer moves that ticket into the subprotocol for ``/api/ws``, but a
+    # browser WebSocket can set neither headers nor subprotocols on the sibling streams (the
+    # dictation/speak audio sockets), so the ticket arrives here as ``?ticket=`` — redeem it.
+    ticket = ws.query_params.get("ticket", "")
+    if ticket:
+        grant = _redeem_bootstrap_ws_ticket(ws, ticket)
+        if grant is not None:
+            ws._hermes_auth_identity = {"user_id": grant["subject"], "provider": "local"}
+            return None, "ticket"
+
     token = ws.query_params.get("token", "")
     if not token:
         return "no_credential", "none"
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
         return None, "token"
     return "token_mismatch", "token"
+
+
+def _redeem_bootstrap_ws_ticket(ws: WebSocket, ticket: str) -> Optional[dict]:
+    """Redeem a one-use control-socket ticket for a sibling stream on a non-gated listener.
+
+    The issuer is the gateway runtime's ``session_ticket_store`` — the same store behind the
+    Desktop's ``/api/ws`` subprotocol dial (``gateway/run_api.py``). Browsers cannot move the
+    ticket into that subprotocol, so the sibling audio streams present it as ``?ticket=``.
+
+    Returns the grant, or None unless every leg holds: this process hosts the gateway runtime
+    with its store, the peer is loopback (the Desktop dials its local gateway), and the ticket
+    redeems for the interactive, host-scoped grant the Desktop's dial mints. A profile-scoped
+    grant is refused — it names one home and must not open a stream whose ``?profile=`` can
+    select any served sibling. None always falls back to the legacy token rules.
+    """
+    from hermes_cli.web_server import app
+    runner = getattr(app.state, "gateway_runner", None)
+    store = getattr(runner, "session_ticket_store", None)
+    if store is None:
+        return None
+    if not ws.client or ws.client.host not in {"127.0.0.1", "::1"}:
+        return None
+    try:
+        grant = store.redeem(ticket, profile_id=None, purpose="interactive")
+    except PermissionError:
+        return None
+    if grant.get("scope") != "host":
+        return None
+    return grant
 
 
 def _ws_auth_ok(ws: WebSocket) -> bool:

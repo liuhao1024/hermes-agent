@@ -210,6 +210,75 @@ class TestWsAuthOkLoopback:
         assert _web_server_chat._ws_auth_ok(ws) is True
 
 
+@pytest.fixture
+def gateway_runtime_app(loopback_app):
+    """Loopback app whose process also hosts the gateway runtime: a runner with the
+    real bootstrap TicketStore behind it (what run_api binds on mount)."""
+    from gateway.runtime_bootstrap import TicketStore
+
+    store = TicketStore("inst-1", frozenset({"/home/u/.hermes/profiles/p1"}))
+    prev_runner = getattr(web_server.app.state, "gateway_runner", None)
+    web_server.app.state.gateway_runner = SimpleNamespace(session_ticket_store=store)
+    try:
+        yield store
+    finally:
+        web_server.app.state.gateway_runner = prev_runner
+
+
+def _bootstrap_ticket(store, *, scope="host", purpose="interactive"):
+    return store.mint(
+        profile_id="/home/u/.hermes/profiles/p1", subject="local-desktop",
+        purpose=purpose, scope=scope)
+
+
+class TestWsAuthOkBootstrapTicket:
+    """Gate OFF + gateway-hosted listener — the Desktop's audio sibling streams
+    present the control-socket ticket as ``?ticket=`` (#143542)."""
+
+    def test_host_scoped_interactive_ticket_accepted(self, gateway_runtime_app):
+        ticket = _bootstrap_ticket(gateway_runtime_app)
+        ws = _fake_ws(query={"ticket": ticket}, path="/api/audio/transcribe-stream")
+        assert _web_server_chat._ws_auth_reason(ws) == (None, "ticket")
+        assert ws._hermes_auth_identity == {"user_id": "local-desktop", "provider": "local"}
+
+    def test_bootstrap_ticket_is_single_use(self, gateway_runtime_app):
+        ticket = _bootstrap_ticket(gateway_runtime_app)
+        assert _web_server_chat._ws_auth_ok(_fake_ws(query={"ticket": ticket})) is True
+        # Redeem consumed it; the second dial falls through to the token rules.
+        assert _web_server_chat._ws_auth_reason(_fake_ws(query={"ticket": ticket})) == (
+            "no_credential", "none")
+
+    def test_refused_without_gateway_runner(self, loopback_app):
+        # A plain dashboard (no gateway runtime bound) has no issuer for this ticket.
+        ticket = "x" * 43
+        assert _web_server_chat._ws_auth_reason(_fake_ws(query={"ticket": ticket})) == (
+            "no_credential", "none")
+
+    def test_refused_for_non_loopback_peer(self, gateway_runtime_app):
+        ticket = _bootstrap_ticket(gateway_runtime_app)
+        ws = _fake_ws(query={"ticket": ticket}, client_host="192.168.0.222")
+        assert _web_server_chat._ws_auth_reason(ws) == ("no_credential", "none")
+
+    def test_profile_scoped_grant_refused(self, gateway_runtime_app):
+        # A profile-scoped ticket names one home; it must not open a stream whose
+        # ?profile= could select any served sibling.
+        ticket = _bootstrap_ticket(gateway_runtime_app, scope="profile")
+        assert _web_server_chat._ws_auth_reason(_fake_ws(query={"ticket": ticket})) == (
+            "no_credential", "none")
+
+    def test_bad_purpose_grant_refused(self, gateway_runtime_app):
+        # native-http grants mint profile-scoped (host scope is interactive-only) and are
+        # refused here regardless: a core stream needs the interactive dial's grant.
+        ticket = _bootstrap_ticket(gateway_runtime_app, purpose="native-http", scope="profile")
+        assert _web_server_chat._ws_auth_reason(_fake_ws(query={"ticket": ticket})) == (
+            "no_credential", "none")
+
+    def test_refused_ticket_still_allows_the_legacy_token(self, gateway_runtime_app):
+        # A ticket that does not redeem must not eat the legacy ?token= leg.
+        ws = _fake_ws(query={"ticket": "garbage", "token": web_server._SESSION_TOKEN})
+        assert _web_server_chat._ws_auth_ok(ws) is True
+
+
 class TestWsAuthOkGated:
     """Gate ON — ticket path only."""
 
