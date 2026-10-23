@@ -10,6 +10,7 @@ import asyncio
 import json
 import threading
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 import pytest
 
@@ -178,6 +179,34 @@ def test_websockets_missing_returns_error(monkeypatch):
     result = json.loads(browser_cdp_tool.browser_cdp(method="Target.getTargets"))
     assert "error" in result
     assert "websockets" in result["error"].lower()
+
+
+def test_transient_discovery_failure_reports_reason_not_config_error(monkeypatch):
+    """#143418: a transient /json/version failure must surface its reason, not read as a
+    misconfigured non-WebSocket endpoint."""
+    bt_cdp._last_discovery_failure.clear()
+    try:
+        monkeypatch.setattr(bt_cdp, "_get_cdp_override_raw", lambda: "http://lan-host:9222")
+        with patch("requests.get", side_effect=requests.exceptions.ConnectTimeout("connect timed out")):
+            result = json.loads(browser_cdp_tool.browser_cdp(method="Runtime.evaluate"))
+        assert "error" in result
+        assert "ConnectTimeout" in result["error"]
+        assert "not a WebSocket URL" not in result["error"]
+        assert "transient" in result["error"].lower()
+        assert result.get("cdp_docs") == browser_cdp_tool.CDP_DOCS_URL
+    finally:
+        bt_cdp._last_discovery_failure.clear()
+
+
+def test_non_ws_endpoint_without_discovery_failure_keeps_config_error(monkeypatch):
+    monkeypatch.setattr(browser_cdp_tool, "_resolve_cdp_endpoint", lambda: "http://static-host:9222")
+    bt_cdp._last_discovery_failure.clear()
+    try:
+        result = json.loads(browser_cdp_tool.browser_cdp(method="Runtime.evaluate"))
+        assert "error" in result
+        assert "not a WebSocket URL" in result["error"]
+    finally:
+        bt_cdp._last_discovery_failure.clear()
 
 
 # ---------------------------------------------------------------------------

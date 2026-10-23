@@ -1,4 +1,7 @@
 from unittest.mock import Mock, patch
+
+import requests
+
 from tools import browser_tool_cloud as bt_cloud
 from tools import browser_tool_cdp as bt_cdp
 from tools import browser_tool_session as bt_session
@@ -62,6 +65,31 @@ class TestResolveCdpOverride:
         assert "access_token=***" in logged_version_url
         assert "access_token=***" in logged_error
         assert logged_version_url.startswith("https://cdp.example")
+
+    def test_discovery_failure_reason_sanitized_then_cleared_on_success(self):
+        """#143418: the recorded failure reason must carry the exception type (for the
+        browser_cdp error) but never a query-string token, and a later successful
+        discovery must clear it."""
+        from tools.browser_tool_cdp import _resolve_cdp_override, last_cdp_discovery_failure
+
+        raw = "http://lan-host:9222"
+        bt_cdp._last_discovery_failure.clear()
+        try:
+            with patch("requests.get", side_effect=requests.exceptions.ConnectTimeout(
+                    "http://lan-host:9222/json/version?access_token=super-secret-token-123456 timed out")):
+                assert _resolve_cdp_override(raw) == raw
+            reason = last_cdp_discovery_failure(raw)
+            assert "ConnectTimeout" in reason
+            assert "super-secret-token-123456" not in reason
+
+            response = Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"webSocketDebuggerUrl": WS_URL}
+            with patch("requests.get", return_value=response):
+                assert _resolve_cdp_override(raw) == WS_URL
+            assert last_cdp_discovery_failure(raw) == ""
+        finally:
+            bt_cdp._last_discovery_failure.clear()
 
     def test_normalizes_provider_returned_http_cdp_url_when_creating_session(self, monkeypatch):
         from tools import browser_tool

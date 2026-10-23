@@ -11,6 +11,18 @@ from agent.proxy_bypass import loopback_request_kwargs
 from tools.browser_tool_origin import origin_module as _origin
 
 
+# Most recent ``/json/version`` discovery failure per raw endpoint (sanitized reason). ``browser_cdp`` surfaces it
+# so a transient timeout/refused reads as a discovery failure instead of a misconfigured non-WebSocket endpoint.
+_last_discovery_failure: dict[str, str] = {}
+_last_discovery_failure_lock = threading.Lock()
+
+
+def last_cdp_discovery_failure(cdp_url: str) -> str:
+    """The sanitized reason the last ``/json/version`` discovery for ``cdp_url`` failed, or ""."""
+    with _last_discovery_failure_lock:
+        return _last_discovery_failure.get((cdp_url or "").strip(), "")
+
+
 def _resolve_cdp_override(cdp_url: str) -> str:
     """Normalize a user-supplied CDP endpoint into a concrete websocket URL.
 
@@ -39,13 +51,20 @@ def _resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        _bt.logger.warning("Failed to resolve CDP endpoint %s via %s: %s", san(raw), san(version_url), san(exc))
+        reason = san(f"{type(exc).__name__}: {exc}")
+        _bt.logger.warning("Failed to resolve CDP endpoint %s via %s: %s", san(raw), san(version_url), reason)
+        with _last_discovery_failure_lock:
+            _last_discovery_failure[raw] = reason
         return raw
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
         _bt.logger.info("Resolved CDP endpoint %s -> %s", san(raw), san(ws_url))
+        with _last_discovery_failure_lock:
+            _last_discovery_failure.pop(raw, None)
         return ws_url
     _bt.logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", san(version_url))
+    with _last_discovery_failure_lock:
+        _last_discovery_failure[raw] = "discovery succeeded but the response had no webSocketDebuggerUrl"
     return raw
 
 

@@ -305,6 +305,13 @@ def browser_cdp(method: str, params: Optional[dict[str, Any]] = None, target_id:
                           "Brave, Chromium, or Edge browser, or set 'browser.cdp_url' in config.yaml. The Camofox "
                           "backend is REST-only and does not expose CDP.", cdp_docs=CDP_DOCS_URL)
     if not endpoint.startswith(("ws://", "wss://")):
+        from tools.browser_tool_cdp import last_cdp_discovery_failure
+        discovery_failure = last_cdp_discovery_failure(endpoint)
+        if discovery_failure:
+            return tool_error(f"CDP discovery for {endpoint!r} failed: {discovery_failure}. This is often transient "
+                              "(timeout, connection refused, or HTTP error) and the browser may still be listening — "
+                              "retry the call, and check network/firewall access to the debug port if it persists.",
+                              method=method, cdp_docs=CDP_DOCS_URL)
         return tool_error(f"CDP endpoint is not a WebSocket URL: {endpoint!r}. Expected ws://... or wss://... — "
                           "the /browser connect resolver should have rewritten this. Check that a Chromium-family "
                           "browser is actually listening on the debug port.")
