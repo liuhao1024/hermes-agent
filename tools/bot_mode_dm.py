@@ -548,7 +548,8 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
 
 def _wait_live_dm(home: str, delivery_id: str, *, dm_file: str | os.PathLike | None = None) -> int:
     from tools.bot_failure_reasons import RUNTIME_OFFLINE
-    from tools.bot_live_delivery import await_delivery, cancel_queued_delivery, owner_holds_delivery
+    from tools.bot_live_delivery import (_delivery_id, _root, await_delivery, cancel_queued_delivery,
+                                         owner_holds_delivery)
 
     deadline = time.monotonic() + _LIVE_WAIT_MAX_SECONDS
     missed = 0
@@ -584,6 +585,15 @@ def _wait_live_dm(home: str, delivery_id: str, *, dm_file: str | os.PathLike | N
     payload.update(status=status, delivery_id=delivery_id)
     if status in ("queued", "claimed", "ambiguous"):
         payload["detail"] = "Delivery remains pending or its outcome is unknown. Do not resend; receipt is retained."
+        if status in ("queued", "claimed"):
+            # How long this DM has sat unchanged behind the owner: the receipt's mtime, the
+            # same age signal the Desktop envelope lane trusts. The one hint a sender gets
+            # for "wedged behind a stuck turn" vs "just admitted" when the wait budget runs out.
+            try:
+                mtime = (_root(home) / f"{_delivery_id(delivery_id)}.json").stat().st_mtime
+                payload["queued_age_s"] = max(0, int(time.time() - mtime))
+            except OSError:
+                pass
     elif status == "settled" and dm_file is not None:
         # The intent carries the message plaintext so a retry can replay the SAME delivery id;
         # once the owner settled it nothing retries, so it goes along with the dm file (same

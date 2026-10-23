@@ -792,6 +792,18 @@ def test_live_dm_wait_is_bounded_and_never_cancels_an_admission(tmp_path, monkey
     assert live.read_delivery_result(tmp_path, record["delivery_id"])["status"] == "queued"
 
 
+def test_live_dm_pending_receipt_reports_how_long_the_dm_was_queued(tmp_path, monkeypatch, capsys):
+    """A pending notice must surface how long the DM has sat behind the owner, so a sender can
+    tell a wedged recipient turn from a just-admitted DM (#141474)."""
+    _live, _authority, record = _admitted_live_dm(tmp_path, monkeypatch, "5" * 32)
+    monkeypatch.setattr(bot_mode_dm, "_LIVE_WAIT_MAX_SECONDS", 0.1)
+
+    assert bot_mode_dm._wait_live_dm(str(tmp_path), record["delivery_id"]) == 0
+    notice = json.loads(capsys.readouterr().out)
+    assert notice["status"] == "queued"
+    assert 0 <= notice["queued_age_s"] < 60
+
+
 # ── plaintext tempfile lifecycle (peer stdin transport) ─────────────────────
 
 
