@@ -500,6 +500,29 @@ class TestAuthHeaders:
         text = "the authorization model is fully open"
         assert redact_sensitive_text(text) == text
 
+    def test_bare_scheme_word_without_token_not_masked(self):
+        # A header whose value is ONLY the scheme word carries no credential.
+        # Masking it collapsed distinct marker strings like
+        # '"authorization: bearer "' / '"authorization: bot "' onto the same
+        # '"authorization: *** "' (#142574).
+        for scheme in ("bearer", "bot", "Basic", "Digest", "NEGOTIATE"):
+            text = f'    "authorization: {scheme} ",'
+            assert redact_sensitive_text(text) == text
+
+    def test_scheme_word_with_token_still_masks_token_only(self):
+        # fail-closed: a real credential after the scheme word is still masked
+        # and the scheme word itself stays readable.
+        text = '"authorization: bearer opaque0123456789abcdef",'
+        result = redact_sensitive_text(text)
+        assert "opaque0123456789abcdef" not in result
+        assert "bearer" in result.lower()
+
+    def test_bare_credential_without_scheme_still_masked(self):
+        # A bare credential (no scheme word in front) must still be masked.
+        text = '"authorization: opaque0123456789abcdef",'
+        result = redact_sensitive_text(text)
+        assert "opaque0123456789abcdef" not in result
+
     def test_token_flush_against_double_quote_preserves_quote(self):
         # Regression for #43083: a token sitting flush against a closing
         # double quote must NOT pull that quote into the mask. Greedy \S+

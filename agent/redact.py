@@ -505,6 +505,23 @@ _PYTHON_EXCEPTION_LINE_RE = re.compile(
 # (unterminated quote → shell EOF / SyntaxError).
 _AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
 
+# RFC 7235 / IANA auth-scheme words (common subset). When the header value is
+# ONLY the scheme word, group(3) of _AUTH_HEADER_RE never sees a credential (the
+# engine backtracks and captures the scheme word itself), and there is no
+# secret material to mask — masking it collapsed distinct marker strings like
+# ``"authorization: bearer "`` / ``"authorization: bot "`` onto the same
+# ``"authorization: *** "`` (#142574).
+_AUTH_SCHEME_WORDS = frozenset({
+    "aws4-hmac-sha256", "basic", "bearer", "bot", "digest", "hoba", "mutual",
+    "negotiate", "ntlm", "oauth", "scram-sha-1", "scram-sha-256", "token", "vapid",
+})
+
+
+def _auth_header_sub(m: "re.Match[str]") -> str:
+    if m.group(2) is None and m.group(3).lower() in _AUTH_SCHEME_WORDS:
+        return m.group(0)
+    return m.group(1) + (m.group(2) or "") + _mask_token(m.group(3))
+
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
 SECRET_HEADER_NAME_LIST = ("x-api-key", "x-goog-api-key", "api-key", "apikey", "x-api-token", "x-auth-token", "x-access-token")
@@ -961,7 +978,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _redact_assignments(text, mask_nonreusable=file_read)
 
     if "uthorization" in text or "UTHORIZATION" in text:  # cheapest gate over every casing
-        text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
+        text = _AUTH_HEADER_RE.sub(_auth_header_sub, text)
 
     if ":" in text:
         text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
