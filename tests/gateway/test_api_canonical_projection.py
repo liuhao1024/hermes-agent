@@ -401,3 +401,28 @@ async def test_canonical_sse_projects_the_turn_reasoning(api, owner, path, body,
         text = await response.text()
     assert response.status == 200, text
     assert marker in text and 'THINKING' in text, text
+
+
+@pytest.mark.asyncio
+async def test_run_completed_output_inlines_media_tags_for_remote_clients(api, owner, tmp_path):
+    """/v1/runs finished output resolves MEDIA: image tags to data URLs like every other
+    api_server surface (#143666): remote clients can't read server paths, and the pollable
+    status row carries the same resolved output."""
+    admitted = admit_api_turn(api, session_id='media-run', user_message='hello', conversation_history=[])
+    launch, queue = _launch(api, admitted)
+    shot = tmp_path / 'shot.png'
+    shot.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
+        "h6FO1AAAAABJRU5ErkJggg=="))
+
+    async def handle(event):
+        from gateway.session_results import execution_result
+        execution_result.get()['result'] = {'final_response': f'here MEDIA:{shot}'}
+        return 'here'
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # call_soon terminal event lands on the loop
+    events = _events(queue)
+    completed = next(e for e in events if e['event'] == 'run.completed')
+    assert 'data:image/png;base64,' in completed['output'] and 'MEDIA:' not in completed['output']
+    assert 'data:image/png;base64,' in api._run_statuses['run_test']['output']

@@ -995,7 +995,7 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
             return
         if record["status"] == "settled":
             _finish("completed", completed=True, partial=False, interrupted=False,
-                    output=record.get("reply") or "", usage={})
+                    output=_api_server._resolve_media_to_data_urls(record.get("reply") or ""), usage={})
         elif record["status"] == "cancelled":
             _finish("cancelled", completed=False, partial=False, interrupted=True)
         else:
@@ -1115,7 +1115,12 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 runtime=served_runtime, requested_runtime=requested if any(requested.values()) else None,
                 route_source=("model_routes" if run.agent_kwargs.get("route")
                               else "raw_request" if any(requested.values()) else "global"))
-            _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
+            # Same MEDIA: tag → data-URL inlining as every other api_server surface (#143666):
+            # /v1/runs clients can't read server paths, and the pollable status copies this
+            # output verbatim. Streamed ``message.delta`` text keeps the raw tag.
+            _finish(status, fields,
+                    output=_api_server._resolve_media_to_data_urls(result.get("final_response", "")),
+                    usage=usage, runtime=served_runtime)
     except asyncio.CancelledError:
         _finish("cancelled")
         raise
