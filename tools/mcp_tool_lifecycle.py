@@ -79,9 +79,14 @@ def _snapshot_child_pids() -> set:
 # argv markers of non-MCP gateway children that can race into the snapshot delta during an
 # MCP spawn (defense-in-depth; LSP/slash_worker already use start_new_session). Matched against
 # argv[1:] because Python/Java children start with the interpreter path.
+# ``mcp_death_supervisor``: the shared supervisor is Popen'd by the first concurrent server's
+# register call, so its PID can land inside a sibling server's before/after snapshot delta and be
+# attributed to that server — shutdown then force-kills the (already-reaped-or-zombie) supervisor
+# and blames a healthy stdio server (#143501).
 _NON_MCP_CHILD_CMDLINE_MARKERS: tuple[str, ...] = (
     "tui_gateway.slash_worker", "tui_gateway.entry",
     "-dorg.eclipse.equinox.launcher", "eclipse.jdt.ls", "org.eclipse.equinox.launcher_",  # jdtls
+    "mcp_death_supervisor",  # not an MCP server despite the .py sibling name
 )
 
 

@@ -92,6 +92,27 @@ class TestStdioPidTracking:
             procs[0].wait(5)
 
 
+    def test_filter_drops_death_supervisor_spawned_in_sibling_window(self):
+        """The shared death supervisor is Popen'd by a sibling server's register call, so its
+        PID can land in this server's before/after snapshot delta; tracking it as an MCP child
+        makes the shutdown sweep force-kill the supervisor and blame a healthy stdio server
+        (#143501)."""
+        import psutil
+        from tools.mcp_tool_lifecycle import _filter_mcp_children
+
+        supervisor = MagicMock()
+        supervisor.cmdline.return_value = [
+            "/usr/bin/python3", "/opt/hermes/tools/mcp_death_supervisor.py", "--parent-pgid", "711888"]
+        server = MagicMock()
+        server.cmdline.return_value = ["/usr/bin/python3", "/srv/calculadora/server.py"]
+
+        def _fake_process(pid):
+            return {4242: supervisor, 4243: server}[pid]
+
+        with patch.object(psutil, "Process", side_effect=_fake_process):
+            assert _filter_mcp_children({4242, 4243}) == {4243}
+
+
     def test_kill_orphaned_handles_dead_pids(self):
         """_kill_orphaned_mcp_children gracefully handles already-dead PIDs."""
         from tools.mcp_tool_lifecycle import (
