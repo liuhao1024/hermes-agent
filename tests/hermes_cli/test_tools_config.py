@@ -404,6 +404,41 @@ def test_a_saved_disabled_mcp_server_does_not_enable_every_other_server(listed):
     assert not {"dead", "mcp-dead", "live"} & enabled, enabled
 
 
+def test_explicitly_empty_platform_toolsets_disables_default_mcp_servers():
+    """A saved empty ``platform_toolsets`` list means zero toolsets — the default-server merge must
+    not run either, else every enabled MCP server rides back in and widens the allowlist the
+    operator just emptied. The cron-dispatch path landed this contract in #82010; the gateway
+    session path (``gateway/run_turn.py``) resolves here and used to fail open.
+
+    Regression test for https://github.com/NousResearch/hermes-agent/issues/143574
+    """
+    config = {
+        "platform_toolsets": {"cli": []},
+        "mcp_servers": {
+            "claudius": {"url": "https://example.com/mcp"},
+            "evil": {"url": "https://example.com/mcp2"},
+        },
+    }
+
+    assert _get_platform_tools(config, "cli") == set()
+
+
+def test_nonempty_or_absent_platform_toolsets_still_merge_default_mcp_servers():
+    """The empty-list gate is narrow: a nonempty native list (no MCP servers named) and an absent
+    ``platform_toolsets`` entry still layer every enabled MCP server on top."""
+    mcp_servers = {
+        "claudius": {"url": "https://example.com/mcp"},
+        "evil": {"url": "https://example.com/mcp2"},
+    }
+
+    with_native_list = _get_platform_tools(
+        {"platform_toolsets": {"cli": ["terminal"]}, "mcp_servers": mcp_servers}, "cli")
+    assert {"claudius", "evil"} <= with_native_list, with_native_list
+
+    with_unset_list = _get_platform_tools({"mcp_servers": mcp_servers}, "cli")
+    assert {"claudius", "evil"} <= with_unset_list, with_unset_list
+
+
 # ─── Imagegen Backend Picker Wiring ────────────────────────────────────────
 
 

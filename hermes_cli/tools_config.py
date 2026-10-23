@@ -626,7 +626,12 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
 
     # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
     explicit_passthrough = {ts for ts in toolset_names if ts not in explicit_known_keys and ts not in platform_default_keys}
-    enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
+    # An explicitly saved EMPTY list is a zero-toolset selection, so the default-server merge must
+    # not run either: every enabled MCP server would ride back in and widen the allowlist the
+    # operator just emptied. Same contract the cron-dispatch path landed in #82010; the gateway
+    # session path resolves here. Mirrors the context_engine gate above.
+    if not (explicitly_configured and not toolset_names):
+        enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
 
     # Legacy profile opt-in is a fallback only. A saved platform list (even
     # empty) is authoritative, so a later disable cannot silently re-enable it.
