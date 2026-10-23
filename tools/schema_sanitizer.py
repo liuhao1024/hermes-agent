@@ -366,12 +366,18 @@ def _sanitize_node(node: Any, path: str) -> Any:
             required = required if isinstance(required, list) else []
             out["required"] = required + [key for key in lifted if key not in required]
     if out.get("type") == "object":
+        # An OPEN nested object (``additionalProperties`` absent or not ``False``) declaring no
+        # ``properties`` is free-form: stamping ``properties: {}`` makes strict models read it
+        # as "no fields allowed" and emit ``{}`` for it (#143538). Closed objects keep the
+        # repair; the parameters root is re-stamped by ``_sanitize_single_tool`` regardless.
         if not isinstance(out.get("properties"), dict):
-            out["properties"] = {}
+            if out.get("additionalProperties") is False:
+                out["properties"] = {}
         # Always emit a list: ``required: []`` is valid everywhere, while a missing or
         # non-list key reads as ``null`` on strict OpenAI-compatible proxies (#56123).
         required = out.get("required")
-        out["required"] = ([r for r in required if isinstance(r, str) and r in out["properties"]]
+        props = out.get("properties") or {}
+        out["required"] = ([r for r in required if isinstance(r, str) and r in props]
                            if isinstance(required, list) else [])
     return out
 

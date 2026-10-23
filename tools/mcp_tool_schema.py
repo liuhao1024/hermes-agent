@@ -104,7 +104,12 @@ def _repair_object_shape(node, *, _object_root=False):
         if not repaired.get("type") and ("properties" in repaired or "required" in repaired):
             repaired["type"] = "object"
         if repaired.get("type") == "object":
-            if not isinstance(repaired.get("properties"), dict):
+            # An OPEN nested object (``additionalProperties`` absent or not ``False``) declaring
+            # no ``properties`` is free-form: stamping ``properties: {}`` makes strict models
+            # read it as "no fields allowed" and emit ``{}`` for it (#143538). The parameters
+            # ROOT and closed objects keep the repair so ``required`` can't dangle (Gemini 400s).
+            if not isinstance(repaired.get("properties"), dict) and (
+                    _object_root or repaired.get("additionalProperties") is False):
                 repaired["properties"] = {}
             # Always a list: a missing/non-list ``required`` reads as ``null`` on strict
             # OpenAI-compatible backends (#56123); ``[]`` is valid everywhere (Gemini included).
