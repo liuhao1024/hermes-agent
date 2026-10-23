@@ -121,3 +121,95 @@ async def test_send_permanent_fatal_fails_immediately_without_wait():
     assert result.success is False
     assert result.error == "Not connected"
     assert result.retryable is False
+
+
+def _make_secondary_runner(profile: str, profile_adapters: dict, primary_adapters: dict) -> MagicMock:
+    runner = MagicMock()
+    runner.adapters = primary_adapters
+    runner._profile_adapters = {profile: profile_adapters}
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_send_never_borrows_primary_bot_for_disconnected_secondary():
+    """A disconnected secondary must fail closed, not deliver through the default bot (#143364)."""
+    stale = _make_adapter()
+    stale._hermes_profile_name = "yori"
+    stale._bot = None
+    stale._RECONNECT_WAIT_SECONDS = 0.15
+    stale._RECONNECT_POLL_INTERVAL = 0.05
+
+    primary_bot = _connected_bot()
+    primary = _make_adapter()
+    primary._bot = primary_bot
+    # The default profile's Telegram bot is live while yori's is mid-reconnect.
+    stale.gateway_runner = _make_secondary_runner("yori", {}, {stale.platform: primary})
+
+    result = await stale.send("123", "mid-turn progress")
+
+    assert result.success is False
+    assert result.error == "Not connected"
+    assert result.retryable is True
+    primary_bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_delegates_to_own_profile_replacement_installed_mid_wait():
+    """A secondary waiting out a reconnect hands off to its own profile's rebuilt adapter."""
+    stale = _make_adapter()
+    stale._hermes_profile_name = "yori"
+    stale._bot = None
+    stale._RECONNECT_WAIT_SECONDS = 0.6
+    stale._RECONNECT_POLL_INTERVAL = 0.05
+
+    primary_bot = _connected_bot()
+    primary = _make_adapter()
+    primary._bot = primary_bot
+    live = _make_adapter()
+    live._bot = _connected_bot()
+    live._RECONNECT_WAIT_SECONDS = 0.01
+    runner = _make_secondary_runner("yori", {}, {stale.platform: primary})
+    stale.gateway_runner = runner
+
+    # Install the own-profile replacement once send() has actually entered its reconnect wait.
+    wait_started = asyncio.Event()
+    original_wait = stale._wait_for_reconnection
+
+    async def wait_and_mark() -> bool:
+        wait_started.set()
+        return await original_wait()
+
+    stale._wait_for_reconnection = wait_and_mark
+
+    async def install_own_profile_replacement() -> None:
+        await wait_started.wait()
+        runner._profile_adapters["yori"][stale.platform] = live
+
+    asyncio.get_running_loop().create_task(install_own_profile_replacement())
+    result = await stale.send("123", "hello")
+
+    assert result.success is True
+    assert result.message_id == "42"
+    live._bot.send_message.assert_awaited()
+    primary_bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_delegates_immediately_to_live_own_profile_replacement():
+    stale = _make_adapter()
+    stale._hermes_profile_name = "yori"
+    stale._bot = None
+    live = _make_adapter()
+    live._bot = _connected_bot()
+    primary = _make_adapter()
+    primary._bot = _connected_bot()
+    stale.gateway_runner = _make_secondary_runner("yori", {stale.platform: live}, {stale.platform: primary})
+    stale._wait_for_reconnection = AsyncMock(
+        side_effect=AssertionError("must not wait when the own-profile replacement is live")
+    )
+
+    result = await stale.send("123", "hello")
+
+    assert result.success is True
+    live._bot.send_message.assert_awaited()
+    primary._bot.send_message.assert_not_awaited()
