@@ -12,6 +12,30 @@ from hermes_cli.memory_setup import _CANCELLED
 
 
 
+def test_cmd_setup_headless_points_at_direct_provider_path(monkeypatch, capsys):
+    """Without a TTY the picker can only report cancellation, so the wizard used
+    to print a bare "Cancelled" and leave headless callers no way forward
+    (#142988). It must instead name the installed providers and the
+    `hermes memory setup <provider>` route that works headless."""
+    curses_select = MagicMock()
+    monkeypatch.setattr(memory_setup, "_get_available_providers",
+                        lambda: [("hindsight", "local", MagicMock())])
+    monkeypatch.setattr(memory_setup, "_curses_select", curses_select)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
+
+    memory_setup.cmd_setup(SimpleNamespace())
+
+    out = capsys.readouterr().out
+    assert "hermes memory setup <provider>" in out
+    assert "hindsight" in out
+    assert "Cancelled" not in out
+    curses_select.assert_not_called()
+
+
+
+
+
+
 def test_cmd_setup_generic_choice_cancel_writes_nothing(tmp_path, monkeypatch):
     class ChoiceProvider:
         def __init__(self):
@@ -32,6 +56,7 @@ def test_cmd_setup_generic_choice_cancel_writes_nothing(tmp_path, monkeypatch):
 
     monkeypatch.setattr(memory_setup, "_get_available_providers", lambda: [("fake", "local", provider)])
     monkeypatch.setattr(memory_setup, "_curses_select", lambda *args, **kwargs: next(selections))
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(memory_setup, "_install_dependencies", install_dependencies)
     monkeypatch.setattr(memory_setup, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"memory": {}})

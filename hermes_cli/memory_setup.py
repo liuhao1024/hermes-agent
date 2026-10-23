@@ -265,6 +265,20 @@ def cmd_setup(args) -> None:
         print("  Install a plugin to ~/.hermes/plugins/ and try again.\n")
         return
 
+    if not sys.stdin.isatty():
+        # The picker is arrow-key driven; on a pipe it can only return the
+        # cancel value, which used to leave headless callers with a bare
+        # "Cancelled" and no way forward (#142988) — the direct-provider path
+        # below is the headless route, because dependency preparation runs
+        # before any prompt.
+        print("\n  The provider picker needs an interactive terminal.")
+        print("  Installed memory providers:")
+        for name, desc, _ in providers:
+            print(f"    • {name} ({desc})")
+        print("\n  Run 'hermes memory setup <provider>' instead — it skips the picker and")
+        print("  prepares the provider's dependencies before any prompt, so it works headless.\n")
+        return
+
     items = [(name, f"— {desc}") for name, desc, _ in providers]
     items.append(("Built-in only", "— MEMORY.md / USER.md (default)"))
     builtin_idx = len(items) - 1
