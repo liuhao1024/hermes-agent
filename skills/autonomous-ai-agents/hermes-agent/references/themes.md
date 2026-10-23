@@ -50,6 +50,11 @@ key in its row (element-specific keys fall back to the shared one when unset).
 | Success / warn / error | `ui_ok` / `ui_warn` / `ui_error` | — |
 | Status bar text + usage | `status_bar_text`, `status_bar_good/warn/bad/critical` | — |
 | Diff add/remove (line + word) | `diff_added` / `diff_removed` / `diff_added_word` / `diff_removed_word` | built-in |
+
+Note the diff roles: `diff_added`/`diff_removed` are the hunk line **backgrounds**
+and `diff_*_word` are the foregrounds painted on them. Each pair must contrast —
+a skin that sets both sides to the same colour renders the hunk text invisible,
+so such a pair falls back to the built-in diff ladder.
 | Code syntax (string/number/keyword/comment) | `syntax_string` / `syntax_number` / `syntax_keyword` / `syntax_comment` | accent/text/border/muted |
 | Completion menu | `completion_menu_bg` / `completion_menu_current_bg` / `…_meta_bg` | — |
 

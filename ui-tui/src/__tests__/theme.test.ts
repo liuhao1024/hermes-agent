@@ -574,6 +574,38 @@ describe('background-aware adaptation (OSC-11 light terminals)', () => {
     expect(color.diffRemovedWord).toBe('#f00')
   })
 
+  it('rescues a diff pair whose fill and ink collide (#143548)', async () => {
+    const { fromSkin, DARK_THEME } = await importThemeWithCleanEnv()
+
+    // A skin that sets the diff backgrounds to their own word colours
+    // paints every hunk line its own highlight: invisible text.
+    const collided = fromSkin(
+      {
+        diff_added: '#FFFFFF',
+        diff_added_word: '#FFFFFF',
+        diff_removed: '#FF8080',
+        diff_removed_word: '#FF8080'
+      },
+      {}
+    )
+
+    // Both sides of each pair fall back to the derived ladder, which
+    // contrasts by construction.
+    expect(collided.color.diffAdded).toBe(DARK_THEME.color.diffAdded)
+    expect(collided.color.diffAddedWord).toBe(DARK_THEME.color.diffAddedWord)
+    expect(collided.color.diffRemoved).toBe(DARK_THEME.color.diffRemoved)
+    expect(collided.color.diffRemovedWord).toBe(DARK_THEME.color.diffRemovedWord)
+  })
+
+  it('still rescues a diff pair whose ink barely differs from its fill (#143548)', async () => {
+    const { fromSkin, DARK_THEME } = await importThemeWithCleanEnv()
+
+    const near = fromSkin({ diff_added: '#FF8080', diff_added_word: '#FF8180' }, {})
+
+    expect(near.color.diffAdded).toBe(DARK_THEME.color.diffAdded)
+    expect(near.color.diffAddedWord).toBe(DARK_THEME.color.diffAddedWord)
+  })
+
   it('maps the status bar from skin status_bar_* keys', async () => {
     const { fromSkin } = await importThemeWithCleanEnv()
 

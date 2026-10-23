@@ -514,6 +514,17 @@ const ADAPTIVE_BACKGROUNDS: readonly (keyof ThemeColors)[] = [
 const LIGHT_BG_MIN_LUMINANCE = 0.4
 const DARK_BG_MAX_LUMINANCE = 0.35
 
+// Diff rendering paints both sides of a pair: the hunk line fill
+// (`diff_added`/`diff_removed`) and the word ink on top of it
+// (`diff_*_word`). The guards around adaptColorsToBackground compare each
+// colour to the TERMINAL background, never to each other, so a skin that
+// sets both sides of a pair to the same colour renders the hunk text its
+// own highlight — invisible (#143548).
+const DIFF_PAIRS: readonly (readonly [keyof ThemeColors, keyof ThemeColors])[] = [
+  ['diffAdded', 'diffAddedWord'],
+  ['diffRemoved', 'diffRemovedWord']
+]
+
 function adaptColorsToBackground(colors: ThemeColors, isLight: boolean, base: ThemeColors, bg: string): ThemeColors {
   const out = { ...colors }
   const displayFloor = isLight ? LIGHT_DISPLAY_MIN_CONTRAST : DISPLAY_MIN_CONTRAST
@@ -940,6 +951,23 @@ export function fromSkin(
   const adapted = shouldNormalizeAnsiLightTheme(process.env, isLight)
     ? assembled
     : adaptColorsToBackground(assembled, isLight, derived, bg)
+
+  // 5. Guard: paired fill/ink collisions inside a diff. The floors in #4
+  //    lift a colour against the terminal background, which never rescues a
+  //    pair the skin itself collided — an identical fill and ink paint the
+  //    hunk text its own highlight, invisible with no warning (#143548).
+  //    An unreadable pair falls back to the DERIVED ladder, which contrasts
+  //    by construction — same rescue spirit as the polarity guard in #4.
+  //    The floor reuses DISPLAY's barely-visible rescue, so soft-but-legible
+  //    authored pairs (the built-in ladders sit near 4:1) pass untouched.
+  for (const [fill, ink] of DIFF_PAIRS) {
+    const ratio = contrastRatio(adapted[ink], adapted[fill])
+
+    if (ratio !== null && ratio < DISPLAY_MIN_CONTRAST) {
+      adapted[fill] = derived[fill]
+      adapted[ink] = derived[ink]
+    }
+  }
 
   return normalizeThemeForAnsiLightTerminal(
     {
