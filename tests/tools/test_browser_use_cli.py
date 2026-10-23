@@ -138,6 +138,27 @@ class TestSubprocessEnvironment:
         env = bu_cli._base_subprocess_env()
         assert env["ANONYMIZED_TELEMETRY"] == "false"
 
+    def test_subprocess_env_keeps_a_separate_roots_harness_home_under_the_root(self, monkeypatch, tmp_path):
+        """#143466: with its own ``HERMES_HOME`` tree the harness child gets a harness home under
+        that root (its own daemon, spawn locks, logs); the account's default root keeps the shared
+        ``~/.config/browser-harness`` of a one-root install."""
+        import sys
+        from types import ModuleType
+
+        browser_tool = ModuleType("tools.browser_tool")
+        browser_tool._build_browser_env = dict
+        monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "srv-a"))
+        env = bu_cli._base_subprocess_env()
+        assert env["BH_HOME"] == str(tmp_path / "srv-a" / "cache" / "browser-harness")
+        assert env["BH_RUNTIME_DIR"] == str(tmp_path / "srv-a" / "cache" / "browser-harness" / "runtime")
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))  # the default root itself
+        env = bu_cli._base_subprocess_env()
+        assert "BH_HOME" not in env and "BH_RUNTIME_DIR" not in env
+
     def test_subprocess_env_replaces_parent_python_import_paths(self, monkeypatch):
         """#83427/#84841/#86006/#86104: an inherited PYTHONPATH/PYTHONHOME must never reach the
         harness child; PYTHONPATH is replaced by the harness's own site dir, unrelated vars survive."""

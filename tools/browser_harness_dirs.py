@@ -5,7 +5,9 @@ A multiplexed gateway serves every profile from one process. The harness names a
 sockets) and tmp dir (screenshots, debug overlays, logs). A runtime dir too long for a 64-character
 session's AF_UNIX socket moves to a private short dir under the socket temp root.
 
-``browser_use_cli._base_subprocess_env`` applies the result through ``namespace_harness_dirs``.
+``browser_use_cli._base_subprocess_env`` applies the result through ``namespace_harness_dirs``
+(served profiles) and ``root_scope_harness_dirs`` (a separate ``HERMES_HOME`` root's whole harness
+home, #143466).
 """
 from __future__ import annotations
 
@@ -75,6 +77,22 @@ def namespace_harness_dirs(env: dict, tag: str) -> None:
     # Screenshots, debug overlays and daemon logs (paths.tmp_dir): the profile's own, never shared.
     env["BH_TMP_DIR"] = str(Path(env.get("BH_TMP_DIR") or str(Path(root) / "tmp")) / leaf)
     env["BH_TMP_DIR_SHARED"] = "1"
+
+
+def root_scope_harness_dirs(env: dict, root: str) -> None:
+    """A separate Hermes root keeps its whole harness home (daemon runtime, spawn locks, tmp, config)
+    under that root instead of the account-shared ``~/.config/browser-harness``: gateways with
+    separate roots each drive their own daemons, and a root sandboxed away from ``~/.config`` can
+    still bring one up (#143466). An empty ``root`` (the account's default root, a one-root install)
+    leaves ``env`` unchanged, and an explicit ``BH_HOME`` / ``BROWSER_HARNESS_HOME`` — an operator's
+    unit drop-in — always wins. The daemon socket still has to fit ``sun_path``, so ``BH_RUNTIME_DIR``
+    reuses the served-profile length fallback, its short-dir digest keyed by the root."""
+    if not root or env.get("BH_HOME") or env.get("BROWSER_HARNESS_HOME"):
+        return
+    home = str(Path(root) / "cache" / "browser-harness")
+    env["BH_HOME"] = home
+    base = str(Path(home) / "runtime")
+    env.setdefault("BH_RUNTIME_DIR", socket_fit_runtime_dir(base, base, root))
 
 
 def socket_fit_runtime_dir(runtime: str, base: str, tag: str) -> str:

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from hermes_constants import get_hermes_home, hermes_home_key
-from tools.browser_harness_dirs import daemon_env, daemon_identity, namespace_harness_dirs
+from tools.browser_harness_dirs import daemon_env, daemon_identity, namespace_harness_dirs, root_scope_harness_dirs
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,7 @@ def _base_subprocess_env() -> dict:
         env.pop("PYTHONPATH", None)
     env["PATH"] = _floor_subprocess_path(env.get("PATH", ""))
     env.setdefault("ANONYMIZED_TELEMETRY", "false")
+    root_scope_harness_dirs(env, _separate_hermes_root())  # a separate Hermes root's own harness home
     namespace_harness_dirs(env, _served_profile_tag())  # a served profile's own harness runtime/tmp dirs
     return env
 
@@ -363,6 +364,20 @@ def _served_profile_tag() -> str:
     to another that happens to use the same session name or task id (#110032)."""
     from hermes_constants import get_hermes_home_override, hermes_home_key
     return "" if get_hermes_home_override() is None else hermes_home_key()
+
+
+def _separate_hermes_root() -> str:
+    """The process's Hermes root when it is a separate one (its own ``HERMES_HOME`` tree, not this
+    account's default root), else ``""``. Gateways with separate roots must not share one
+    browser-harness home — one daemon, one set of spawn locks — under ``~/.config``, which also
+    fails a root sandboxed away from it on the first call (#143466); the default root keeps the
+    shared location of a one-root install."""
+    try:
+        from hermes_constants import _get_platform_default_hermes_home, get_default_hermes_root
+        root = get_default_hermes_root()
+        return "" if root.resolve() == _get_platform_default_hermes_home().resolve() else str(root)
+    except (OSError, RuntimeError):  # Path.resolve on a broken symlink loop etc.: shared home stands
+        return ""
 
 
 def _backend_cache_key(task_id: Optional[str], session_name: str = "", sidecar: bool = False) -> str:

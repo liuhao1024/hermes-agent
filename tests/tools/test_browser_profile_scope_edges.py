@@ -250,6 +250,80 @@ def test_a_served_profile_under_an_inherited_tmp_dir_nests_inside_it(profiles, t
     assert env["BH_RUNTIME_DIR"].startswith(str(tmp_path / "shared-tmp") + "/p-")
 
 
+# --- a separate Hermes root's harness home (#143466) --------------------------------------------------
+
+
+def test_a_separate_root_keeps_its_harness_home_under_the_root(tmp_path):
+    """Gateways with separate ``HERMES_HOME`` roots shared one ``default`` daemon under
+    ``~/.config/browser-harness`` — one browser session across unrelated agents — and a root
+    sandboxed away from ``~/.config`` failed its first browser call. Each separate root now owns
+    its harness home, and the runtime dir rides the socket-length rule."""
+    env: dict = {}
+    harness_dirs.root_scope_harness_dirs(env, str(tmp_path / "srv-a"))
+    assert env["BH_HOME"] == str(tmp_path / "srv-a" / "cache" / "browser-harness")
+    assert env["BH_RUNTIME_DIR"] == str(tmp_path / "srv-a" / "cache" / "browser-harness" / "runtime")
+
+
+def test_the_default_root_keeps_the_shared_harness_home():
+    """A one-root install (the account's default root) keeps ``~/.config/browser-harness`` byte-for-byte."""
+    env: dict = {}
+    harness_dirs.root_scope_harness_dirs(env, "")
+    assert env == {}
+
+
+def test_an_explicit_harness_home_wins_over_the_root_default(tmp_path):
+    """An operator's ``BH_HOME`` / ``BROWSER_HARNESS_HOME`` (a systemd drop-in) is never overridden."""
+    env = {"BH_HOME": "/operator-set"}
+    harness_dirs.root_scope_harness_dirs(env, str(tmp_path / "srv"))
+    assert env == {"BH_HOME": "/operator-set"}
+    env = {"BROWSER_HARNESS_HOME": "/operator-set"}
+    harness_dirs.root_scope_harness_dirs(env, str(tmp_path / "srv"))
+    assert env == {"BROWSER_HARNESS_HOME": "/operator-set"}
+
+
+def test_an_inherited_runtime_dir_is_not_overwritten(tmp_path):
+    env = {"BH_RUNTIME_DIR": "/custom/rt"}
+    harness_dirs.root_scope_harness_dirs(env, str(tmp_path / "srv"))
+    assert env["BH_HOME"] == str(tmp_path / "srv" / "cache" / "browser-harness")
+    assert env["BH_RUNTIME_DIR"] == "/custom/rt"
+
+
+def test_a_deep_root_moves_its_runtime_dir_to_the_short_socket_root(tmp_path, monkeypatch):
+    """A root deep enough to overflow ``sun_path`` claims the same private short dir as a served
+    profile, keyed by uid + base + root so two roots never share one."""
+    import os
+    import sys
+    claimed = []
+    monkeypatch.setattr(harness_dirs, "claim_private_dir", lambda path: claimed.append(path) or True)
+    deep = tmp_path / ("d" * 80)
+    env: dict = {}
+    harness_dirs.root_scope_harness_dirs(env, str(deep))
+    assert env["BH_HOME"] == str(deep / "cache" / "browser-harness")
+    budget = harness_dirs.socket_dir_budget(sys.platform)
+    if budget is None:  # Windows: loopback TCP, no sun_path
+        assert env["BH_RUNTIME_DIR"] == str(deep / "cache" / "browser-harness" / "runtime")
+        assert claimed == []
+        return
+    assert claimed == [env["BH_RUNTIME_DIR"]]
+    assert os.path.basename(env["BH_RUNTIME_DIR"]).startswith("hbh-")
+    assert harness_dirs.fits_socket_budget(os.path.realpath(env["BH_RUNTIME_DIR"]), budget)
+
+
+def test_a_served_profile_nests_inside_the_roots_harness_home(profiles, tmp_path):
+    """Root scope first, profile scope second: a served profile of a separate root gets its own
+    leaf under the root's harness home, never under ``~/.config``."""
+    from tools import browser_use_cli as bu_cli
+    a, _b = profiles
+    root = tmp_path / "srv"
+    env: dict = {}
+    harness_dirs.root_scope_harness_dirs(env, str(root))
+    with _profile_runtime_scope(a, hydrate_secrets=False):
+        harness_dirs.namespace_harness_dirs(env, bu_cli._served_profile_tag())
+    assert env["BH_RUNTIME_DIR"].startswith(str(root / "cache" / "browser-harness") + "/")
+    assert env["BH_TMP_DIR"].startswith(str(root / "cache" / "browser-harness") + "/")
+    assert "/p-" in env["BH_RUNTIME_DIR"] and "/p-" in env["BH_TMP_DIR"]
+
+
 def test_an_unscoped_shutdown_reload_reaches_the_daemon_with_its_own_tmp_dir(profiles, monkeypatch):
     """The reaper/shutdown runs outside any profile scope; its ``--reload`` must still carry the
     daemon's own tmp dir, or the harness writes that profile's log into the shared one."""
