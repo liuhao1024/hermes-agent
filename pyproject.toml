@@ -177,7 +177,14 @@ dependencies = [
   # libs required for the codecs we use, so it's safe to ship in the base
   # install rather than gating it behind an extra + a mid-session lazy install
   # (which deadlocked the CLI under prompt_toolkit — see #40490).
-  "Pillow==13.0.0; python_version >= '3.14'",
+  # Range, not an exact pin: browser-harness 0.1.13 pins pillow==12.3.0
+  # exactly, so an exact 13.0.0 pin here makes `pip install -e .` (and any
+  # resolver that does not apply [tool.uv] override-dependencies) fail with
+  # ResolutionImpossible on 3.14 (#143313). The uv lock path still resolves
+  # to 13.0.0 — the Pillow override below replaces every requirement — and
+  # lockless installs land on 12.3.0, the only version browser-harness
+  # admits. Tighten back to ==13.0.0 when browser-harness allows Pillow 13.
+  "Pillow>=12.3.0,<14; python_version >= '3.14'",
   # HEIF/HEIC/AVIF decode for the vision tools. iPhone photos and screenshots
   # are HEIC (frequently mislabeled .jpg by upload pipelines); Pillow has no
   # built-in HEIF codec, so without this the vision resolver rejects them as
@@ -631,10 +638,13 @@ override-dependencies = [
   # release fixing GHSA-8g5g-8vmr-9782, GHSA-w889-685w-c8fh and the rest of
   # the 13.0.0 advisory set. browser-harness only opens, converts, composes
   # and draws images (Image.open/new/convert, ImageDraw, ImageFont,
-  # ImageOps.contain), none of which changed in 13. Keep this exact version
-  # equal to the direct dependency (uv overrides replace that requirement
-  # too). PM's install-time `uv pip check` accepts the resulting mismatch
-  # because uv.lock records this override (pm/pip_check.py).
+  # ImageOps.contain), none of which changed in 13. The direct dependency is
+  # a >=12.3.0,<14 range rather than ==13.0.0 so lockless resolvers (plain
+  # pip install -e .) can land on 12.3.0 instead of failing with
+  # ResolutionImpossible (#143313); this override still forces every uv
+  # resolution to 13.0.0 (uv overrides replace that requirement too). PM's
+  # install-time `uv pip check` accepts the resulting mismatch because
+  # uv.lock records this override (pm/pip_check.py).
   # Remove this line when browser-harness allows Pillow 13. Plugin workspaces
   # inherit [tool.uv], so a plugin requiring pillow<13 also gets 13.0.0.
   "Pillow==13.0.0",
