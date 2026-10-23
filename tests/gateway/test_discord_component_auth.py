@@ -129,7 +129,30 @@ async def test_approval_buttons_follow_a_revoke_made_after_connect():
 # ── role allowlist OR semantics ────────────────────────────────────────────
 
 
-# ── fail-closed on missing role data ───────────────────────────────────────
+# ── DM clicks with a role allowlist: pairing grant must stay reachable (#143409) ──
+
+
+def test_role_allowlist_dm_click_without_roles_falls_through_to_pairing():
+    """A DM interaction's user (discord.User) has no ``roles``; with only a role
+    allowlist configured, a pairing-approved user must still pass (the message
+    path honors pairing as a first-class grant)."""
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = True
+    with patch("gateway.pairing.PairingStore", return_value=mock_store):
+        assert _component_check_auth(_interaction(11111, drop_roles=True), set(), {42}) is True
+    mock_store.is_approved.assert_called_once_with("discord", "11111")
+
+
+def test_role_allowlist_dm_click_unknown_user_still_rejected():
+    """Fail closed: unpaired DM user without role data cannot click."""
+    assert _component_check_auth(_interaction(11111, drop_roles=True), set(), {42}) is False
+
+
+def test_role_allowlist_unmatched_roles_rejected_without_pairing():
+    """Guild member with roles that don't match the allowlist and no pairing: reject."""
+    assert _component_check_auth(_interaction(99999, role_ids=[7]), set(), {42}) is False
 
 
 # ---------------------------------------------------------------------------
