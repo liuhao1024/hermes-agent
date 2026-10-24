@@ -146,11 +146,17 @@ class GatewayGoalsMixin:
             session_id = current
             watch[quick_key] = (source, session_id)
         adapter = self._delivery_adapter_for(source)
-        if adapter is None or not adapter._message_handler:
+        if adapter is None:
             return
         if getattr(self, 'session_authority', None) is not None:
+            # LocalSessionAdapter never has a message handler; admit_heartbeat does not need one
+            # (it commits through authority.admit_automation), so only other adapters need it here.
+            if not adapter._message_handler and getattr(adapter, "authority", None) is None:
+                return
             from gateway.run_heartbeat_acceptance import admit_heartbeat
             await admit_heartbeat(self, adapter, source, session_id, quick_key)
+            return
+        if not adapter._message_handler:
             return
         if (
             self._is_session_running(quick_key)
