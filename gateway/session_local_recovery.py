@@ -191,10 +191,20 @@ def restore_local_session(authority, sid):
     else:
         with store._lock:
             current = store._entry_locked(route)
-            if current is None or (current.session_id not in receipt.get('lineage', [sid])
-                                   and not _stray_route_target(authority, receipt, current.session_id)):
+            if current is not None and current.session_id not in receipt.get('lineage', [sid]) \
+                    and not _stray_route_target(authority, receipt, current.session_id):
+                logging.getLogger(__name__).warning(
+                    'Local session %s resume refused: route %s holds session %s outside its lineage',
+                    sid, route, current.session_id)
                 raise RuntimeStoreError('admission_conflict')
-            current.session_id = target
+            if current is None:
+                # The idle prune can drop a live session's routing row while the user keeps
+                # opening it (``updated_at`` only advances on turns); the receipt re-adopts the
+                # route exactly like a cold restore instead of refusing every resume forever.
+                entry.origin = source
+                store._entries[route] = entry
+            else:
+                current.session_id = target
     return SessionRef(authority.profile_id, sid)
 
 
