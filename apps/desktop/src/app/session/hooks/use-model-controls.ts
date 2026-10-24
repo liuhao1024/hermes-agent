@@ -19,6 +19,7 @@ import {
   $activeSessionId,
   $currentModel,
   $currentProvider,
+  $currentReasoningEffort,
   $currentReasoningEffortWire,
   getComposerSelectionGeneration,
   getCurrentModelSource,
@@ -265,6 +266,11 @@ export function useModelControls({
         return {
           model: touchesPrimary ? $currentModel.get() : (tileState?.model ?? ''),
           provider: touchesPrimary ? $currentProvider.get() : (tileState?.provider ?? ''),
+          // The wire stamp is only true for the effort it was computed for; an
+          // effort edited while the pick is in flight withdraws it (#144108).
+          reasoningEffort: touchesPrimary
+            ? $currentReasoningEffort.get()
+            : (tileState?.reasoningEffort ?? ''),
           reasoningEffortWire: touchesPrimary
             ? $currentReasoningEffortWire.get()
             : (tileState?.reasoningEffortWire ?? ''),
@@ -300,15 +306,22 @@ export function useModelControls({
         if (touchesPrimary) {
           setCurrentModel(snapshot.model)
           setCurrentProvider(snapshot.provider)
-          // The setters withdraw the wire stamp on a change; the old route's stamp is still true.
-          setCurrentReasoningEffortWire(snapshot.reasoningEffortWire)
+          // The setters withdraw the wire stamp on a change; the old route's stamp is still
+          // true — but only for the effort it was computed for. An effort edited while the
+          // pick was in flight keeps its withdrawn stamp ('') until session.info re-stamps:
+          // restoring the old wire would pair the newer effort with a translation the
+          // backend never confirmed (#144108).
+          if ($currentReasoningEffort.get() === snapshot.reasoningEffort) {
+            setCurrentReasoningEffortWire(snapshot.reasoningEffortWire)
+          }
           setCurrentModelSource(snapshot.source)
         } else if (liveSessionId) {
           sessionTileDelegate()?.updateSession(liveSessionId, state => ({
             ...state,
             model: snapshot.model,
             provider: snapshot.provider,
-            reasoningEffortWire: snapshot.reasoningEffortWire
+            reasoningEffortWire:
+              state.reasoningEffort === snapshot.reasoningEffort ? snapshot.reasoningEffortWire : ''
           }))
         }
 

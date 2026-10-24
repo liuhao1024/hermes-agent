@@ -9,6 +9,10 @@ import type { ComposerModelSource } from '@/store/session'
 export interface ModelPickSnapshot {
   model: string
   provider: string
+  /** The effort the `reasoningEffortWire` stamp was computed for. A stamp is only
+   *  true for its own effort: an effort edited while the pick is in flight
+   *  withdraws the stamp, and a rollback must not resurrect it (#144108). */
+  reasoningEffort: string
   reasoningEffortWire: string
   source: ComposerModelSource
 }

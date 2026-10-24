@@ -10,11 +10,14 @@ import {
   $activeSessionId,
   $currentModel,
   $currentProvider,
+  $currentReasoningEffort,
+  $currentReasoningEffortWire,
   markComposerSelectionManual,
   setCurrentModel,
   setCurrentModelSource,
   setCurrentProvider,
-  setCurrentReasoningEffort
+  setCurrentReasoningEffort,
+  setCurrentReasoningEffortWire
 } from '@/store/session'
 import * as SessionStates from '@/store/session-states'
 
@@ -275,6 +278,61 @@ describe('useModelControls stale pick ordering', () => {
     expect($currentModel.get()).toBe('fable-5')
     expect($currentProvider.get()).toBe('nous')
     expect(notifyError).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not resurrect the withdrawn wire stamp over an effort stepped mid-switch', async () => {
+    $activeSessionId.set('session-1')
+    setCurrentModel('fable-5')
+    setCurrentProvider('nous')
+    setCurrentReasoningEffort('xhigh')
+    // session.info stamped the xhigh route.
+    setCurrentReasoningEffortWire('xhigh')
+
+    const pending = deferred<never>()
+    const requestGateway = vi.fn(() => pending.promise)
+    let controls!: Controls
+
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+
+    const pick = controls.selectModel({ model: 'grok-4.5', provider: 'xai' })
+
+    // The effort keybind lands while the config.set is in flight; the setter
+    // withdraws the wire stamp until the next session.info re-stamps it.
+    setCurrentReasoningEffort('high')
+
+    pending.reject(new Error('timeout'))
+    await expect(pick).resolves.toBe(false)
+
+    // The route pair rolls back, but the newer effort keeps its withdrawn stamp:
+    // High→XHigh would claim a translation the backend never confirmed (#144108).
+    expect($currentModel.get()).toBe('fable-5')
+    expect($currentProvider.get()).toBe('nous')
+    expect($currentReasoningEffort.get()).toBe('high')
+    expect($currentReasoningEffortWire.get()).toBe('')
+  })
+
+  it('still restores the wire stamp on rollback when the effort is unchanged', async () => {
+    $activeSessionId.set('session-1')
+    setCurrentModel('fable-5')
+    setCurrentProvider('nous')
+    setCurrentReasoningEffort('xhigh')
+    setCurrentReasoningEffortWire('xhigh')
+
+    const pending = deferred<never>()
+    const requestGateway = vi.fn(() => pending.promise)
+    let controls!: Controls
+
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+
+    const pick = controls.selectModel({ model: 'grok-4.5', provider: 'xai' })
+
+    pending.reject(new Error('timeout'))
+    await expect(pick).resolves.toBe(false)
+
+    // No effort edit raced the pick: the old route's stamp is still true.
+    expect($currentModel.get()).toBe('fable-5')
+    expect($currentReasoningEffort.get()).toBe('xhigh')
+    expect($currentReasoningEffortWire.get()).toBe('xhigh')
   })
 
   it('does not roll a failed older tile pick back over a newer one that applied', async () => {
