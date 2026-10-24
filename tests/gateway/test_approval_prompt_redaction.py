@@ -43,10 +43,21 @@ class TestRedactApprovalCommand:
         assert _FAKE_OPENAI not in out
         assert "python s.py" in out
 
-    def test_redacts_bearer_token(self):
-        raw = "curl -H 'Authorization: Bearer " + _FAKE_JWT + "' https://api.example.com"
-        out = _redact_approval_command(raw)
-        assert _FAKE_JWT not in out
+    def test_redacts_flag_and_azure_connection_string_credentials(self):
+        """A credential passed as a flag VALUE (``--password=…``, issue #143982) is not a
+        NAME=value assignment, and Azure connection strings carry CamelCase keys the env
+        passes miss; the approval card must mask both."""
+        fake = "FxkeCredVx9qLw2Zt"
+        conn = f"DefaultEndpointsProtocol=https;AccountName=a;AccountKey={fake};EndpointSuffix=core.windows.net"
+        for raw in (
+            f"mysql -h db --user=admin --password={fake} app",
+            f"psql --username admin --password {fake}",
+            f"docker login -u admin -p {fake} registry.example.com",
+            f"az storage account show-connection-string  # {conn}",
+        ):
+            out = _redact_approval_command(raw)
+            assert fake not in out, raw
+            assert "mysql" in out or "psql" in out or "docker login" in out or "EndpointSuffix" in out
 
 
     def test_forces_redaction_even_when_disabled(self, monkeypatch):

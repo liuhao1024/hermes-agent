@@ -1613,6 +1613,71 @@ class TestValueAwareGatingCorpus:
         assert "A9f3kZq7Lm2Xw8Rt4Yv6" not in result
 
 
+class TestCommandLineFlagCredentials:
+    """Credential values riding on command-line flags and Azure connection-string keys
+    (#143982): ``--password=…`` / ``--password …`` / ``docker login -p …`` /
+    ``;AccountKey=…;`` carry the secret as a flag value, not a NAME=value assignment, so
+    the assignment passes alone never see it. Every remote-reader scrub (egress, approval
+    cards) routes through redact_sensitive_text, which these tests bind."""
+
+    SECRET = "FxkePassw0rdX9"
+
+    def test_long_flag_equals_form_masked(self):
+        from agent.redact import redact_for_egress
+        out = redact_for_egress(f"mysql -h db --user=admin --password={self.SECRET} app")
+        assert self.SECRET not in out
+        assert "--password=" in out
+        assert "mysql -h db" in out
+
+    def test_long_flag_space_separated_form_masked(self):
+        from agent.redact import redact_for_egress
+        out = redact_for_egress(f"psql --username admin --password {self.SECRET}")
+        assert self.SECRET not in out
+        assert "psql --username admin --password" in out
+
+    def test_token_and_api_key_flags_masked(self):
+        from agent.redact import redact_for_egress
+        assert self.SECRET not in redact_for_egress(f"vault login --token={self.SECRET}")
+        assert self.SECRET not in redact_for_egress(f"tool --api-key={self.SECRET} run")
+
+    def test_docker_login_short_password_flag_masked(self):
+        from agent.redact import redact_for_egress
+        out = redact_for_egress(f"docker login -u admin -p {self.SECRET} registry.example.com")
+        assert self.SECRET not in out
+        assert "registry.example.com" in out
+
+    def test_docker_login_short_flag_stops_at_the_command_separator(self):
+        from agent.redact import redact_for_egress
+        raw = "docker login -u admin -p " + self.SECRET + "; docker run -p 8080:80 nginx"
+        out = redact_for_egress(raw)
+        assert self.SECRET not in out
+        assert "; docker run -p 8080:80 nginx" in out  # second command's -p is a port map
+
+    def test_azure_storage_connection_string_account_key_masked(self):
+        from agent.redact import redact_for_egress
+        conn = ("DefaultEndpointsProtocol=https;AccountName=a;AccountKey=" + self.SECRET
+                + ";EndpointSuffix=core.windows.net")
+        out = redact_for_egress(conn)
+        assert self.SECRET not in out
+        assert "EndpointSuffix=core.windows.net" in out  # segments after the key survive
+
+    def test_service_bus_shared_access_key_masked(self):
+        from agent.redact import redact_for_egress
+        conn = ("Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=Root;"
+                "SharedAccessKey=" + self.SECRET)
+        assert self.SECRET not in redact_for_egress(conn)
+
+    def test_non_credential_flags_untouched(self):
+        from agent.redact import redact_for_egress
+        raw = "llm run --max-tokens=100 --token-count=5 model"
+        assert redact_for_egress(raw) == raw
+
+    def test_docker_run_port_mapping_not_touched(self):
+        from agent.redact import redact_for_egress
+        raw = "docker run -p 8080:80 nginx"
+        assert redact_for_egress(raw) == raw
+
+
 class TestRedactForEgress:
     """``redact_for_egress`` is the single scrub every remote-reader surface (gateway chat, A2A, monitoring)
     calls; there is no second pattern list to keep in sync."""
