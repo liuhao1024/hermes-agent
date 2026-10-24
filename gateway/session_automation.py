@@ -330,6 +330,20 @@ def _route_identity(source):
     return {key: value for key, value in source.to_dict().items() if key != 'message_id'}
 
 
+def _route_drifted(committed: dict, wake: dict) -> bool:
+    """True only when a routing/provenance field differs on BOTH sides of the comparison.
+
+    A wake rebuilt from the session key (the store-origin-less fallback in
+    ``run_notifications._build_process_event_source``) carries only the fields the delegation
+    ledger persisted: a Discord thread's committed source holds ``parent_chat_id``/``chat_name``
+    the rebuilt side never has, so a plain dict compare refuses forever (#144006). A field
+    missing (or null) on one side is unknown, not drift; a field set on both sides to different
+    values is real drift and still refuses (the ``parent_chat_id`` guarantee #142665 tests)."""
+    return any(committed.get(key) != wake.get(key)
+               and committed.get(key) is not None and wake.get(key) is not None
+               for key in committed.keys() | wake.keys())
+
+
 def committed_route_envelope(authority, entry):
     """The route's last committed native envelope with connector provenance (what a producer turn
     borrows), or ``None`` while no human message was admitted there."""
@@ -366,7 +380,7 @@ def snapshot_automation(authority, adapter, event, identity):
         key: value for key, value in envelope.items() if key != 'media'}}, runner)
     # Synthetic wakes clear ``message_id`` (#52694, #123097) while the committed human source keeps
     # it, so compare the routing/provenance identity, never the platform reply anchor.
-    if (_route_identity(restored.source) != _route_identity(event.source)
+    if (_route_drifted(_route_identity(restored.source), _route_identity(event.source))
             or runner._adapter_for_source(restored.source) is not adapter):
         raise RuntimeStoreError('admission_conflict')
     provenance = deepcopy(envelope['provenance'])
