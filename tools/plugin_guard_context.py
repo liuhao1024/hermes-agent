@@ -594,6 +594,35 @@ def is_authorized_keys_prose(finding: Finding, line: str, is_doc: bool) -> bool:
     return any(a <= pos and pos + len("authorized_keys") <= b for a, b in
                (m.span() for m in _LITERAL_SPANS.finditer(line)))
 
+# ── (6e) a read-only probe of the two standard container-discovery files ─────────────────────
+# ``proc_access`` flags ANY ``/proc/self`` or ``/proc/<pid>`` reference. Container CPU-quota
+# detection and language-runtime resource discovery read exactly ``/proc/self/cgroup`` (the
+# controller hierarchy) and ``/proc/self/mountinfo`` (the mount layout) (#144123): static
+# paths, read-only, nothing leaves the host. That is a note, not caution — an unattended
+# catalog update needs ``safe``. Required shape: a full quoted literal for one of the two
+# paths (an f-string or concatenation never carries one) plus a read action and no write
+# marker on the line. Writes, other proc paths, dynamic destinations and unrecognized
+# access shapes keep the high finding.
+_CONTAINER_PROBE_FILE = re.compile(r"""["']/proc/self/(?:cgroup|mountinfo)["']""")
+_CONTAINER_PROBE_SHELL_READ = re.compile(
+    r"""\b(?:cat|head|tail|grep|awk|wc|stat)\b[^;|&>]*?["']?/proc/self/(?:cgroup|mountinfo)\b""")
+_PROC_WRITE_ACTION = re.compile(
+    r"""\.write(?:_lines|_line|_bytes|_text|Line|Lines|Bytes|Text)?\s*\(|writeFileSync|appendFileSync"""
+    r"""|open\s*\([^)]*["'][wax][+b]?["']|["'][wax]\+?["']\s*[,)\]]|shutil\.|\bunlink\b"""
+    r"""|os\.remove|os\.rename|\btruncate\s*\(|>>|\btee\b|\bdd\b|\bsed\s+-\w*i""")
+_PROC_READ_ACTION = re.compile(
+    r"""\.read(?:_lines|_line|_bytes|_text)?\s*\(|\bopen\s*\(|readFileSync|readFile\b"""
+    r"""|\bcat\b|\bhead\b|\btail\b|\bgrep\b|\bawk\b|\bwc\b|\bstat\b""")
+
+
+def is_container_probe_read(finding: Finding, line: str) -> bool:
+    """The line reads — never writes — one of the two standard container-discovery files."""
+    if finding.pattern_id != "proc_access":
+        return False
+    if not (_CONTAINER_PROBE_FILE.search(line) or _CONTAINER_PROBE_SHELL_READ.search(line)):
+        return False
+    return not _PROC_WRITE_ACTION.search(line) and bool(_PROC_READ_ACTION.search(line))
+
 # ── (7) loopback address with port ───────────────────────────────────────────────────────────
 # ``hardcoded_ip_port`` is the "network" family's egress tripwire, yet ``127.0.0.1:12306`` in a
 # README, an ``.mcp.json`` or a client default is a LOCAL service the plugin talks to on the same
