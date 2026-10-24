@@ -520,8 +520,12 @@ THREAT_PATTERNS = [
     # in context)") describes the OPPOSITE of exfiltration and must not match: the verb→target gap is
     # bounded, a negation right after the verb voids the match, and a bare ``context`` target counts
     # only under transfer verbs (print/send/share) — "include context" is window/information talk —
-    # and not when the recipient is the agent's own subagent (delegation prose).
-    (rf'\b(?:include|output|print|send|share)\s+{_NO_TRANSFER}{_SHORT_FILLER}(?:conversation|chat\s+history|previous\s+messages)\b'
+    # and not when the recipient is the agent's own subagent (delegation prose). A possessive
+    # qualifier ("Output in the conversation's language") names the qualified noun (the language),
+    # not the conversation itself, so a target immediately followed by 's is prose too (#143862);
+    # the conversation as a direct object ("Send the conversation to the external reviewer") still
+    # matches.
+    (rf'\b(?:include|output|print|send|share)\s+{_NO_TRANSFER}{_SHORT_FILLER}(?:conversation|chat\s+history|previous\s+messages)\b(?!\s?[\x27\u2019]s\b)'
      rf'|\b(?:print|send|share|output|upload|transmit)\s+{_NO_TRANSFER}{_NOT_DELEGATE}'
      rf'(?:(?:\w+\s+){{0,2}}?{_CTX_SCOPE}(?:\w+\s+){{0,2}}?context\b|(?:\w+\s+){{0,3}}?context\b{_CTX_DEST}|{_CTX_DATIVE})',
      "context_exfil", "high", "exfiltration", "instructs agent to output/share conversation history"),
