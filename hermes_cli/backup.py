@@ -26,7 +26,7 @@ from hermes_state_holders import read_only_db_uri
 
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
-from hermes_cli.backup_sqlite import _close_quietly, _safe_copy_db
+from hermes_cli.backup_sqlite import _close_quietly, _safe_copy_db, is_zeroed_sqlite_file
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, profile_root_entry
 from hermes_cli.sizefmt import format_bytes as _format_size
 
@@ -370,29 +370,6 @@ def _query_ro_sqlite(path: Path, fn):
         _close_quietly(conn)
 
 
-def is_zeroed_sqlite_file(path: Path, *, probe_bytes: int = 100, force: bool = False) -> bool:
-    """True when *path* looks like the #68474 zeroed-state.db signature.
-
-    Only regular files qualify: probing a FIFO/device/socket could block indefinitely.
-
-    Signature: no ``SQLite format 3`` header and no data — either empty (size 0, the total-loss case,
-    #97568) or first *probe_bytes* all NUL. Used at SessionDB open and for snapshot diagnostics so a silent
-    all-zero file becomes a guided recovery instead of a generic failure.
-    """
-    try:
-        if not path.is_file():
-            return False
-    except OSError:
-        return False
-    from hermes_cli.sqlite_safe_read import has_live_connection, read_header_bytes_preopen
-    if not force and has_live_connection(path):
-        return False
-
-    head = read_header_bytes_preopen(path, length=max(16, probe_bytes), force=force)
-    # Empty or all-NUL header => zeroed; a real header (or unreadable) => not.
-    return head is not None and not head.startswith(b"SQLite format 3") and not any(head)
-
-
 # --- SQLite integrity verification ---
 
 _SQLITE_HEADER = b"SQLite format 3\0"
@@ -518,6 +495,8 @@ def _write_zip_entries(
             if abs_path.suffix == ".db":
                 size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
                 if size is None:
+                    if not abs_path.exists():
+                        continue  # vanished mid-run: not a read failure
                     on_db_failure(rel_path)
                     continue
                 total_bytes += size
@@ -525,6 +504,9 @@ def _write_zip_entries(
                 _write_zip_file(zf, abs_path, str(rel_path))
                 if track_bytes:
                     total_bytes += abs_path.stat().st_size
+        except FileNotFoundError:
+            logger.debug("backup skipped vanished file=%s", rel_path)
+            continue
         except (PermissionError, OSError, ValueError) as exc:
             on_error(rel_path, exc)
             continue
@@ -647,6 +629,8 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
             try:
                 _write_zip_file(zf, abs_path, arcname)
                 total_bytes += abs_path.stat().st_size
+            except FileNotFoundError:
+                logger.debug("backup skipped vanished external file=%s", arcname)
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
     elapsed = time.monotonic() - t0
