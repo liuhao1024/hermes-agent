@@ -510,7 +510,9 @@ def _write_zip_entries(
 
     ``on_db_failure(rel_path)`` runs when a SQLite snapshot fails (may raise to abort);
     ``on_error(rel_path, exc)`` records a read failure; ``on_progress(i)`` fires every 500 files;
-    ``track_bytes`` stats plain files for the size total.
+    ``track_bytes`` stats plain files for the size total. A file that vanished after the scan
+    (Hermes deletes its own short-lived logs and cron spool entries while the archive runs) is
+    skipped, not recorded: it no longer exists, so the archive already matches current state.
     """
     total_bytes = 0
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
@@ -518,6 +520,9 @@ def _write_zip_entries(
             if abs_path.suffix == ".db":
                 size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
                 if size is None:
+                    if not abs_path.exists():
+                        logger.debug("backup skipped vanished file=%s", rel_path)
+                        continue
                     on_db_failure(rel_path)
                     continue
                 total_bytes += size
@@ -525,6 +530,9 @@ def _write_zip_entries(
                 _write_zip_file(zf, abs_path, str(rel_path))
                 if track_bytes:
                     total_bytes += abs_path.stat().st_size
+        except FileNotFoundError:
+            logger.debug("backup skipped vanished file=%s", rel_path)
+            continue
         except (PermissionError, OSError, ValueError) as exc:
             on_error(rel_path, exc)
             continue
@@ -647,6 +655,10 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
             try:
                 _write_zip_file(zf, abs_path, arcname)
                 total_bytes += abs_path.stat().st_size
+            except FileNotFoundError:
+                # Same scan-to-archive window as _write_zip_entries: a vanished external
+                # file is not missing from the archive, so it is skipped rather than counted.
+                logger.debug("backup skipped vanished external file=%s", arcname)
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
     elapsed = time.monotonic() - t0
