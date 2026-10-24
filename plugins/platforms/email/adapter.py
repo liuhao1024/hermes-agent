@@ -594,10 +594,15 @@ class EmailAdapter(BasePlatformAdapter):
             logger.info("[Email] SMTP connection test passed.")
             return True
         except smtplib.SMTPAuthenticationError as e:
-            # Typed auth failure (535 & friends) can never self-heal, so drop out of the reconnect queue — unambiguous, unlike IMAP4.error.
+            # Permanent 5xx auth failures (535 & friends) can never self-heal, so drop out of the reconnect queue —
+            # unambiguous, unlike IMAP4.error. smtplib raises this same error for every other AUTH reply too
+            # (RFC 4954 §6), including transient 4xx such as Postfix's "450 4.7.1 too many AUTH commands"; those are
+            # temporary server-side conditions (RFC 5321 §4.2.1) and must stay retryable or an AUTH rate limit parks
+            # the platform offline until restart (#144106).
+            retryable = 400 <= int(getattr(e, "smtp_code", 0) or 0) < 500
             return self._fail("[Email] SMTP authentication failed: %s", e, "email_auth_error",
                               f"SMTP authentication failed for {self._address}: {e}. Check EMAIL_PASSWORD (for Gmail/Outlook "
-                              "this must be an app password, not the account password).", retryable=False)
+                              "this must be an app password, not the account password).", retryable=retryable)
         except Exception as e:
             return self._fail("[Email] SMTP connection failed: %s", e, "email_smtp_connect_error",
                               f"SMTP connection to {self._smtp_host} failed: {e}", retryable=True)
