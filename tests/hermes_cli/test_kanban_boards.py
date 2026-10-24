@@ -219,6 +219,38 @@ class TestBoardCRUD:
         assert "task_events" in tables
         assert "tasks" in tables
 
+    @pytest.mark.parametrize("archive", [True, False])
+    def test_remove_locked_open_board_answers_actionable_refusal(
+        self, fresh_home, monkeypatch, archive
+    ):
+        # Regression for #143908: on Windows another process holding the
+        # board's kanban.db open (the gateway's kanban surfaces qualify) makes
+        # the archive rename / hard-delete rmtree fail with PermissionError,
+        # which escaped the dashboard API's ValueError mapping as a raw 500.
+        # The refusal must be an actionable ValueError that names the holder
+        # (the dashboard maps it to a 400; the CLI prints it), chained to the
+        # original PermissionError for diagnosis.
+        kb.create_board("locked")
+
+        def _locked(self, target=None):
+            raise PermissionError(5, "Access is denied", str(self))
+
+        if archive:
+            monkeypatch.setattr(Path, "rename", _locked)
+        else:
+            monkeypatch.setattr("shutil.rmtree", _locked)
+
+        with pytest.raises(ValueError, match="held open by another process") as excinfo:
+            kb.remove_board("locked", archive=archive)
+        assert isinstance(excinfo.value.__cause__, PermissionError)
+        # Nothing moved: the board directory is still there and no archived
+        # tombstone was written.
+        assert kb.board_dir("locked").is_dir()
+        tombstone = kb.board_dir("locked") / "board.json"
+        if tombstone.exists():
+            raw = json.loads(tombstone.read_text(encoding="utf-8-sig"))
+            assert not raw.get("archived")
+
 
 
 # ---------------------------------------------------------------------------

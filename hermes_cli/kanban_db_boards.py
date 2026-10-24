@@ -174,7 +174,17 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         while target.exists():  # rapid double-archive
             target = archive_root / f"{normed}-{ts}-{suffix}"
             suffix += 1
-        d.rename(target)
+        try:
+            d.rename(target)
+        except PermissionError as exc:
+            # On Windows a process holding the board's kanban.db open (the
+            # gateway's kanban surfaces qualify) blocks the rename; surface an
+            # actionable refusal instead of letting it escape as a raw 500.
+            raise ValueError(
+                f"kanban board {normed!r} is held open by another process "
+                "(e.g. the gateway holds its kanban.db); stop that process "
+                "or close its kanban views, then retry"
+            ) from exc
         # Leave an ``archived`` tombstone at the original slug. Stale dashboard
         # tabs / gateway pollers can keep calling connect(board=slug) after the
         # archive; without a marker the resurrect-guard cannot tell an archived
@@ -191,7 +201,16 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         )
         return {"slug": normed, "action": "archived", "new_path": str(target)}
     import shutil
-    shutil.rmtree(d)
+    try:
+        shutil.rmtree(d)
+    except PermissionError as exc:
+        # Same Windows lock as the archive branch: an open kanban.db cannot be
+        # deleted out from under its holder.
+        raise ValueError(
+            f"kanban board {normed!r} is held open by another process "
+            "(e.g. the gateway holds its kanban.db); stop that process "
+            "or close its kanban views, then retry"
+        ) from exc
     return {"slug": normed, "action": "deleted", "new_path": ""}
 
 

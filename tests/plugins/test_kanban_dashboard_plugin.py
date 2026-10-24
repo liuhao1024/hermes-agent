@@ -134,6 +134,24 @@ def test_patch_board_sets_project_directory(client, tmp_path):
         project_dir.resolve()
     )
 
+def test_delete_board_locked_open_answers_400_not_500(client, monkeypatch):
+    """A board another process holds open must answer an actionable 400 (#143908).
+
+    On Windows the gateway holding the board's kanban.db makes the archive
+    rename fail with PermissionError, which used to escape as a raw 500.
+    """
+    kb.create_board("locked")
+
+    def _locked(self, target=None):
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(Path, "rename", _locked)
+
+    r = client.delete("/api/plugins/kanban/boards/locked")
+    assert r.status_code == 400, r.text
+    assert "held open by another process" in r.json()["detail"]
+    assert kb.board_dir("locked").is_dir()  # nothing moved
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 
