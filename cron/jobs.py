@@ -1337,12 +1337,36 @@ def get_ticker_last_error() -> Optional[str]:
 
 # --- Job CRUD Operations ---
 
+# A concurrent writer (every job finish saves through atomic_replace) holds jobs.json only
+# briefly. On Windows a read colliding with that handle fails as PermissionError [Errno 13]
+# with the winerror dropped, so it cannot be told apart from a genuine ACL denial by shape
+# alone (#144166).
+_JOBS_READ_RETRY_DELAYS: tuple[float, ...] = (0.1, 0.25, 0.5)
+
+
+def _read_jobs_file_text(jobs_file: Path) -> str:
+    # Retry only PermissionError, with the same bounded budget as the auth-store reader
+    # (#100737): a colliding save releases its handle in well under a second, while a real
+    # denial still surfaces once the retries run out. Every other OSError (EMFILE, EIO, a
+    # stalled mount) is not made better by retrying and keeps the fail-loud path.
+    for delay in _JOBS_READ_RETRY_DELAYS:
+        try:
+            return jobs_file.read_text(encoding="utf-8-sig")
+        except PermissionError:
+            logger.debug(
+                "cron: %s is held by a concurrent writer; retrying read in %.2fs",
+                jobs_file,
+                delay,
+            )
+            time.sleep(delay)
+    return jobs_file.read_text(encoding="utf-8-sig")
+
+
 def _parse_jobs_file(jobs_file: Path) -> tuple[Any, bool]:
     """Tolerant jobs.json parse -> ``(data, used_strict_fallback)``: utf-8-sig absorbs a BOM, strict
     failure retries with ``strict=False``. IO/fallback errors propagate (caller decides repair vs
     bail)."""
-    with open(jobs_file, "r", encoding="utf-8-sig") as f:
-        raw = f.read()
+    raw = _read_jobs_file_text(jobs_file)
     try:
         return json.loads(raw), False
     except json.JSONDecodeError:
