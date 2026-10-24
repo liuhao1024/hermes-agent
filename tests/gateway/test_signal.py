@@ -34,7 +34,11 @@ def _make_signal_adapter(monkeypatch, account="+15551234567", **extra):
         "account": account,
         **extra,
     }
-    return SignalAdapter(config)
+    adapter = SignalAdapter(config)
+    # Production wires the runner's auth check into every adapter (run_adapters._wire_adapter_handlers);
+    # mirror that so attachment paths exercise the gate instead of failing closed on None.
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    return adapter
 
 
 def _stub_rpc(return_value):
@@ -606,6 +610,89 @@ class TestSignalInboundMessageTypeClassification:
             f"Expected DOCUMENT, got {event.message_type}. "
             "text/plain must be classified as DOCUMENT so run.py injects file context."
         )
+
+
+# ---------------------------------------------------------------------------
+# Inbound attachments are fetched only for authorized senders (#143977)
+# ---------------------------------------------------------------------------
+
+def _attachment_payload(att_id="att-1", size=1024, content_type="application/pdf"):
+    return {
+        "contentType": content_type,
+        "id": att_id,
+        "size": size,
+        "filename": None,
+        "width": None,
+        "height": None,
+        "caption": None,
+        "uploadTimestamp": 1700000000000,
+    }
+
+
+class TestSignalInboundAttachmentAuthorization:
+    """_collect_attachments must run only when the gateway's auth check says True.
+
+    DM authorization otherwise happens later, in run.py's _is_user_authorized; before the
+    fix, any Signal user who could message the bot made the host download and cache their
+    attachments (up to 100 MB each) whether or not they were on SIGNAL_ALLOWED_USERS.
+    Fail-closed: False and the "no check wired" None case must both skip the fetch.
+    """
+
+    async def _run_envelope(self, monkeypatch, *, auth, text="see attached"):
+        """Dispatch one DM envelope with an attachment under the given auth verdict.
+
+        ``auth`` installs the authorization-check callback (None unwires it, leaving the
+        adapter with no check — the legacy standalone shape). Returns (dispatched_events, fetch_mock).
+        """
+        envelope = _make_dm_envelope(sender="+15559876543", attachments=[_attachment_payload()], text=text)
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter.set_authorization_check(auth)
+        adapter._rpc, _ = _stub_rpc(None)
+        dispatched = []
+
+        async def _fake_handle_message(event):
+            dispatched.append(event)
+
+        adapter.handle_message = _fake_handle_message
+        adapter._fetch_attachment = AsyncMock(return_value=("/tmp/report.pdf", ".pdf"))
+        await adapter._handle_envelope(envelope)
+        return dispatched, adapter._fetch_attachment
+
+    @pytest.mark.asyncio
+    async def test_denied_sender_attachment_is_not_fetched(self, monkeypatch):
+        """An allowlisted-out sender must not trigger the download; the text still dispatches."""
+        dispatched, fetch = await self._run_envelope(monkeypatch, auth=lambda *a, **k: False)
+
+        fetch.assert_not_awaited()
+        assert dispatched, "the message must still dispatch so the runner applies unauthorized_dm_behavior"
+        assert dispatched[0].media_urls == []
+        assert dispatched[0].media_types == []
+
+    @pytest.mark.asyncio
+    async def test_unwired_auth_check_fails_closed(self, monkeypatch):
+        """No authorization check wired (None) must also skip the fetch — never trust unknown."""
+        dispatched, fetch = await self._run_envelope(monkeypatch, auth=None)
+
+        fetch.assert_not_awaited()
+        assert dispatched
+        assert dispatched[0].media_urls == []
+
+    @pytest.mark.asyncio
+    async def test_authorized_sender_attachment_is_fetched(self, monkeypatch):
+        """An explicit True still fetches — no functional regression for allowed users."""
+        dispatched, fetch = await self._run_envelope(monkeypatch, auth=lambda *a, **k: True)
+
+        fetch.assert_awaited_once()
+        assert dispatched[0].media_urls == ["/tmp/report.pdf"]
+
+    @pytest.mark.asyncio
+    async def test_denied_attachment_only_envelope_is_dropped(self, monkeypatch):
+        """Attachment-only message from a denied sender has no text left: contentless, no dispatch."""
+        dispatched, fetch = await self._run_envelope(
+            monkeypatch, auth=lambda *a, **k: False, text="")
+
+        fetch.assert_not_awaited()
+        assert dispatched == []
 
 
 # ---------------------------------------------------------------------------

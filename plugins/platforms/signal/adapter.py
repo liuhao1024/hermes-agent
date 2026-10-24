@@ -459,7 +459,13 @@ class SignalAdapter(BasePlatformAdapter):
         attachments_data = data_message.get("attachments", [])
         media_urls, media_types = [], []
         if attachments_data and not getattr(self, "ignore_attachments", False):
-            media_urls, media_types = await self._collect_attachments(attachments_data)
+            # The fetch spends the bot's signal-cli credentials and disk on a sender-chosen file
+            # (up to SIGNAL_MAX_ATTACHMENT_SIZE each): only the gateway's explicit True permits it.
+            # DM authorization otherwise runs later, in run.py's _is_user_authorized — an
+            # unauthorized contact must not trigger the download (#143977). The message still
+            # dispatches so the runner applies unauthorized_dm_behavior, just without attachments.
+            if self._is_sender_authorized(sender, "group" if is_group else "dm", chat_id) is True:
+                media_urls, media_types = await self._collect_attachments(attachments_data)
         # Skip contentless envelopes (profile key updates, empty messages) that still carry a
         # dataMessage wrapper — otherwise msg='' triggers a full agent turn.
         if (not text or not text.strip()) and not media_urls:
