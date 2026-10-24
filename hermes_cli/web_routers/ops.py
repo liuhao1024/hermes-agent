@@ -137,7 +137,7 @@ async def clear_pending_pairing(profile: Optional[str] = None):
 # hot-reloads it. Per-route HMAC secrets are redacted on read, surfaced once on create.
 
 
-def _webhook_route_summary(name: str, route: dict[str, Any], base_url: str) -> dict[str, Any]:
+def _webhook_route_summary(name: str, route: dict[str, Any], base_url: str, url_prefix: str = "") -> dict[str, Any]:
     return {
         "name": name,
         "description": route.get("description", ""),
@@ -148,33 +148,77 @@ def _webhook_route_summary(name: str, route: dict[str, Any], base_url: str) -> d
         "script": route.get("script", ""),
         "skills": list(route.get("skills") or []),
         "created_at": route.get("created_at"),
-        "url": f"{base_url}/webhooks/{name}",
+        "url": f"{base_url}{url_prefix}/webhooks/{name}",
         "secret_set": bool(route.get("secret")),
         # Default-enabled; only an explicit enabled:false turns a route off.
         "enabled": route.get("enabled", True) is not False,
     }
 
 
+def _multiplex_webhook_host(profile: Optional[str]) -> Optional[str]:
+    """The live host multiplexer's profile label when ``profile`` is a SATELLITE it serves —
+    the satellite has no webhook platform of its own (one host gateway serves every profile),
+    so its Webhooks view reads and writes the HOST's webhook config and subscriptions. None
+    for the host itself, an unscoped request, or no live multiplexer answering (#143901)."""
+    requested = (profile or "").strip()
+    if not requested or requested.lower() in {"current", "default"}:
+        return None
+    from hermes_cli.gateway import host_multiplexer_serving
+    from hermes_cli.profiles import normalize_profile_name
+    gateway = host_multiplexer_serving(requested)
+    if gateway is None or normalize_profile_name(gateway.profile_label) == normalize_profile_name(requested):
+        return None
+    return gateway.profile_label
+
+
 @router.get("/api/webhooks")
 async def list_webhooks(profile: Optional[str] = None):
+    """Under multiplexing a satellite profile's view reads the HOST's webhook platform
+    (enablement, base URL) and lists the host subscriptions bound to that profile with their
+    /p/<profile> URLs — the satellite's own webhook config is absent by design (#143901)."""
+    requested = (profile or "").strip()
+    host = await asyncio.to_thread(_multiplex_webhook_host, requested)
+
     def _run():
         import hermes_cli.webhook as wh
 
         base_url = wh._get_webhook_base_url()
-        return {
+        items = wh._load_subscriptions().items()
+        prefix = ""
+        if host:
+            prefix = f"/p/{requested}"
+            items = (
+                (name, route) for name, route in items
+                if (route.get("profile") or "default") == requested
+            )
+        payload = {
             "enabled": wh._is_webhook_enabled(),
             "base_url": base_url,
             "subscriptions": [
-                _webhook_route_summary(name, route, base_url)
-                for name, route in wh._load_subscriptions().items()
+                _webhook_route_summary(name, route, base_url, url_prefix=prefix)
+                for name, route in items
             ],
         }
+        if host:
+            payload["multiplex_host"] = host
+        return payload
 
-    return await config_scoped_to_thread(profile, _run)
+    return await config_scoped_to_thread(host or profile, _run)
 
 
 @router.post("/api/webhooks/enable")
 async def enable_webhooks(profile: Optional[str] = None):
+    host = await asyncio.to_thread(_multiplex_webhook_host, profile)
+    if host:
+        # Writing webhook config into a satellite the host already serves starts a second
+        # listener on the default port (a collision), not a working platform (#143901).
+        requested = (profile or "").strip()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Profile '{requested}' is served by the '{host}' profile's gateway as a "
+                   f"multiplexer; enable webhooks from the '{host}' profile instead.",
+        )
+
     def _run():
         with config_write_scope(profile):
             _write_platform_enabled("webhook", True)
@@ -195,10 +239,16 @@ async def enable_webhooks(profile: Optional[str] = None):
 async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
     import hermes_cli.webhook as wh
 
+    requested = (profile or "").strip()
+    host = await asyncio.to_thread(_multiplex_webhook_host, requested)
+    # A satellite's route lives in the HOST's store (the host listener serves it under
+    # /p/<satellite>), not in the satellite's own empty one (#143901).
+    scope = host or profile
+
     def _enabled():
         return wh._is_webhook_enabled()
 
-    if not await config_scoped_to_thread(profile, _enabled):
+    if not await config_scoped_to_thread(scope, _enabled):
         raise HTTPException(
             status_code=400, detail="Webhook platform is not enabled. Enable it from the Webhooks page first.",
         )
@@ -216,7 +266,7 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
         subscriptions = wh._load_subscriptions()
         return subscriptions.get(name, wh._MISSING_SUBSCRIPTION)
 
-    expected = await config_scoped_to_thread(profile, _snapshot)
+    expected = await config_scoped_to_thread(scope, _snapshot)
 
     secret = body.secret or secrets.token_urlsafe(32)
     route: dict[str, Any] = {
@@ -228,6 +278,8 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
         "deliver": body.deliver or "log",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if host:
+        route["profile"] = requested
     if body.script and body.script.strip():
         route["script"] = body.script.strip()
     if body.deliver_only:
@@ -240,9 +292,10 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
             published = wh._replace_subscription(name, route, expected)
         except wh.SubscriptionMutationConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return _webhook_route_summary(name, published, wh._get_webhook_base_url())
+        prefix = f"/p/{requested}" if host else ""
+        return _webhook_route_summary(name, published, wh._get_webhook_base_url(), url_prefix=prefix)
 
-    summary = await config_scoped_to_thread(profile, _save)
+    summary = await config_scoped_to_thread(scope, _save)
     summary["secret"] = secret  # surfaced exactly once, on create
     return summary
 
@@ -255,19 +308,36 @@ def _webhook_key_in(subscriptions: dict[str, dict], name: str) -> str:
     return key
 
 
+def _webhook_bound_key_in(
+    subscriptions: dict[str, dict], name: str, requested: str, host: Optional[str]
+) -> str:
+    """Key for a route this view may act on. Under multiplexing the store is the HOST's, so a
+    name resolving to a route bound to another profile is not this satellite's to delete or
+    toggle — 404, exactly like a missing name (#143901)."""
+    key = _webhook_key_in(subscriptions, name)
+    if host and (subscriptions[key].get("profile") or "default") != requested:
+        raise HTTPException(
+            status_code=404, detail=f"No subscription named '{name}' bound to profile '{requested}'"
+        )
+    return key
+
+
 @router.delete("/api/webhooks/{name}")
 async def delete_webhook(name: str, profile: Optional[str] = None):
     profile = destructive_profile(profile, "DELETE /api/webhooks/{name}")
+    requested = (profile or "").strip()
+    host = await asyncio.to_thread(_multiplex_webhook_host, requested)
 
     def _run():
         import hermes_cli.webhook as wh
 
         def remove(subscriptions):
-            del subscriptions[_webhook_key_in(subscriptions, name)]
+            key = _webhook_bound_key_in(subscriptions, name, requested, host)
+            del subscriptions[key]
 
         wh._mutate_subscriptions(remove)
 
-    await config_scoped_to_thread(profile, _run)
+    await config_scoped_to_thread(host or profile, _run)
     return {"ok": True}
 
 
@@ -275,17 +345,20 @@ async def delete_webhook(name: str, profile: Optional[str] = None):
 async def set_webhook_enabled(name: str, body: WebhookEnabledToggle, profile: Optional[str] = None):
     """Disabled routes stay on disk (re-enable later) but the gateway rejects
     their events with 403; it hot-reloads the file, so no restart is needed."""
+    requested = (profile or "").strip()
+    host = await asyncio.to_thread(_multiplex_webhook_host, requested)
+
     def _run():
         import hermes_cli.webhook as wh
 
         def toggle(subscriptions):
-            key = _webhook_key_in(subscriptions, name)
+            key = _webhook_bound_key_in(subscriptions, name, requested, host)
             subscriptions[key]["enabled"] = bool(body.enabled)
             return key
 
         return wh._mutate_subscriptions(toggle)
 
-    key = await config_scoped_to_thread(profile, _run)
+    key = await config_scoped_to_thread(host or profile, _run)
     return {"ok": True, "name": key, "enabled": bool(body.enabled)}
 
 
