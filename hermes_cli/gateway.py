@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from hermes_cli import gateway_service_owner, setup_platforms
+from hermes_cli.gateway_status_redact import mask_credential_flags
 
 # UV's bundled Python ships a minimal PATH; ensure launchctl/systemctl are discoverable.
 if os.name == "posix":
@@ -3868,7 +3869,12 @@ def systemd_status(deep: bool = False, system: bool = False, full: bool = False)
         print()
 
     status_cmd = ["status", svc, "--no-pager"] + (["-l"] if full else [])
-    _run_systemctl(status_cmd, system=system, capture_output=False, timeout=10)
+    # Capture instead of streaming through: the CGroup tree lines carry child argv
+    # verbatim, so mask credential flags before anything reaches the terminal (#143938).
+    status_result = _run_systemctl(status_cmd, system=system, timeout=10, **_CAPTURE_TEXT)
+    print(mask_credential_flags(status_result.stdout), end="")
+    if status_result.stderr:
+        print(mask_credential_flags(status_result.stderr), end="", file=sys.stderr)
     result = _run_systemctl(["is-active", svc], system=system, timeout=10, **_CAPTURE_TEXT)
     if result.stdout.strip() == "active":
         print(f"✓ {scope_label} gateway service is running")
