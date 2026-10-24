@@ -33,7 +33,8 @@ def _resolved_str(path: Path) -> str:
 
 
 class _BackgroundReviewReadMarks:
-    """Read marks shared by copied tool contexts within one review run."""
+    """Path marks shared by copied tool contexts within one review run. Used for both
+    read marks (a file the fork loaded) and write marks (a file the fork wrote)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -46,6 +47,11 @@ class _BackgroundReviewReadMarks:
     def contains(self, path: str) -> bool:
         with self._lock:
             return path in self._paths
+
+    def contains_under(self, directory: str) -> bool:
+        prefix = directory.rstrip("/") + "/"
+        with self._lock:
+            return any(p == directory or p.startswith(prefix) for p in self._paths)
 
 
 _background_review_read_paths: _ctxvars.ContextVar[Optional[_BackgroundReviewReadMarks]] = (
@@ -71,6 +77,32 @@ def _background_review_has_read(path: Path) -> bool:
 def _reset_background_review_read_marks() -> None:
     """Start a fresh, isolated read set for the current review context."""
     _background_review_read_paths.set(_BackgroundReviewReadMarks())
+
+
+_background_review_write_paths: _ctxvars.ContextVar[Optional[_BackgroundReviewReadMarks]] = (
+    _ctxvars.ContextVar("background_review_write_paths", default=None))
+
+
+def mark_background_review_skill_write(path: Path) -> None:
+    """Record a successful skill write made by the active background-review fork. The
+    consolidation delete guard requires the declared ``absorbed_into`` umbrella to have
+    been written during the same run, so an existing name alone can't satisfy the gate
+    while the content goes nowhere (#143817)."""
+    if not _is_background_review():
+        return
+    if (marks := _background_review_write_paths.get()) is None:
+        _background_review_write_paths.set(marks := _BackgroundReviewReadMarks())
+    marks.add(_resolved_str(path))
+
+
+def _background_review_has_written_under(skill_dir: Path) -> bool:
+    marks = _background_review_write_paths.get()
+    return marks is not None and marks.contains_under(_resolved_str(skill_dir))
+
+
+def _reset_background_review_write_marks() -> None:
+    """Start a fresh, isolated write set for the current review context."""
+    _background_review_write_paths.set(_BackgroundReviewReadMarks())
 
 
 def _resolved_roots(skill_path: Path):
@@ -230,23 +262,37 @@ def _background_review_preflight(action: str, name: str) -> Optional[dict[str, A
 
 
 def _curator_consolidation_delete_guard(
-    name: str, absorbed_into: Optional[str]) -> Optional[dict[str, Any]]:
+        name: str, absorbed_into: Optional[str]) -> Optional[dict[str, Any]]:
     """Fail closed on unverified deletes during the curator consolidation pass. The fork's only
-    legitimate delete is a consolidation declared via ``absorbed_into=<umbrella>`` (existence
-    validated in ``_delete_skill``); the deterministic inactivity prune never calls skill_manage,
-    so a bare delete here can only be the LLM pass pruning without evidence.
+    legitimate delete is a consolidation declared via ``absorbed_into=<umbrella>`` — and the
+    umbrella must have been WRITTEN during this review run: a name that merely exists proves
+    nothing about a transfer, so the fork could archive an active skill while its content goes
+    nowhere (#143817). The deterministic inactivity prune never calls skill_manage, so a bare
+    delete here can only be the LLM pass pruning without evidence.
 
     A delete with no forwarding target — ``absorbed_into`` omitted (``None``) or empty (``""``) — is the
     fail-open behavior reported in #29912: the consolidation pass archived whole clusters of active skills
     with zero verified consolidations (``consolidated_this_run == 0``), leaving active automations pointing
     at names that no longer resolve. Refuse it; keep the skill active.
     """
-    if not _is_background_review() or (isinstance(absorbed_into, str) and absorbed_into.strip()):
+    if not _is_background_review():
+        return None
+    absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
+    if not absorbed_target:
+        return _refusal(
+            f"Refusing background curator delete of skill '{name}': the consolidation pass may only "
+            f"archive a skill it has absorbed into an umbrella. Pass absorbed_into=<umbrella> (the "
+            f"umbrella must already exist) to record a verified consolidation. Pruning a skill with no "
+            f"forwarding target is not permitted here — the deterministic inactivity prune handles "
+            f"staleness archival separately. Keeping '{name}' active.",
+            _fail_closed=True)
+    from tools.skill_manager_tool import _find_skill
+    target = _find_skill(absorbed_target)
+    if target is not None and _background_review_has_written_under(target["path"]):
         return None
     return _refusal(
-        f"Refusing background curator delete of skill '{name}': the consolidation pass may only "
-        f"archive a skill it has absorbed into an umbrella. Pass absorbed_into=<umbrella> (the "
-        f"umbrella must already exist) to record a verified consolidation. Pruning a skill with no "
-        f"forwarding target is not permitted here — the deterministic inactivity prune handles "
-        f"staleness archival separately. Keeping '{name}' active.",
+        f"Refusing background curator delete of skill '{name}': absorbed_into='{absorbed_target}' "
+        f"has not been written in this review run, so no consolidation was verified. Write the "
+        f"absorbed content into '{absorbed_target}' first (skill_manage edit/patch/write_file), "
+        f"then retry the delete. Keeping '{name}' active.",
         _fail_closed=True)

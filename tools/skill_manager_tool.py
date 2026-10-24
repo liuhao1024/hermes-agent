@@ -30,7 +30,8 @@ from agent.skill_utils import (
 from tools.skill_manager_guards import (
     _background_review_delete_guard, _background_review_preflight, _background_review_read_before_write_guard,
     _containing_skills_root, _curator_consolidation_delete_guard, _is_path_redirect, _pinned_guard,
-    _validate_delete_target, _is_background_review, _refusal as _err)
+    _validate_delete_target, _is_background_review, mark_background_review_skill_write,
+    _refusal as _err)
 from tools.skill_manager_batch import (
     _PATCH_EITHER_OR, _PATCH_NEEDS_NEW_STRING, _PATCH_NEEDS_OLD_STRING, _op_shape_error, _skill_manage_batch)
 from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
@@ -406,6 +407,9 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
     atomic_write_text(target, content, preserve_mode=True, create_mode=0o644)
     scan_error = _security_scan_skill(skill_dir)
     if not scan_error:
+        # Single choke point for create/edit/patch/write_file: a successful write is the
+        # evidence the consolidation delete guard requires of an absorbed_into umbrella (#143817).
+        mark_background_review_skill_write(target)
         return None
     if original is not None:
         atomic_write_text(target, original, preserve_mode=True)

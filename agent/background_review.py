@@ -1177,9 +1177,13 @@ def _run_review_fork(
         ),
     )
     with suppress(Exception):
-        from tools.skill_manager_guards import _reset_background_review_read_marks
+        from tools.skill_manager_guards import (
+            _reset_background_review_read_marks,
+            _reset_background_review_write_marks,
+        )
 
         _reset_background_review_read_marks()
+        _reset_background_review_write_marks()
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).

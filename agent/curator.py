@@ -1130,10 +1130,16 @@ def _run_llm_review(prompt: str) -> dict[str, Any]:
         # auto-created later stays private to one worker and every patch is
         # refused ("content has not been loaded in this review turn") even after
         # a fresh skill_view. Same seeding as agent/background_review.py.
+        # The write store gets the same seeding: the consolidation delete guard
+        # requires absorbed_into umbrellas to appear in it (#143817).
         with contextlib.suppress(Exception):
-            from tools.skill_manager_guards import _reset_background_review_read_marks
+            from tools.skill_manager_guards import (
+                _reset_background_review_read_marks,
+                _reset_background_review_write_marks,
+            )
 
             _reset_background_review_read_marks()
+            _reset_background_review_write_marks()
         # Silence the fork's tool-call chatter (CLI synchronous foreground runs).
         with open(os.devnull, "w", encoding="utf-8") as devnull, \
              contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
