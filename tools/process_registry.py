@@ -1464,8 +1464,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
 
                 check = env.execute(
                     f"kill -0 \"$(cat {q(pid_path)} 2>/dev/null)\" 2>/dev/null; echo $?", timeout=5)
-                check_output = check.get("output", "").strip()
-                if check_output and check_output.splitlines()[-1].strip() != "0":
+                # A probe that never answered says nothing about liveness: a timed-out
+                # `docker exec` returns the timeout notice (returncode 124), not an
+                # exit status. Skip this poll and probe again, like an unparseable
+                # log header above, instead of finishing a live job as exited.
+                last = (check.get("output", "").strip().splitlines() or [""])[-1].strip()
+                if check.get("returncode", 0) != 0 or not last.isdigit():
+                    continue
+                if last != "0":
                     # Exited -- read the exit code captured by the wrapper shell.
                     exit_str = env.execute(f"cat {q(exit_path)} 2>/dev/null", timeout=5).get("output", "").strip()
                     try:
