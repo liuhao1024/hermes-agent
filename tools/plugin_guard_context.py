@@ -403,7 +403,9 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 # (a note), CODE files only. A bare command string (``"please run sudo id"``), a ``["sudo", "id"]`` args
 # element, a ``subprocess.run(["sudo", ...])`` call, and a real ``sudo apt-get install`` line in a shell
 # script keep full severity (the first two are handled on data files by ``is_json_prose_value``).
-_SUDO_TOKEN = re.compile(r"\bsudo\b(?!\.\w)")
+# Kept in lockstep with the ``sudo_usage`` pattern in ``skills_guard.py``: the token mirrors what that
+# pattern can match, so call shapes (``sudo()`` / ``.sudo()``) never reach this helper either.
+_SUDO_TOKEN = re.compile(r"(?<!\.)\bsudo\b(?!\.\w|\s*\()")
 _SUDO_ADMIN_HINT = re.compile(
     r"\bsudo\s+(?:-[A-Za-z]+\b\s+)*(?:apt|apt-get|snap|dnf|yum|pacman|zypper|apk|brew|port|emerge"
     r"|systemctl|service|launchctl|pip[0-9]*|npm|gem|-u\b|-E\b|-H\b|-n\b)", re.IGNORECASE)

@@ -432,8 +432,11 @@ THREAT_PATTERNS = [
     # ``sudo.request`` / ``sudo.respond`` / ``sudo.expire`` are gateway wire events (the masked
     # sudo-password prompt lifecycle), not an invocation: any client plugin that relays Hermes' secure
     # prompts has to name them, and a bare ``\bsudo\b`` made every such plugin ``caution``. A dotted
-    # event name (``sudo.<verb>``) is never a shell ``sudo``.
-    (r'\bsudo\b(?!\.\w)',
+    # event name (``sudo.<verb>``) is never a shell ``sudo``. Neither is a call shape: ``sudo()`` /
+    # ``.sudo()`` are method/function names (e.g. Odoo's ORM ``self.env['res.partner'].sudo()``),
+    # documented verbatim by any skill that reviews such code — the shell binary is invoked as a bare
+    # word followed by an argument, never directly followed by ``(``.
+    (r'(?<!\.)\bsudo\b(?!\.\w|\s*\()',
      "sudo_usage", "high", "privilege_escalation", "uses sudo (privilege escalation)"),
     # Critical only in an executing shape: a set*id() call, the cap_setuid/cap_setgid capability, or a
     # chmod setting the bit (`u+s`, `g=s`, octal 2xxx-7xxx). The bare word is prose ("no setuid

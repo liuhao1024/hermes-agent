@@ -174,6 +174,27 @@ class TestDefensiveDocumentation:
         assert ("after-install.md", "critical") in by_file
         assert should_allow_plugin_install(result, force=True)[0] is False
 
+    def test_orm_sudo_method_in_reference_doc_is_not_sudo_usage(self, tmp_path):
+        """Odoo's ORM ``sudo()`` / ``.sudo()`` switches to superuser mode inside the Python
+        process — a method name, not the shell binary. A plugin whose reference doc reviews that
+        antipattern must stay installable; the real shell invocations keep firing (#143861)."""
+        files = dict(BASE_FILES)
+        files["skills/orm-review/references/antipatterns.md"] = (
+            "# Antipatterns\n"
+            "\n"
+            "Calling `sudo()` inside a loop re-creates the environment each time:\n"
+            "\n"
+            "```python\n"
+            "for line in lines:\n"
+            "    partner = self.env['res.partner'].sudo().browse(line.partner_id.id)\n"
+            "```\n"
+        )
+        files["setup.sh"] = "sudo apt install jq\nsudo -u postgres psql\n"
+        result = scan_plugin(_mk_plugin(tmp_path, files))
+        sudo = [f for f in result.findings if f.pattern_id == "sudo_usage"]
+        assert [(f.file, f.line) for f in sudo] == [("setup.sh", 1), ("setup.sh", 2)]
+        assert all(f.severity == "high" for f in sudo)
+
 
 class TestMaliciousPlugin:
     def test_ssh_dir_exfil_in_code_is_flagged(self, tmp_path):

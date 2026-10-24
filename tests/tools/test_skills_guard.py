@@ -240,6 +240,34 @@ class TestScanFile:
         setup.write_text("sudo apt-get install -y jq\nsudo ./install.sh\necho x | sudo -S rm -rf /\n", encoding="utf-8")
         assert [fi.line for fi in scan_file(setup, "setup.sh") if fi.pattern_id == "sudo_usage"] == [1, 2, 3]
 
+    def test_sudo_call_shapes_are_not_sudo_usage(self, tmp_path):
+        """``sudo()`` and ``.sudo()`` are method/function names — e.g. Odoo's ORM
+        ``self.env['res.partner'].sudo()`` switches to superuser mode inside the Python process —
+        never the shell binary. A skill that reviews or documents such framework API code must not
+        be flagged, while the real invocations keep firing (#143861)."""
+        antipatterns = tmp_path / "antipatterns.md"
+        antipatterns.write_text(
+            "# Antipatterns\n"
+            "\n"
+            "Calling `sudo()` inside a loop re-creates the environment each time:\n"
+            "\n"
+            "```python\n"
+            "for line in lines:\n"
+            "    partner = self.env['res.partner'].sudo().browse(line.partner_id.id)\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        assert not any(
+            fi.pattern_id == "sudo_usage" for fi in scan_file(antipatterns, "antipatterns.md")
+        )
+
+        setup = tmp_path / "setup.sh"
+        setup.write_text(
+            "sudo apt install jq\nsudo -u postgres psql\necho x | sudo tee /etc/hosts\n",
+            encoding="utf-8",
+        )
+        assert [fi.line for fi in scan_file(setup, "setup.sh") if fi.pattern_id == "sudo_usage"] == [1, 2, 3]
+
     def test_deduplication_per_pattern_per_line(self, tmp_path):
         f = tmp_path / "dup.sh"
         f.write_text("rm -rf / && rm -rf /home\n", encoding="utf-8")
