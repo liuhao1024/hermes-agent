@@ -42,7 +42,10 @@ def _token_status(source: str, source_label: str, creds: dict[str, Any]) -> dict
 
 def _anthropic_oauth_status() -> dict[str, Any]:
     """Status for the "Anthropic Account" card: Hermes-managed PKCE file first, then the
-    registry-ordered env vars (process env — where Bitwarden-sourced secrets land — then .env).
+    registry-ordered subscription-token env vars (process env — where Bitwarden-sourced
+    secrets land — then .env). A literal ``ANTHROPIC_API_KEY`` bills to API credits and is
+    managed on the API-keys tab like any other provider's key, so it must not present an
+    API-key-only setup as a signed-in subscription account (#144038).
 
     Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read here; it has its own
     ``claude-code`` entry, and counting it here would shadow a real ANTHROPIC_API_KEY.
@@ -55,10 +58,12 @@ def _anthropic_oauth_status() -> dict[str, Any]:
     if hermes_creds and hermes_creds.get("accessToken"):
         return _token_status("hermes_pkce", f"Hermes PKCE ({_get_hermes_oauth_file()})", hermes_creds)
 
-    env_var_order: tuple = ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    env_var_order: tuple = ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
-        env_var_order = PROVIDER_REGISTRY["anthropic"].api_key_env_vars
+        env_var_order = tuple(
+            var for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars if var != "ANTHROPIC_API_KEY"
+        )
     except (ImportError, KeyError):
         pass
     from hermes_cli.config import get_env_value

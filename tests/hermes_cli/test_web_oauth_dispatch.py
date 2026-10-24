@@ -526,8 +526,11 @@ def test_external_oauth_disconnect_rejected_before_auth_mutation(monkeypatch):
 
 
 def test_env_sourced_oauth_status_is_not_disconnectable(monkeypatch):
-    """An env/.env-backed Anthropic API key is removed from Keys, not OAuth Accounts."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    """An env/.env-backed Anthropic subscription token is removed from Keys, not OAuth
+    Accounts. (An ANTHROPIC_API_KEY no longer reads as a login on this card at all — #144038.)"""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "test-anthropic-token")
 
     resp = client.get("/api/providers/oauth", headers=HEADERS)
     assert resp.status_code == 200, resp.text
