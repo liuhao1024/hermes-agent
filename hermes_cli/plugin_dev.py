@@ -299,7 +299,12 @@ def _check_manifest_v2(report: DoctorReport, manifest: Any) -> None:
                 f"requires plugin {dep_id!r} ({vr}) — version ranges are "
                 "advisory; a missing dependency logs a warning at load")
 
-    pydeps = getattr(manifest, "python_dependencies", []) or []
+    # The requirements PM installs for this plugin: an authored pyproject.toml wins over
+    # the manifest lists (admission reads the same declaration). Without this fallback a
+    # pyproject-only plugin — the Hindsight catalog plugin ships no manifest dependency
+    # list on purpose — passes Doctor while its runtime import fails (#143970).
+    from hermes_cli.plugins_loader import _declared_requirements
+    pydeps = list(_declared_requirements(manifest))
     missing: list[str] = []
     unpinned: list[str] = []
     for req in pydeps:

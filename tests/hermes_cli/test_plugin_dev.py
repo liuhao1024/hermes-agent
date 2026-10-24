@@ -251,3 +251,53 @@ def test_doctor_loads_model_provider_plugins_through_provider_discovery(tmp_path
     report = doctor_plugin(plugin)
     assert not report.ok
     assert any("registered no ProviderProfile" in f.message for f in report.findings)
+
+
+def test_doctor_checks_pyproject_declared_dependencies(tmp_path: Path) -> None:
+    """A pyproject-only plugin (no manifest dependency list — the Hindsight catalog
+    plugin ships none on purpose) must still get its dependency-presence check: Doctor
+    used to pass it clean while the runtime could not import the declared deps (#143970)."""
+    from hermes_cli.plugin_dev import doctor_plugin
+
+    plugin = tmp_path / "pyproject-deps"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: pyproject-deps\n", encoding="utf-8")
+    (plugin / "__init__.py").write_text(
+        "def register(ctx):\n    pass\n", encoding="utf-8",
+    )
+    (plugin / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "hermes-plugin-pyproject-deps"\n'
+        'version = "0.0.0"\n'
+        'dependencies = ["hermes-doctor-missing-probe>=1.0,<2"]\n',
+        encoding="utf-8",
+    )
+
+    report = doctor_plugin(plugin)
+    messages = "\n".join(f.message for f in report.findings)
+    assert "declared python_dependencies not installed: hermes-doctor-missing-probe>=1.0,<2" in messages
+    # A missing dependency is a warning, not a failure — the plugin itself loads fine.
+    assert report.ok is True
+
+
+def test_doctor_pyproject_declared_dependency_present_passes(tmp_path: Path) -> None:
+    from hermes_cli.plugin_dev import doctor_plugin
+
+    plugin = tmp_path / "pyproject-deps-present"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: pyproject-deps-present\n", encoding="utf-8")
+    (plugin / "__init__.py").write_text(
+        "def register(ctx):\n    pass\n", encoding="utf-8",
+    )
+    (plugin / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "hermes-plugin-pyproject-deps-present"\n'
+        'version = "0.0.0"\n'
+        'dependencies = ["packaging>=20,<999"]\n',
+        encoding="utf-8",
+    )
+
+    report = doctor_plugin(plugin)
+    messages = "\n".join(f.message for f in report.findings)
+    assert "not installed" not in messages
+    assert report.ok, report.format_text()
