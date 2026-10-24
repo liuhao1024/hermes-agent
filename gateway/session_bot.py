@@ -232,11 +232,13 @@ def displaceable_bot_chat(authority, row):
 
 def _kept_local_history(db, row):
     """Whether an unbound row is local history the Bot Chat door must leave in place: a CLI, TUI
-    or Desktop row a native open adopts, or one a login stamped as its owner. A local-source row
-    no open can ever adopt (a route column left by a crash or reconnect, another profile's stamp)
-    is not: it held the title and refused every delivery for good (#141243)."""
-    from hermes_state_local_migration import LEGACY_LOCAL_SOURCES, legacy_account_label, validate_legacy_row
-    if row.get('source') not in LEGACY_LOCAL_SOURCES:
+    or Desktop row a native open adopts, a custom surface label an older build stamped, or one a
+    login stamped as its owner. A local-source row no open can ever adopt (a route column left by
+    a crash or reconnect, another profile's stamp) is not: it held the title and refused every
+    delivery for good (#141243)."""
+    from hermes_state_local_migration import (
+        LEGACY_LOCAL_SOURCES, custom_surface_label, legacy_account_label, validate_legacy_row)
+    if row.get('source') not in LEGACY_LOCAL_SOURCES and not custom_surface_label(row.get('source')):
         return False
     if row.get('user_id') and not legacy_account_label(row):
         return True

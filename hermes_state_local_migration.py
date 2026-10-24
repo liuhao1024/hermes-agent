@@ -16,6 +16,33 @@ LEGACY_LOCAL_SOURCES = frozenset({'cli', 'tui', 'gui', 'desktop', 'oneshot', 'to
 # Legacy labels that are not creation sources of their own (session_policy.SURFACES).
 LEGACY_CREATION_SOURCES = {'desktop': 'gui'}
 
+# Labels the authority era itself writes: canonical local runs (``local``, ``cron``), the kanban
+# worker, the peer-DM channel, the dashboard/browser API surfaces and the accounting placeholder.
+# They recover through their own receipts or senders, never through native adoption.
+_AUTHORITY_ERA_SOURCES = frozenset(
+    {'local', 'cron', 'kanban', 'bot_peer_dm', 'dashboard', 'hermes_browser', 'unknown'})
+
+
+def custom_surface_label(source):
+    """A nonblank source label no pre-authority local surface used and no platform answers to.
+
+    Older builds stamped surface names freely (``hermes chat --source <name>``, custom cron
+    surfaces), so the pre-authority whitelist above cannot enumerate them: such a row is local
+    history too, adoptable once it is otherwise unrouted (#143831). A label a messaging platform
+    or the API transport answers to, a label the authority era itself writes, and a blank label
+    (no surface proven at all) stay refused.
+    """
+    if not isinstance(source, str) or not source.strip() or source in LEGACY_LOCAL_SOURCES:
+        return False
+    if source in _AUTHORITY_ERA_SOURCES:
+        return False
+    from gateway.config import Platform
+    try:
+        Platform(source)
+    except ValueError:
+        return True
+    return False
+
 
 def legacy_account_label(row):
     # main's Desktop stamped the signed-in Nous account on its chats. That is a label, not a route or
@@ -48,7 +75,7 @@ def validate_legacy_row(db, row, *, subject=None):
     # stamp equal to ``subject`` itself names that principal: it is already its history by
     # ``authorize_history``'s rule, so it adopts like an unstamped row.
     user_id = row.get('user_id')
-    if (row['source'] not in LEGACY_LOCAL_SOURCES
+    if ((row['source'] not in LEGACY_LOCAL_SOURCES and not custom_surface_label(row['source']))
             or any(row.get(k) for k in ('session_key', 'chat_id', 'origin_json'))
             or (user_id and user_id != subject and not legacy_account_label(row)
                 and not login_owned_by(row, subject))
