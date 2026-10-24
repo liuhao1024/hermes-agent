@@ -75,8 +75,18 @@ class VerifyResult:
     readiness: ReadinessResult | None = None
 
     @property
+    def executed(self) -> bool:
+        """True when at least one command phase ran or readiness was probed."""
+        return bool(self.phases) or self.readiness is not None
+
+    @property
     def ok(self) -> bool:
-        return all(p.ok for p in self.phases) and (self.readiness is None or self.readiness.ready)
+        # An empty recipe or a selection with no commands verified nothing; it is not a pass.
+        return (
+            self.executed
+            and all(p.ok for p in self.phases)
+            and (self.readiness is None or self.readiness.ready)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

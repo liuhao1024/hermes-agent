@@ -81,12 +81,15 @@ def _merge_project_facts_commands(root: Path, recipe) -> None:
 
 
 def _record_evidence(root: Path, recipe, result, *, partial: bool) -> None:
-    """Record the completed run into the verification evidence ledger.
+    """Record an executed run into the verification evidence ledger; no-op runs leave it unchanged.
 
     Fail-silent: a ledger problem must never change the CLI's exit code or output. ``partial``
     (a ``--phase`` subset or ``--skip-start``) downgrades the scope to ``targeted`` so a partial
     pass is never presented as a full workspace green.
     """
+    if not result.executed:
+        # Nothing ran: leave the workspace's pending-verification state untouched.
+        return
     try:
         from agent.verification_evidence import record_verify_run
 
