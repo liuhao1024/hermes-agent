@@ -19,12 +19,39 @@ from urllib.parse import quote
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
 
+# The help text and docs present the contract shape as "OWNER/REPO", so those
+# exact uppercase words get past _REPO as a copy-paste from the docs. The
+# acceptance gate later compares the literal slug against the published PR,
+# making the card permanently uncompletable (#143828) — reject at creation.
+# Exact-match only: real mixed-case slugs like "Microsoft/vscode" still pass.
+_PLACEHOLDER_PARTS = frozenset(
+    {
+        "OWNER",
+        "ORG",
+        "ORGANIZATION",
+        "ACCOUNT",
+        "USER",
+        "USERNAME",
+        "REPO",
+        "REPOSITORY",
+    }
+)
+
 
 def validate_contract(value: str | None) -> str:
     if value is None or value == "local-only":
         return "local-only"
     if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value)):
         raise ValueError("completion_contract must be local-only, OWNER/REPO, or an exact GitHub PR URL")
+    slug = value
+    if pr_match := _PR.fullmatch(value):
+        slug = pr_match.group(1)
+    owner, _, repo = slug.partition("/")
+    if owner in _PLACEHOLDER_PARTS or repo in _PLACEHOLDER_PARTS:
+        raise ValueError(
+            f"completion_contract {value!r} uses a documentation placeholder "
+            "(OWNER/REPO-style); give the real owner/repository slug or the exact PR URL"
+        )
     return value
 
 

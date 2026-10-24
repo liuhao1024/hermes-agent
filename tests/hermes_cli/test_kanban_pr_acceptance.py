@@ -9,6 +9,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_connect import connect
+from hermes_cli.kanban_pr_acceptance import validate_contract
 
 
 @pytest.fixture
@@ -230,3 +231,35 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "OWNER/retailtwin-ai",  # the docs' own shape, pasted verbatim (#143828)
+        "ORG/retailtwin-ai",
+        "myorg/REPO",
+        "USERNAME/app",
+        "https://github.com/OWNER/REPO/pull/12",
+    ],
+)
+def test_completion_contract_rejects_documentation_placeholders(value):
+    """A placeholder slug can never equal the published PR's repository, so the
+    acceptance gate would be unfulfillable forever — reject at creation."""
+    with pytest.raises(ValueError, match="placeholder"):
+        validate_contract(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "local-only",
+        "vinhphan812/retailtwin-ai",
+        "owner/repo",  # lowercase is a plausible real login — not a placeholder
+        "Microsoft/vscode",  # mixed-case real slugs stay valid
+        "https://github.com/acme/repo/pull/7",
+    ],
+)
+def test_completion_contract_accepts_real_slugs(value):
+    assert validate_contract(value) == ("local-only" if value is None else value)
