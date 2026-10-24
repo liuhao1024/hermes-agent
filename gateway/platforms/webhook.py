@@ -751,7 +751,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return _json_error("Admission unavailable; retry this delivery", 503)
         if outcome == "invalid_destination":
             return _json_error("Route destination is misconfigured; fix the webhook subscription — "
-                               "this delivery will not succeed on retry", 422)
+                               "this delivery cannot succeed as configured", 422)
         if outcome == "duplicate":
             return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
         return web.json_response({"status": "accepted", "route": route_name, "event": event_type,
