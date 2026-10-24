@@ -23,6 +23,11 @@ from pm.plugin_declarations import read_python_declaration, manifest_version_err
 
 _MEMBER_EXCLUDE = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
+# Runtime asset dirs the app resolves relative to its own tree when no PM env override is set
+# (agent.i18n._locales_dir; tools.skills_sync bundled roots). Not setuptools packages, so the
+# package-root loop cannot see them; keep in step with scripts/build/inputs.py::RESOURCE_ENV.
+_RUNTIME_ASSET_DIRS = ("locales", "skills", "optional-skills", "optional-mcps")
+
 
 def _member_ignored(directory, names):
     return [name for name in names if name in _MEMBER_EXCLUDE or name.endswith(".egg-info")]
@@ -132,6 +137,10 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(entry, target)
+    for name in _RUNTIME_ASSET_DIRS:
+        entry = source / name
+        if entry.is_dir() and not entry.is_symlink() and not (destination / name).exists():
+            shutil.copytree(entry, destination / name, ignore=ignore)
 
 
 def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path) -> None:

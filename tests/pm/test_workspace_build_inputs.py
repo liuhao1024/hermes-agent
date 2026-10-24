@@ -331,3 +331,36 @@ def test_a_facts_file_without_published_entries_hides_nothing(tmp_path):
     workspace._copy_core_inputs(core, destination)
 
     assert (destination / "agent/chromium-1208/kept.txt").read_text(encoding="utf-8") == "KEPT\n"
+
+
+def test_runtime_asset_dirs_travel_with_the_snapshot(tmp_path):
+    """The generation's editable install resolves locales/ and the bundled skill trees relative
+    to the snapshot root (agent.i18n._locales_dir; tools.skills_sync); they are not setuptools
+    packages, so the package-root loop alone never copies them (#143870)."""
+    core = tmp_path / "core"
+    (core / "agent").mkdir(parents=True)
+    (core / "agent" / "__init__.py").write_text("", encoding="utf-8")
+    for relative, body in (
+        ("locales/en.yaml", "cli.commands.browser.status: hi\n"),
+        ("skills/demo/SKILL.md", "# demo skill\n"),
+        ("optional-skills/extra/SKILL.md", "# extra skill\n"),
+        ("optional-mcps/demo/mcp.json", "{}\n"),
+        ("skills/.git/config", "must not copy\n"),
+    ):
+        path = core / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[tool.setuptools.packages.find]\ninclude=["agent"]\n',
+        encoding="utf-8",
+    )
+
+    destination = tmp_path / "stage"
+    workspace._copy_core_inputs(core, destination)
+
+    assert (destination / "locales/en.yaml").read_text(encoding="utf-8") == "cli.commands.browser.status: hi\n"
+    assert (destination / "skills/demo/SKILL.md").read_text(encoding="utf-8") == "# demo skill\n"
+    assert (destination / "optional-skills/extra/SKILL.md").read_text(encoding="utf-8") == "# extra skill\n"
+    assert (destination / "optional-mcps/demo/mcp.json").read_text(encoding="utf-8") == "{}\n"
+    assert not (destination / "skills/.git").exists()
