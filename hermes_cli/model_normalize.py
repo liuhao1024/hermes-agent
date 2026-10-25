@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 # First hyphen-delimited token of a bare model name → vendor slug used by aggregator APIs
 # ("claude-sonnet-4.6" → "anthropic/claude-sonnet-4.6").
@@ -259,3 +259,101 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
 
     # Authoritative native providers, custom and all others: pass through as-is.
     return name
+
+
+def split_model_config_default(raw_default: Any) -> tuple[str, str]:
+    """Canonicalize ``model.default``/``model.model`` -> ``(model, provider)``; a dict value pairs
+    the model string with the provider it must be routed through."""
+    if isinstance(raw_default, dict):
+        provider = str(raw_default.get("provider") or "").strip()
+        model = raw_default.get("model") or raw_default.get("default")
+        return (str(model or "").strip(), provider)
+    return (str(raw_default or "").strip(), "")
+
+
+def _model_ids_table(models: Any) -> Optional[set[str]]:
+    """Lowercased model ids offered by a provider entry, or ``None`` when unlisted.
+    Accepts the ``models:`` shapes the runtime reads (``{id: {...}}`` mapping and
+    ``[id | {id/name}]`` list); anything else counts as unlisted."""
+    if isinstance(models, dict):
+        return {str(key).strip().lower() for key in models} if models else None
+    if isinstance(models, list) and models:
+        ids: set[str] = set()
+        for item in models:
+            if isinstance(item, dict):
+                item = item.get("id") or item.get("name")
+            if item is not None and str(item).strip():
+                ids.add(str(item).strip().lower())
+        return ids or None
+    return None
+
+
+def _prefix_matches_named_custom_provider(prefix_norm: str, qualified: str, config: dict[str, Any]) -> bool:
+    """True when *prefix_norm* names a user-defined custom provider — a ``providers:`` key (or its
+    optional ``name:`` override) or a legacy ``custom_providers:`` entry — i.e. the runtime will
+    route the request to that provider and a matching ``<prefix>/`` on ``model.default`` is
+    redundant. A provider whose ``models:`` table registers the *qualified* id itself rejects the
+    strip: there the qualified string is the model's real name, not a route prefix."""
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for entry_key, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            names = {str(v or "").strip().lower().replace(" ", "-") for v in (entry_key, entry.get("name"))}
+            if prefix_norm not in names:
+                continue
+            model_ids = _model_ids_table(entry.get("models"))
+            if model_ids is None:
+                return True
+            bare = qualified.split("/", 1)[1].strip().lower()
+            if bare in model_ids:
+                return True
+            return qualified.strip().lower() not in model_ids
+    legacy = config.get("custom_providers")
+    if isinstance(legacy, list):
+        for entry in legacy:
+            if not isinstance(entry, dict):
+                continue
+            names = {str(v or "").strip().lower().replace(" ", "-")
+                     for v in (entry.get("name"), entry.get("provider_key"))}
+            if prefix_norm in names:
+                return True
+    return False
+
+
+def strip_named_custom_provider_prefix(model_default: str, config: dict[str, Any]) -> str:
+    """Drop a redundant ``<named-custom>/`` route prefix from a slash-form ``model.default``
+    (issue #142839). ``model.default: china/deepseek-v4`` while ``model.provider`` (or the sole
+    routable entry) already selects the named custom provider ``china`` sends the qualified string
+    verbatim upstream; exact-name OpenAI-compatible routers (New API / one-api style) reject it
+    with ``503 model_not_found`` and Hermes fails over to the fallback model, masking the config
+    mistake as a provider outage. A canonical built-in id (``nous``) never strips: the runtime
+    defers to the built-in over a same-named entry (mirrors
+    ``runtime_provider_custom._shadowed_by_builtin``) and aggregator-facing APIs accept
+    slash-bearing ids. The literal ``custom/`` prefix stays too — the per-provider normalizer
+    above already strips exactly that form."""
+    raw = str(model_default or "").strip()
+    if "/" not in raw:
+        return model_default
+    prefix, remainder = raw.split("/", 1)
+    prefix_norm = prefix.strip().lower().replace(" ", "-")
+    if not prefix_norm or not remainder.strip() or prefix_norm == "custom":
+        return model_default
+    # Canonical built-in ids come from two registries: ``providers.ALIASES`` (OpenRouter et al.)
+    # and the auth ``PROVIDER_REGISTRY`` (Nous free tier). A prefix that IS one never strips;
+    # both imports are best-effort so a stripped-down install keeps loading configs.
+    try:
+        from hermes_cli.providers import ALIASES as _PROVIDER_ALIASES
+    except ImportError:
+        _PROVIDER_ALIASES = None
+    if _PROVIDER_ALIASES is not None and prefix_norm in set(_PROVIDER_ALIASES.values()):
+        return model_default
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY as _AUTH_REGISTRY
+    except ImportError:
+        _AUTH_REGISTRY = None
+    if _AUTH_REGISTRY is not None and prefix_norm in _AUTH_REGISTRY:
+        return model_default
+    if _prefix_matches_named_custom_provider(prefix_norm, raw, config):
+        return remainder.strip()
+    return model_default

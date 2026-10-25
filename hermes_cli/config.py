@@ -46,6 +46,8 @@ from hermes_constants import (
     apply_secure_dir_policy, get_managed_system)
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home
+# Model-id canonicalization lives in model_normalize; the split re-export keeps callers/patch targets.
+from hermes_cli.model_normalize import split_model_config_default, strip_named_custom_provider_prefix
 from utils import atomic_replace, fast_safe_load, file_signature, mkstemp_beside
 from hermes_cli.config_read_errors import (
     _CONFIG_PARSE_FAILURES, _FIX_PERMS, _FIX_YAML, FailedConfigRead, _backups_dir_display,
@@ -1709,16 +1711,6 @@ def _strip_default_values(
     return {} if stripped is dropped else stripped
 
 
-def split_model_config_default(raw_default: Any) -> tuple[str, str]:
-    """Canonicalize ``model.default``/``model.model`` -> ``(model, provider)``; a dict value pairs
-    the model string with the provider it must be routed through."""
-    if isinstance(raw_default, dict):
-        provider = str(raw_default.get("provider") or "").strip()
-        model = raw_default.get("model") or raw_default.get("default")
-        return (str(model or "").strip(), provider)
-    return (str(raw_default or "").strip(), "")
-
-
 def _normalize_root_model_keys(config: dict[str, Any]) -> dict[str, Any]:
     """Canonicalize the ``model`` section at the single load/save chokepoint.
     Root-level ``provider``/``base_url``/``context_length`` (older layouts) are moved under
@@ -1749,7 +1741,8 @@ def _normalize_root_model_keys(config: dict[str, Any]) -> dict[str, Any]:
         isinstance(model_in, dict) and (
             model_in.get("api_base")
             or model_in.get("model") or model_in.get("name")
-            or any(isinstance(model_in.get(k), dict) for k in ("default", "model", "name"))))
+            or any(isinstance(model_in.get(k), dict) for k in ("default", "model", "name"))
+            or (isinstance(model_in.get("default"), str) and "/" in model_in.get("default"))))
     has_root = any(config.get(k) for k in ("provider", "base_url", "context_length", "api_base"))
     if not has_root and not needs_model_work:
         return config
@@ -1800,6 +1793,11 @@ def _normalize_root_model_keys(config: dict[str, Any]) -> dict[str, Any]:
     if model.get("default"):
         model.pop("model", None)
         model.pop("name", None)
+
+    # A redundant <named-custom>/ route prefix on a slash-form default is stripped (#142839).
+    default_id = model.get("default")
+    if isinstance(default_id, str) and "/" in default_id:
+        model["default"] = strip_named_custom_provider_prefix(default_id, config)
 
     return config
 
