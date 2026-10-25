@@ -1156,7 +1156,10 @@ def _desktop_linux_needs_no_sandbox() -> bool:
 
 def _desktop_linux_userns_sandbox_available() -> bool:
     """True when the unprivileged userns sandbox works (probed with ``unshare``, fails closed) — then
-    the setuid ``chrome-sandbox`` helper is never consulted and no sudo prompt is needed."""
+    the setuid ``chrome-sandbox`` helper is never consulted and no sudo prompt is needed. The probe
+    also covers the mount-namespace ``/proc`` remount Chromium performs while entering the sandbox:
+    some hosts allow the user+mount namespace but deny that remount, and every renderer then dies on
+    its first ``/dev/shm`` allocation before any window can appear (#143569)."""
     if sys.platform != "linux":
         return False
     unshare = shutil.which("unshare")
@@ -1165,7 +1168,7 @@ def _desktop_linux_userns_sandbox_available() -> bool:
     try:
         return (
             subprocess.run(
-                [unshare, "--user", "--map-root-user", "true"],
+                [unshare, "--user", "--map-root-user", "--mount", "--mount-proc", "true"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
             ).returncode
             == 0)
@@ -1583,8 +1586,10 @@ def _packaged_desktop_launch_command(packaged_executable: Path) -> list[str]:
     """``[exe, *sandbox flags]`` after the Linux sandbox fixup; exits when the sandbox can't be configured."""
     launch_command = [str(packaged_executable)]
     if not _desktop_linux_sandbox_fixup(packaged_executable):
-        if _desktop_linux_needs_no_sandbox() and _desktop_linux_sandbox_helper_is_regular_file(packaged_executable):
-            print("⚠ Falling back to --no-sandbox because this Linux host restricts unprivileged user namespaces and the Electron sandbox helper could not be configured.")
+        if _desktop_linux_sandbox_helper_is_regular_file(packaged_executable) and (
+            _desktop_linux_needs_no_sandbox() or not _desktop_linux_userns_sandbox_available()
+        ):
+            print("⚠ Falling back to --no-sandbox because the Electron sandbox is unavailable on this Linux host and the sandbox helper could not be configured.")
             launch_command.append("--no-sandbox")
         else:
             sys.exit(1)
@@ -1919,8 +1924,10 @@ def _launch_bundled_desktop(
 
     launch_command = [str(layout.launcher)]
     if not _desktop_linux_sandbox_fixup(layout.launcher):
-        if _desktop_linux_needs_no_sandbox() and _desktop_linux_sandbox_helper_is_regular_file(layout.launcher):
-            print("⚠ Falling back to --no-sandbox because this Linux host restricts unprivileged user namespaces and the Electron sandbox helper could not be configured.")
+        if _desktop_linux_sandbox_helper_is_regular_file(layout.launcher) and (
+            _desktop_linux_needs_no_sandbox() or not _desktop_linux_userns_sandbox_available()
+        ):
+            print("⚠ Falling back to --no-sandbox because the Electron sandbox is unavailable on this Linux host and the sandbox helper could not be configured.")
             launch_command.append("--no-sandbox")
         else:
             sys.exit(1)

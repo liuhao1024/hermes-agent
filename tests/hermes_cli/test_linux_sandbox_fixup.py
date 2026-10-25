@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -293,3 +294,67 @@ class TestDesktopLinuxSandboxFixupNoTty:
             assert not worker.is_alive(), \
                 "fixup hung in sudo with no TTY (icon click goes nowhere)"
             assert outcome.get("result") is False
+
+
+class TestProbeCoversProcRemount:
+    def test_probe_argv_includes_mount_and_proc_remount(self):
+        """Chromium's userns sandbox remounts ``/proc`` after entering its mount namespace.
+
+        A probe that only creates the user namespace reports "available" on hosts where that
+        remount is denied — every renderer then dies on its first ``/dev/shm`` allocation and
+        no window ever appears (#143569). The probe must ask ``unshare`` for the full set.
+        """
+        with patch.object(main_desktop.shutil, "which", return_value="/usr/bin/unshare"), \
+             patch.object(main_desktop.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            assert main_desktop._desktop_linux_userns_sandbox_available() is True
+        probe = run.call_args.args[0]
+        assert "--mount" in probe
+        assert "--mount-proc" in probe
+        assert probe[-1] == "true"
+
+
+class TestNoSandboxFallbackGate:
+    """``_packaged_desktop_launch_command`` must degrade to ``--no-sandbox`` whenever the userns
+    sandbox is unusable — not only on AppArmor-restricted hosts (#143569)."""
+
+    @staticmethod
+    def _command(monkeypatch, *, fixup, needs_no_sandbox, helper_regular, userns):
+        monkeypatch.setattr(main_desktop, "_desktop_linux_sandbox_fixup", lambda exe: fixup)
+        monkeypatch.setattr(main_desktop, "_desktop_linux_needs_no_sandbox", lambda: needs_no_sandbox)
+        monkeypatch.setattr(
+            main_desktop, "_desktop_linux_sandbox_helper_is_regular_file", lambda exe: helper_regular)
+        monkeypatch.setattr(
+            main_desktop, "_desktop_linux_userns_sandbox_available", lambda: userns)
+        return main_desktop._packaged_desktop_launch_command(Path("/app/Hermes"))
+
+    def test_proc_remount_denied_host_falls_back_to_no_sandbox(self, monkeypatch):
+        """A non-AppArmor host whose /proc remount is denied gets a window (unsandboxed),
+        not a black one full of crashed renderers."""
+        cmd = self._command(
+            monkeypatch, fixup=False, needs_no_sandbox=False,
+            helper_regular=True, userns=False)
+        assert "--no-sandbox" in cmd
+
+    def test_damaged_helper_still_exits_rather_than_unsandboxing(self, monkeypatch):
+        """A missing/damaged chrome-sandbox stays a hard error — --no-sandbox must not
+        paper over a broken install."""
+        with pytest.raises(SystemExit) as exit_info:
+            self._command(
+                monkeypatch, fixup=False, needs_no_sandbox=False,
+                helper_regular=False, userns=False)
+        assert exit_info.value.code == 1
+
+    def test_apparmor_fallback_is_unchanged(self, monkeypatch):
+        """The pre-existing AppArmor-restricted fallback keeps working."""
+        cmd = self._command(
+            monkeypatch, fixup=False, needs_no_sandbox=True,
+            helper_regular=True, userns=False)
+        assert "--no-sandbox" in cmd
+
+    def test_working_userns_never_sandbox_falls_back(self, monkeypatch):
+        """fixup True (userns probe passed inside the fixup) adds no --no-sandbox."""
+        cmd = self._command(
+            monkeypatch, fixup=True, needs_no_sandbox=False,
+            helper_regular=True, userns=True)
+        assert "--no-sandbox" not in cmd
