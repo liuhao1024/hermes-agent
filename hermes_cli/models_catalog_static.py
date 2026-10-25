@@ -228,8 +228,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "deepseek": ["deepseek-flash", "deepseek-v4-pro"],
     "xiaomi": [
-        "mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed",
-        "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash",
+        # Tested 2026-10-24 against the Token Plan endpoint: only these two answer 200.
+        # mimo-v2.6-pro-ultraspeed is not delisted — the plan just doesn't include it (still in
+        # OpenRouter's catalog); re-add it when plans cover it. The rest are retired Xiaomi ids.
+        # A 400 from a plan-scoped key proves "this key can't call it", not "the model is gone".
+        "mimo-v2.6-pro", "mimo-v2.6-flash",
     ],
     "tencent-tokenhub": list(_TENCENT_MODELS),
     "tencent-tokenplan": list(_TENCENT_MODELS),

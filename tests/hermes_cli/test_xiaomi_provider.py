@@ -118,6 +118,27 @@ class TestXiaomiModelCatalog:
         assert "xiaomi" in _PROVIDER_MODELS
         assert len(_PROVIDER_MODELS["xiaomi"]) >= 1
 
+    def test_curated_list_excludes_retired_ids(self):
+        """The curated picker list leads the merged rows for xiaomi (it is not a
+        _LIVE_FIRST_PICKER_PROVIDERS member), so a retired id here is offered
+        first and 400s on every selection attempt (#143900). xiaomi is not a
+        live-first provider, so these never get filtered by a live roster —
+        they must stay out of the curated list entirely. mimo-v2.6-pro-ultraspeed
+        is deliberately absent from this blacklist: it is not retired, the Token
+        Plan just doesn't include it yet, and re-adding it when plans cover it
+        is the documented path."""
+        from hermes_cli.models import _PROVIDER_MODELS
+        curated = _PROVIDER_MODELS["xiaomi"]
+        retired = (
+            "mimo-v2.5-pro", "mimo-v2.5",                    # retired on Xiaomi's side (#135811)
+            "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash",  # V2 series, retired 2026-06-30
+        )
+        for model_id in retired:
+            assert model_id not in curated, (
+                f"{model_id} answers 400 on the Token Plan endpoint but is still "
+                "curated ahead of the live roster for xiaomi"
+            )
+
     def test_list_agentic_models_mock(self, monkeypatch):
         """When models.dev returns Xiaomi data, list_agentic_models should return models."""
         from agent import models_dev as md
