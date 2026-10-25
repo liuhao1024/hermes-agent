@@ -41,9 +41,11 @@ async def run(params, board_db):
         try:
             async with connect_gateway() as client:
                 # kanban.run subscribes this socket to the card's session, but only receipts matter
-                # here: discard the turn's events, or they fill the client's bounded queue and its
-                # reader stops, with the next receipt behind it.
-                drain = asyncio.create_task(_discard(client.events))
+                # here: every frame must still be taken, or they fill the client's bounded queue and
+                # its reader stops, with the next receipt behind it. Tool starts are rendered into
+                # the worker log as they happen, the live feed a one-shot worker's quiet CLI output
+                # used to carry.
+                drain = asyncio.create_task(_feed(client.events))
                 try:
                     return await _submit_claim(client, params, board_db)
                 finally:
@@ -54,9 +56,30 @@ async def run(params, board_db):
             await asyncio.sleep(1)
 
 
-async def _discard(events):
+async def _feed(events):
+    """Take every frame off the queue (the drain the bounded queue needs); render tool starts."""
     while True:
-        await events.get()
+        frame = await events.get()
+        try:
+            line = _feed_line(frame)
+        except Exception:
+            continue  # a frame that cannot be rendered must never stop the drain
+        if line:
+            print(line, flush=True)
+
+
+def _feed_line(frame):
+    """``HH:MM:SS ┊ <tool> <context>`` for a ``tool.start`` frame, redacted; '' for anything else."""
+    params = frame.get('params') if isinstance(frame, dict) else None
+    payload = params.get('payload') if isinstance(params, dict) else None
+    if not isinstance(payload, dict) or params.get('type') != 'tool.start':
+        return ''
+    from agent.redact import redact_sensitive_text
+    name = str(payload.get('name') or 'tool')
+    context = ' '.join(str(payload.get('context') or '').split())
+    context = redact_sensitive_text(context, force=True) or ''
+    stamp = time.strftime('%H:%M:%S')
+    return f'{stamp} ┊ {name} {context}'.rstrip()
 
 
 async def _submit_claim(client, params, board_db):
@@ -80,8 +103,9 @@ async def _submit_claim(client, params, board_db):
     from gateway.session_kanban import worker_result
     result = worker_result(board_db, params)
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
+    # Flushed so the stderr exit trailer (main's finally) cannot land in the log file first.
     if result.get('last_output'):
-        print(result['last_output'])
+        print(result['last_output'], flush=True)
     return result.get('exit_code', 1)
 
 
