@@ -116,6 +116,30 @@ async def test_run_sse_carries_controls_tool_payloads_and_authoritative_cancella
     assert 'run.cancelled' in names and 'run.completed' not in names
 
 
+@pytest.mark.asyncio
+async def test_run_sse_tool_completed_preview_carries_the_result(api, owner):
+    """The runs SSE ``tool.completed`` preview is rebuilt from the real result on the canonical
+    admission path too (#144404): the authority hands ``_tool_complete`` the result, so it must
+    ride to the run event callback instead of being dropped after the ``is_error`` check."""
+    admitted = admit_api_turn(api, session_id='sse-preview', user_message='hello', conversation_history=[])
+    _, ref, _row = admitted
+    launch, queue = _launch(api, admitted)
+
+    async def handle(event):
+        from gateway.session_results import execution_result
+        turn = _turn_runner(owner, ref)
+        turn.combined_tool_complete_callback('call-1', 'read_file', {'path': '/tmp/x'}, {'content': 'tool body'})
+        execution_result.get()['result'] = {'final_response': 'ok'}
+        return 'ok'
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # call_soon_threadsafe projections land on the loop
+    completed = next((e for e in _events(queue) if e['event'] == 'tool.completed'), None)
+    assert completed is not None, 'tool.completed never projected'
+    assert completed['tool'] == 'read_file' and completed['error'] is False
+    assert 'tool body' in completed['preview'], completed
+
+
 def _wrap(api, run_id, loop, sink):
     from gateway.platforms.api_server_runs import _make_run_event_callback
     inner = _make_run_event_callback(api, run_id, loop, _api_server=_api_server)
