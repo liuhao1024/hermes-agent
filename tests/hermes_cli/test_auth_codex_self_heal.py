@@ -134,11 +134,14 @@ def test_opt_out_never_adopts_codex_cli_login(tmp_path, monkeypatch):
     assert json.loads((hermes_home / "auth.json").read_text()) == hermes_auth
 
 
-def _codex_jwt(account_id: str, sub: str = "user-1") -> str:
+def _codex_jwt(account_id: str, sub: str = "user-1", user_id: str | None = None) -> str:
     def _b64(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    auth_claims = {"chatgpt_account_id": account_id}
+    if user_id is not None:
+        auth_claims["chatgpt_user_id"] = user_id
     claims = {"sub": sub, "exp": int(time.time()) + 3600,
-              "https://api.openai.com/auth": {"chatgpt_account_id": account_id}}
+              "https://api.openai.com/auth": auth_claims}
     return f"{_b64({'alg': 'none'})}.{_b64(claims)}.sig"
 
 
@@ -168,6 +171,47 @@ def test_recovery_refuses_codex_cli_login_from_another_workspace(tmp_path, monke
     assert info.value.code == "codex_auth_missing_refresh_token"
     assert auth_file.read_bytes() == before
     assert "different ChatGPT workspace" in caplog.text and team not in caplog.text
+
+
+def test_recovery_adopts_same_account_relogin_whose_sub_changed_idp(tmp_path, monkeypatch, caplog):
+    """#144236: the same ChatGPT account re-authenticated through a different identity provider
+    carries a new ``sub`` (it names the IdP) beside an unchanged ``chatgpt_account_id`` and
+    ``chatgpt_user_id``. That is the SAME principal: recovery must adopt the CLI pair instead of
+    refusing it forever (which stranded the singleton on its dead refresh token)."""
+    suffix = "relogged"
+    stranded = _codex_jwt("acct-personal", sub="google-oauth2|1001", user_id="user-1001")
+    relogged = _codex_jwt("acct-personal", sub="auth0|650f", user_id="user-1001")
+    auth_file = _seed_homes(tmp_path, monkeypatch, {"access_token": stranded},
+                            {"access_token": relogged, "refresh_token": f"rt-{suffix}"})
+
+    with caplog.at_level("WARNING", logger="hermes_cli.auth"):
+        resolved = resolve_codex_runtime_credentials(refresh_if_expiring=False)
+
+    # No identity refusal: the CLI pair was adopted into the store and served.
+    assert "different ChatGPT workspace" not in caplog.text
+    assert resolved["api_key"] == relogged
+    tokens = json.loads(auth_file.read_text())["providers"]["openai-codex"]["tokens"]
+    assert tokens["access_token"] == relogged
+    assert tokens["refresh_token"] == f"rt-{suffix}"
+
+
+def test_recovery_still_refuses_same_workspace_other_member_via_user_id(tmp_path, monkeypatch, caplog):
+    """#73667's protection survives the #144236 change: members of one ChatGPT workspace share
+    ``chatgpt_account_id`` but hold distinct ``chatgpt_user_id`` claims, and a coworker's CLI
+    login must still never replace the Hermes credential."""
+    suffix = "coworker"
+    mine, coworker = (_codex_jwt("acct-team", sub="sub-a", user_id="user-a"),
+                      _codex_jwt("acct-team", sub="sub-b", user_id="user-b"))
+    auth_file = _seed_homes(tmp_path, monkeypatch, {"access_token": mine},
+                            {"access_token": coworker, "refresh_token": f"rt-{suffix}"})
+    before = auth_file.read_bytes()
+
+    with caplog.at_level("WARNING", logger="hermes_cli.auth"), pytest.raises(AuthError) as info:
+        resolve_codex_runtime_credentials(refresh_if_expiring=False)
+
+    assert info.value.code == "codex_auth_missing_refresh_token"
+    assert auth_file.read_bytes() == before
+    assert "different ChatGPT workspace" in caplog.text
 
 
 def test_recovery_does_not_overwrite_concurrent_reauth(tmp_path, monkeypatch):
