@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import get_version_info
+from hermes_cli.models_cache_keys import _normalized_cache_slug, _targeted_clear_keys
 from hermes_cli.models_catalog_static import (
     CuratedFallbackModels,
     CANONICAL_PROVIDERS,
@@ -2078,12 +2079,6 @@ def _store_cache_entry(cache_key: str, entry: dict) -> None:
     write_under_cache_lock(_provider_models_cache_path(), write_row)
 
 
-def _normalized_cache_slug(provider: Optional[str]) -> str:
-    """``ollama`` stays a raw slug (its alias would canonicalize to ``custom``); everything else normalizes."""
-    requested = str(provider or "").strip().lower()
-    return requested if requested == "ollama" else (normalize_provider(provider) or (provider or ""))
-
-
 def _model_requires_account_discovery(provider: Optional[str], model: str) -> bool:
     """Astra names cannot confer API/OAuth entitlement through picker state."""
     return _normalized_cache_slug(provider) in {"openai", "openai-api", "openai-codex"} and is_astra_model(model)
@@ -2180,9 +2175,11 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
                     path.unlink()
                 return
             cache = _load_provider_models_cache()
-            normalized = _normalized_cache_slug(provider)
-            if normalized in cache:
-                del cache[normalized]
+            targets = _targeted_clear_keys(provider)
+            dead = [k for k in cache if any(k == t or k.startswith(f"{t}#") for t in targets)]
+            if dead:
+                for k in dead:
+                    del cache[k]
                 _save_provider_models_cache(cache)
 
         write_under_cache_lock(path, clear_file)
