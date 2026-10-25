@@ -957,6 +957,10 @@ def _action_update(job: dict[str, Any], a: dict[str, Any]) -> str:
 _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
 _JOB_ACTIONS = {
     "remove": _action_remove, "update": _action_update,
+    # 'delete' is the verb agents reach for first — the schema only ever listed
+    # 'remove', so a natural 'delete' call died on "Unknown cron action" and the
+    # job piled up paused forever (#144157, #144279).
+    "delete": _action_remove,
     "run": _action_run, "run_now": _action_run, "trigger": _action_run,
     "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
     "resume": lambda job, a: _job_state_result(resume_job(job["id"])),
@@ -1032,7 +1036,11 @@ def cronjob(
             return error
         handler = _JOB_ACTIONS.get(normalized)
         if handler is None:
-            return tool_error(f"Unknown cron action '{action}'", success=False)
+            return tool_error(
+                f"Unknown cron action '{action}'. Supported: create, list, update, "
+                "pause, resume, remove (alias: delete), run (aliases: run_now, trigger). "
+                "Use cronjob(action='list') to inspect jobs.",
+                success=False)
         return handler(job, a)
     except Exception as e:
         return tool_error(str(e), success=False)
@@ -1055,7 +1063,7 @@ def _cronjob_schema_overrides() -> dict:
 
 CRONJOB_SCHEMA = {
     "name": "cronjob_manage",
-    "description": """Schedule recurring or one-off agent tasks (cron jobs): create, list, edit, run. action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
+    "description": """Schedule recurring or one-off agent tasks (cron jobs): create, list, edit, run. action='create' schedules a job from a prompt and/or skills; 'list' inspects jobs; 'update'/'pause'/'resume'/'remove' (alias 'delete') manage one by job_id (always list first — never guess job IDs); 'run' fires a job immediately in the BACKGROUND (returns a handle at once, outcome re-enters the conversation when done — do not wait or poll; optional 'prompt' adds transient context for that fire only).
 
 Jobs run in a fresh session with no current-chat context, so prompts must be self-contained, and the agent's FINAL RESPONSE is what gets delivered — cron runs are autonomous and cannot ask questions. Jobs run on the main agent model (whatever `hermes model` is set to when they fire) unless the user pins one. Prefer updating an existing job over creating near-duplicates.""",
     "parameters": {
@@ -1065,11 +1073,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             "paused_reason": {"type": "string", "description": "Create only: auditable reason; requires paused=true."},
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, update, pause, resume, remove (alias: delete), run (aliases: run_now, trigger). When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
             },
             "job_id": {
                 "type": "string",
-                "description": "Required for update/pause/resume/remove/run."
+                "description": "Required for update/pause/resume/remove/delete/run."
             },
             "pinned": {
                 "type": "boolean",
