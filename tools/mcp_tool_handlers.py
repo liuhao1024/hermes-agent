@@ -120,6 +120,16 @@ def _format_trust_gate_arguments(args: dict) -> str:
     return rendered
 
 
+def _trust_gate_gated(server_name: str, tool_name: str) -> bool:
+    """The consent half of ``_trust_gate_check``'s classification, re-readable at dispatch time: an
+    untrusted-server write tool the calling session has not already approved. Missing trust metadata
+    means full trust (the operator never marked the server), missing hint metadata means write-capable."""
+    from tools.mcp_tool_scope import _server_key
+    trust = _core._server_trust_levels.get(_server_key(server_name), _core._TRUST_FULL)
+    return (trust == _core._TRUST_UNTRUSTED and not _tool_is_read_only(server_name, tool_name)
+            and not _trust_granted(server_name, tool_name))
+
+
 def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] = None,
                       args: Optional[dict] = None) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers, plus the declared spend
@@ -130,9 +140,7 @@ def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] =
     from tools import mcp_tool_costs as _costs
     # Trust and costs are the calling profile's own policy (an adopter of a shared connection keeps its own).
     key = _server_key(server_name)
-    trust = _core._server_trust_levels.get(key, _core._TRUST_FULL)
-    gated = (trust == _core._TRUST_UNTRUSTED and not _tool_is_read_only(server_name, tool_name)
-             and not _trust_granted(server_name, tool_name))
+    gated = _trust_gate_gated(server_name, tool_name)
     charge = None
     if key in _core._server_cost_policies:  # no table: not even a session lookup, main's path byte for byte
         from tools.approval_context import get_current_session_key
@@ -699,6 +707,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
     def _handler(args: dict, **kwargs) -> Any:
         # Security boundary: untrusted-server write tools need approval before ANY transport work (incl. lazy spawn).
         booked: list = []  # a costed call's charge; refunded when the call never reaches the server
+        # What the gate below classified on. Acquire may reconnect a lazy/dead server and rediscover
+        # its tools, flipping the cached readOnlyHint underneath the decision (#144380).
+        hint_before = _tool_is_read_only(server_name, tool_name)
         error = _trust_gate_check(server_name, tool_name, booked, args)
         if error is not None:
             return error
@@ -709,6 +720,16 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
             for charge in booked:
                 charge.refund()
             return error
+        # The gate cleared this call as read-only, but the acquire-time rediscovery now classifies it
+        # write-capable: consent is re-decided against the session that runs the call before dispatch.
+        # Consent-only re-ask (no charge): the spend the gate already reserved stands, so re-running
+        # the full gate would double-charge; a deny refunds what was booked.
+        if hint_before and _trust_gate_gated(server_name, tool_name):
+            error = _ask_for_call(server_name, tool_name, None, booked, args=args)
+            if error is not None:
+                for charge in booked:
+                    charge.refund()
+                return error
         # Only a tool annotated readOnlyHint=True is replayed after session expiry; a 401 is always
         # pre-dispatch so the auth recoverer keeps its retry for every tool.
         read_only = _tool_is_read_only(server_name, tool_name)
