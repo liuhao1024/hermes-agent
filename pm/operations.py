@@ -139,7 +139,14 @@ def _selection(root: Path) -> dict:
         raise InstallError("venv", f"cannot read environment selection: {root}") from exc
     if (not isinstance(record, dict) or not isinstance(record.get("generation"), str)
             or not re.fullmatch(r"gen-[0-9a-f]{32}", record["generation"])):
-        raise InstallError("venv", f"invalid environment selection: {root}")
+        # A readable record whose shape this install does not know is a stale
+        # layout, not corruption: every retry would refuse it again, wedging
+        # readers like the source-update completion tail forever. Treat it as
+        # no selection — the next ensure rebuilds and re-selects in the
+        # current format.
+        print(f"⚠ ignoring an environment selection in an unrecognized format at {root};"
+              " the environment will be rebuilt on next use", file=sys.stderr, flush=True)
+        return {}
     return record
 
 
