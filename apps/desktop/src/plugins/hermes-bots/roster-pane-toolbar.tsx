@@ -53,6 +53,9 @@ interface renderRosterToolbarProps {
   showRosterTools: boolean
   showRosterSearch: boolean
   showRosterFilters: boolean
+  /** The session-only hidden-bots reveal the header's eye button drives. */
+  hiddenExpanded: boolean
+  setHiddenExpanded: (value: boolean) => void
   query: string
   setQuery: (value: string) => void
   activeFilterCount: number
@@ -76,6 +79,8 @@ export function renderRosterToolbar({
   showRosterTools,
   showRosterSearch,
   showRosterFilters,
+  hiddenExpanded,
+  setHiddenExpanded,
   query,
   setQuery,
   activeFilterCount,
@@ -104,6 +109,21 @@ export function renderRosterToolbar({
               variant="ghost"
             >
               <Codicon name={activityToasts ? 'bell' : 'bell-slash'} />
+            </Button>
+          </Tip>
+          <Tip label={hiddenExpanded ? 'Hide the hidden bots again' : b.roster.showHidden}>
+            <Button
+              aria-label={b.roster.showHidden}
+              aria-pressed={hiddenExpanded}
+              className={cn(
+                'rounded-md hover:text-foreground',
+                hiddenExpanded ? 'text-(--ui-accent)' : 'text-(--ui-text-tertiary)'
+              )}
+              onClick={() => setHiddenExpanded(!hiddenExpanded)}
+              size="icon-xs"
+              variant="ghost"
+            >
+              <Codicon name={hiddenExpanded ? 'eye' : 'eye-closed'} />
             </Button>
           </Tip>
           <DropdownMenu>

@@ -419,7 +419,9 @@ it.each([
       setSectionDialog: vi.fn(),
       showRosterFilters: false,
       showRosterSearch: false,
-      showRosterTools: false
+      showRosterTools: false,
+      hiddenExpanded: false,
+      setHiddenExpanded: vi.fn()
     })
   )
 

@@ -483,6 +483,8 @@ export function BotsPane() {
         showRosterTools,
         showRosterSearch,
         showRosterFilters,
+        hiddenExpanded,
+        setHiddenExpanded: value => $showHiddenBots.set(value),
         query,
         setQuery,
         activeFilterCount,
