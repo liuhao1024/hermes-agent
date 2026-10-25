@@ -188,6 +188,60 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+# Host-side tombstones for committed deletions: sync state (_synced_files/_pushed_hashes)
+# is per-manager and dies with the session, but a remote sandbox outlives sessions. Without
+# a durable record, sync_back cannot tell a stale remote orphan ("host deleted this, the
+# deletion never propagated") from a genuinely new remote file, and orphans get copied back
+# onto the host — deleted files resurrecting every session (#144303).
+_DELETED_TOMBSTONE_FILENAME = ".sync_deleted_remote_paths"
+
+
+def _deleted_tombstone_path(hermes_home: Path | None = None) -> Path:
+    return (hermes_home or get_hermes_home()) / _DELETED_TOMBSTONE_FILENAME
+
+
+def _record_deleted_remote_paths(remote_paths: list[str], hermes_home: Path | None = None) -> None:
+    """Append committed deletions to the host-side tombstone file. Best-effort: a sync must
+    still succeed when the tombstone write fails."""
+    if not remote_paths:
+        return
+    try:
+        path = _deleted_tombstone_path(hermes_home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.writelines(f"{p}\n" for p in remote_paths)
+    except OSError as exc:
+        logger.debug("file_sync: could not record deletion tombstones: %s", exc)
+
+
+def _load_deleted_remote_paths(hermes_home: Path | None = None) -> set[str]:
+    """Read the tombstone set; an unreadable file simply means no known deletions."""
+    try:
+        text = _deleted_tombstone_path(hermes_home).read_text(encoding="utf-8-sig")
+    except OSError:
+        return set()
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _vacuum_deleted_remote_paths(alive_remote_paths: set[str], hermes_home: Path | None = None) -> None:
+    """Drop tombstones whose path exists on the host again: such a tombstone is stale and
+    would suppress a future legitimate remote change at that path."""
+    known = _load_deleted_remote_paths(hermes_home)
+    keep = known - alive_remote_paths
+    if keep == known:
+        return
+    try:
+        path = _deleted_tombstone_path(hermes_home)
+        if not keep:
+            path.unlink(missing_ok=True)
+            return
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(f"{p}\n" for p in sorted(keep)), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.debug("file_sync: could not vacuum deletion tombstones: %s", exc)
+
+
 class FileSyncManager:
     """Tracks local file changes and syncs to a remote environment. Backends supply transport
     callbacks (upload, delete) and a file-source callable; the manager handles mtime-based
@@ -260,6 +314,7 @@ class FileSyncManager:
             for p in to_delete:
                 new_files.pop(p, None)
                 self._pushed_hashes.pop(p, None)
+            _record_deleted_remote_paths(to_delete)
             self._synced_files = new_files
             self._last_sync_time = _monotonic()
         except Exception as exc:
@@ -334,7 +389,7 @@ class FileSyncManager:
         last_exc: Exception | None = None
         for attempt in range(_SYNC_BACK_MAX_RETRIES):
             try:
-                self._sync_back_once(lock_path)
+                self._sync_back_once(lock_path, hermes_home=hermes_home)
                 return
             except Exception as exc:
                 last_exc = exc
@@ -345,7 +400,7 @@ class FileSyncManager:
 
         logger.warning("sync_back: all %d attempts failed: %s", _SYNC_BACK_MAX_RETRIES, last_exc)
 
-    def _sync_back_once(self, lock_path: Path) -> None:
+    def _sync_back_once(self, lock_path: Path, hermes_home: Path | None = None) -> None:
         """Single sync-back attempt with SIGINT protection and file lock."""
         # signal.signal() only works from the main thread; gateway cleanup()
         # may run from a worker thread — skip SIGINT deferral there.
@@ -362,7 +417,7 @@ class FileSyncManager:
 
             signal.signal(signal.SIGINT, _defer_sigint)
         try:
-            self._sync_back_locked(lock_path)
+            self._sync_back_locked(lock_path, hermes_home=hermes_home)
         finally:
             if on_main_thread and original_handler is not None:
                 signal.signal(signal.SIGINT, original_handler)
@@ -372,16 +427,16 @@ class FileSyncManager:
                     # the CLI); ``raise_signal`` invokes the handler everywhere.
                     signal.raise_signal(signal.SIGINT)
 
-    def _sync_back_locked(self, lock_path: Path) -> None:
+    def _sync_back_locked(self, lock_path: Path, hermes_home: Path | None = None) -> None:
         """Sync-back under file lock (serializes concurrent gateways)."""
         if fcntl is None:
             # Windows: no flock — run without serialization
-            self._sync_back_impl()
+            self._sync_back_impl(hermes_home=hermes_home)
             return
         lock_fd = open(lock_path, "w", encoding="utf-8")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            self._sync_back_impl()
+            self._sync_back_impl(hermes_home=hermes_home)
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -389,7 +444,7 @@ class FileSyncManager:
                 pass
             lock_fd.close()
 
-    def _sync_back_impl(self) -> None:
+    def _sync_back_impl(self, hermes_home: Path | None = None) -> None:
         """Download, diff, and apply remote changes to host."""
         if self._bulk_download_fn is None:
             raise RuntimeError("_sync_back_impl called without bulk_download_fn")
@@ -434,12 +489,17 @@ class FileSyncManager:
                         staged_file = os.path.join(dirpath, fname)
                         # Remote keys are POSIX; relpath uses host separators (backslashes on Windows).
                         remote_path = "/" + Path(os.path.relpath(staged_file, staging)).as_posix()
-                        applied += self._apply_staged_file(staged_file, remote_path, file_mapping, upload_only)
+                        applied += self._apply_staged_file(
+                            staged_file, remote_path, file_mapping, upload_only, hermes_home=hermes_home)
 
                 if applied:
                     logger.info("sync_back: applied %d changed file(s)", applied)
                 else:
                     logger.debug("sync_back: no remote changes detected")
+
+                # Tombstones for paths the host has again are stale; drop them so a future
+                # legitimate remote change at that path is not suppressed.
+                _vacuum_deleted_remote_paths({remote for _, remote in file_mapping}, hermes_home=hermes_home)
         finally:
             try:
                 os.unlink(tar_path)
@@ -448,10 +508,12 @@ class FileSyncManager:
 
     def _apply_staged_file(
         self, staged_file: str, remote_path: str, file_mapping: list[tuple[str, str]], upload_only_host_paths: set[str],
+        hermes_home: Path | None = None,
     ) -> int:
         """Copy one extracted remote file onto the host if it changed since push. Returns 1 if
-        applied, 0 if skipped (unchanged, unmapped, or an upload-only credential). A host file
-        modified since push is overwritten with the remote version (last-write-wins) with a warning."""
+        applied, 0 if skipped (unchanged, unmapped, deleted on host, or an upload-only
+        credential). A host file modified since push is overwritten with the remote version
+        (last-write-wins) with a warning."""
         pushed_hash = self._pushed_hashes.get(remote_path)
         if pushed_hash is not None and _sha256_file(staged_file) == pushed_hash:
             return 0  # unchanged from push
@@ -466,6 +528,15 @@ class FileSyncManager:
         if self._is_upload_only_host_path(host_path, upload_only_host_paths):
             logger.debug("sync_back: skipping upload-only credential file %s", remote_path)
             return 0
+
+        if not os.path.exists(host_path):
+            # The host no longer has this file: either we pushed it this session and the host
+            # deleted it afterwards (the deletion may not have propagated yet), or a prior
+            # session already committed the deletion and the remote copy is a stale orphan.
+            # Copying either back would resurrect a file the user deleted (#144303).
+            if pushed_hash is not None or remote_path in _load_deleted_remote_paths(hermes_home):
+                logger.info("sync_back: skipping %s (deleted on host)", remote_path)
+                return 0
 
         if pushed_hash is not None and os.path.exists(host_path) and _sha256_file(host_path) != pushed_hash:
             logger.warning(
