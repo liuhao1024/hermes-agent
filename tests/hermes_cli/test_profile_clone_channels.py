@@ -281,3 +281,44 @@ def test_clone_all_drops_directory_shaped_channel_state(home):
     (home / "google_chat_user_tokens" / "u@x.json").write_text("{}", encoding="utf-8")
     profile_dir = create_profile("full", clone_all=True, no_alias=True)
     assert not (profile_dir / "google_chat_user_tokens").exists()
+
+
+# --- #144711: a per-profile delivery credential (push relay) is not a shared-bot collision ---------
+
+_PUSH_PLUGIN_MANIFEST = "name: pushlane\nkind: platform\nversion: 1.0.0\nrequires_env:\n  - name: PUSHLANE_TOKEN\n    password: true\n"
+
+
+def _push_plugin_init(exclusive: bool) -> str:
+    return (
+        "from gateway.platform_registry import PlatformEntry\n"
+        "def register(ctx):\n"
+        "    ctx.register_platform(name='pushlane', label='Push', adapter_factory=lambda cfg: None,\n"
+        "                          check_fn=lambda: True, required_env=['PUSHLANE_TOKEN'],\n"
+        f"                          credential_exclusive={exclusive})\n"
+    )
+
+
+@pytest.mark.parametrize(("exclusive", "warns"), [(False, False), (True, True)])
+def test_per_profile_delivery_credential_is_not_a_shared_bot_warning(home, exclusive, warns):
+    """A push-relay credential feeds one adapter per profile home (#144711): two profiles holding the
+    same value deliver independently, so ``hermes profile list`` must not report a bot collision for a
+    platform that declares ``credential_exclusive = False``. The default (True) keeps the warning."""
+    from hermes_cli.profiles import get_profile_dir
+    plugin = home / "plugins" / "pushlane"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text(_PUSH_PLUGIN_MANIFEST, encoding="utf-8")
+    (plugin / "__init__.py").write_text(_push_plugin_init(exclusive), encoding="utf-8")
+    env_text = "PUSHLANE_TOKEN=relay-token\n"
+    (home / ".env").write_text(env_text, encoding="utf-8")
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "gpt-5", "provider": "openai"},
+                        "plugins": {"enabled": ["pushlane"]}}), encoding="utf-8")
+    profile_dir = get_profile_dir(f"lane{int(exclusive)}")
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text(env_text, encoding="utf-8")
+
+    shared = shared_channel_credentials(profile_dir, home)
+
+    from gateway.platform_registry import platform_registry
+    assert platform_registry.is_registered("pushlane")  # the plugin itself must have loaded
+    assert shared == (["pushlane"] if warns else [])

@@ -175,6 +175,11 @@ class PlatformEntry:
     # Env names whose presence drives that enable, cited by the explicit-disable WARNING and used by
     # ``hermes_cli.profile_channels`` as the platform's credential set; () = none declared.
     env_enable_credentials: tuple = ()
+    # True (default): the connecting credential is a single-owner bot identity — two profiles holding
+    # it collide (the multiplexer parks one adapter), so ``hermes profile list`` warns about the share.
+    # False: the credential feeds a per-profile delivery lane the gateway instantiates once per profile
+    # home (a push relay — #144711), so profiles are expected to share it and no duplicate is reported.
+    credential_exclusive: bool = True
 
 
 def core_ships_platform(name: str) -> bool:

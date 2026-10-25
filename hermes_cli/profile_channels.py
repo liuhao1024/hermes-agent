@@ -217,11 +217,12 @@ def credential_env_keys() -> dict[str, str]:
     """``{ENV_KEY: platform_id}`` for the keys that make an adapter CONNECT AS a bot (token / app id /
     client id / secret — the shape ``GatewayRunner._adapter_credential_fingerprint`` hashes). Enable
     flags, URLs and hosts are excluded: two profiles pointing at one Mattermost server collide only
-    when they also share the token."""
+    when they also share the token. Platforms declaring ``credential_exclusive = False`` (a per-profile
+    delivery lane like a push relay) are excluded too: profiles are expected to share that credential."""
     keys: dict[str, str] = {}
     for feature in _left_core_platforms():
         keys.update(dict.fromkeys(feature.enable_env, feature.platform))
-    entries = _registry_entries()
+    entries = [e for e in _registry_entries() if getattr(e, "credential_exclusive", True)]
     for entry in entries:
         keys.update(dict.fromkeys(entry.required_env, entry.name))
     with contextlib.suppress(Exception):
@@ -231,14 +232,14 @@ def credential_env_keys() -> dict[str, str]:
             keys.update(dict.fromkeys(names, platform.value))
         for entry in entries:
             keys.update(dict.fromkeys(entry.env_enable_credentials, entry.name))
-        for step in _env_override_steps(entries):
-            if isinstance(step, EnvCred):
-                creds: set[str] = set()
-                for group in step.creds:
-                    creds.update((group,) if isinstance(group, str) else group)
-                if step.token:
-                    creds.add(step.token)
-                keys.update(dict.fromkeys(creds, step.platform.value))
+            for step in getattr(entry, "env_overrides", ()) or ():
+                if isinstance(step, EnvCred):
+                    creds: set[str] = set()
+                    for group in step.creds:
+                        creds.update((group,) if isinstance(group, str) else group)
+                    if step.token:
+                        creds.add(step.token)
+                    keys.update(dict.fromkeys(creds, step.platform.value))
     return {key: pid for key, pid in keys.items() if key.endswith(_CREDENTIAL_SUFFIXES)}
 
 
