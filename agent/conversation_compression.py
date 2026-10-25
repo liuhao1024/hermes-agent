@@ -33,6 +33,10 @@ from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
 from agent.conversation_compression_codex import _compress_context_via_codex_app_server
 from agent.conversation_compression_deadline import resolve_context_compression_timeouts
+# Re-exported for compression_facade's existing import path.
+from agent.conversation_compression_persist import (
+    _apply_persist_override_to_commit_rows, _stamp_scoped_twins,
+)
 from agent.conversation_compression_telemetry import (
     _emit_aborted_attempt_telemetry, _emit_blocked_attempt_telemetry, _emit_bypassed_attempt_telemetry,
     _emit_compression_attempt_telemetry, _record_committed_attempt_effect, _snapshot_compression_effect_input,
@@ -2412,54 +2416,6 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
     return "placeholder_appended"
 
 
-def _messages_match_scoped_identity(left: Any, right: Any) -> bool:
-    """Compare the live turn identity we care about for rotation stamping."""
-    if (
-        not isinstance(left, dict)
-        or not isinstance(right, dict)
-        or left.get("role") != right.get("role")
-        or left.get("content") != right.get("content")
-    ):
-        return False
-    left_timestamp = left.get("timestamp")
-    right_timestamp = right.get("timestamp")
-    if left_timestamp is not None and right_timestamp is not None:
-        return left_timestamp == right_timestamp
-    return True
-
-
-def _stamp_scoped_twins(targets: list, source: dict, *, exact_counts_stamped: bool = False) -> None:
-    """Stamp ``_db_persisted`` on every unstamped scoped twin of ``source`` in ``targets``.
-    Exact-timestamp twins are preferred: when the source carries a timestamp and any exact twin was stamped
-    (or, with ``exact_counts_stamped``, merely exists), the broad scoped pass is skipped so a content-equal
-    old duplicate is left alone."""
-    from agent.context_compressor import _DB_PERSISTED_MARKER
-    source_timestamp = source.get("timestamp")
-    exact_hit = False
-    if source_timestamp is not None:
-        for target in targets:
-            if (
-                not isinstance(target, dict)
-                or target.get("timestamp") != source_timestamp
-                or not _messages_match_scoped_identity(target, source)
-            ):
-                continue
-            if target.get(_DB_PERSISTED_MARKER):
-                exact_hit = exact_hit or exact_counts_stamped
-                continue
-            target[_DB_PERSISTED_MARKER] = True
-            exact_hit = True
-        if exact_hit:
-            return
-    for target in targets:
-        if (
-            isinstance(target, dict)
-            and not target.get(_DB_PERSISTED_MARKER)
-            and _messages_match_scoped_identity(target, source)
-        ):
-            target[_DB_PERSISTED_MARKER] = True
-
-
 _PENDING_CONTEXT_ENGINE_NOTIFICATION = "_pending_context_engine_compression_notification"
 
 
@@ -3649,6 +3605,7 @@ def _commit_compaction(
                     # would build, and count their originals as carried duplicates like compress()'s tail.
                     persisted = rejoin_compressed_head_and_tail(compressed, verbatim_tail)
                     tail_count += len(verbatim_tail)
+                _apply_persist_override_to_commit_rows(agent, messages, persisted)
                 from agent.conversation_compression_archive import coverage_for_commit
                 covered_ids, unresolved_held = coverage_for_commit(
                     agent._session_db, agent.session_id,
@@ -3695,6 +3652,7 @@ def _commit_compaction(
                     # Publish the kept exchanges with the head, as the in-place branch stores them: the
                     # gateway no longer rewrites a published child, so a head-only handoff loses the tail.
                     compressed = rejoin_compressed_head_and_tail(compressed, verbatim_tail)
+                _apply_persist_override_to_commit_rows(agent, messages, compressed)
                 _publish_rotated_compaction(
                     agent, messages, compressed, new_system_prompt=new_system_prompt, lease=lease,
                     old_session_id=old_session_id, compressed_user_turn_outcome=compressed_user_turn_outcome,
