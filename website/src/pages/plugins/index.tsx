@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import Layout from "@theme/Layout";
 import Link from "@docusaurus/Link";
-import { useHistory } from "@docusaurus/router";
 import useBaseUrl from "@docusaurus/useBaseUrl";
 import styles from "./styles.module.css";
 
@@ -94,14 +93,17 @@ function PluginCard({
   const [imageBroken, setImageBroken] = useState(false);
   const showImage = Boolean(plugin.image) && !imageBroken;
   const pagePath = pluginPagePath(plugin.name);
-  const history = useHistory();
-  const pageHref = useBaseUrl(pagePath); // <Link> adds baseUrl itself; history.push does not
+  const pageHref = useBaseUrl(pagePath);
   // A card IS the link to the plugin's own page: nothing expands or collapses in place. Inside
   // the Desktop picker iframe an in-frame navigation would leave the host's embed, so the page
   // opens in a new tab there instead.
+  // Regular clicks do a full page load rather than a client-side push: the grid's data comes
+  // from runtime-fetched plugins.json, but the route table inside the running bundle is a
+  // build-time snapshot, so a push to a plugin added after this HTML was served lands on the
+  // 404 page even though the server route exists. A reload always gets the current bundle.
   const onCardClick = onPick
     ? () => window.open(new URL(pageHref, window.location.href).toString(), "_blank", "noopener,noreferrer")
-    : () => history.push(pageHref);
+    : () => window.location.assign(pageHref);
 
   return (
     <div
@@ -141,9 +143,9 @@ function PluginCard({
           <span className={styles.cardIcon} title={category.label}>{category.icon}</span>
           <div className={styles.cardTitleGroup}>
             <h3 className={styles.cardTitle} title={plugin.name}>
-              <Link className={styles.cardTitleLink} to={pagePath} onClick={(e) => e.stopPropagation()}>
+              <a className={styles.cardTitleLink} href={pageHref} onClick={(e) => e.stopPropagation()}>
                 {highlightMatch(plugin.name, query)}
-              </Link>
+              </a>
             </h3>
             {typeof plugin.stars === "number" && (
               <a
@@ -313,9 +315,9 @@ function PluginCard({
               <CopyButton text={plugin.installCommand} />
             </div>
             <div className={styles.cardLinks}>
-              <Link className={styles.docsLink} to={pagePath} onClick={(e) => e.stopPropagation()}>
+              <a className={styles.docsLink} href={pageHref} onClick={(e) => e.stopPropagation()}>
                 Plugin page →
-              </Link>
+              </a>
               <a
                 className={styles.docsLink}
                 href={plugin.repo}
