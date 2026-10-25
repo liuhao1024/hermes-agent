@@ -39,6 +39,12 @@ from toolset_distributions import (
 
 logger = logging.getLogger(__name__)
 
+# Batch is an unattended approval surface: nobody can answer a prompt for any AIAgent this
+# module spawns (pool workers re-import it under spawn), so the process is marked for the
+# exec gate here — flagged commands then resolve from approvals.batch_mode (default deny)
+# instead of the silent auto-approve an unmarked embedded context would get (#144553).
+os.environ["HERMES_APPROVAL_CONTEXT"] = "batch"  # health: allow HX002 -- not a behavioural setting: this marker is how the approval gate tells this unattended process apart (#144553)
+
 # Auto-derived from model_tools so it stays in sync as tools are added. Gives every
 # trajectory a consistent tool_stats schema (Arrow/Parquet for HF datasets) and filters
 # corrupted entries (hallucinated tool names) when combining trajectories.

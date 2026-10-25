@@ -172,6 +172,15 @@ def _is_cron_approval_context() -> bool:
 # Programmatic/unattended platforms: no human can answer a prompt and the adapter has no ``send_exec_approval`` /
 # ``/approve`` surface. Governed by ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` — never an
 # interactive round-trip that blocks for the full timeout with nobody to answer.
+def _is_batch_approval_context() -> bool:
+    """True inside a batch trajectory/RL run: ``batch_runner`` marks its process at
+    import so every AIAgent it spawns (pool workers re-import the module under
+    spawn) resolves flagged actions from ``approvals.batch_mode`` (default deny)
+    instead of the silent auto-approve an unmarked embedded context would get
+    (#144553)."""
+    return _session_env("HERMES_APPROVAL_CONTEXT") == "batch"
+
+
 _UNATTENDED_APPROVAL_PLATFORMS = frozenset({"webhook", "msgraph_webhook", "api_server"})
 
 
@@ -214,10 +223,10 @@ def _is_single_query_approval_context() -> bool:
 
 
 def _no_user_can_answer() -> bool:
-    """True in single-query (-q), cron and unattended-platform sessions. `hermes chat -q` still registers the
+    """True in single-query (-q), cron, unattended-platform and batch sessions. `hermes chat -q` still registers the
     CLI panel callback, so a prompt that only checks for a callback would wait the full timeout for nobody."""
     return (_is_single_query_approval_context() or _is_cron_approval_context()
-            or _is_unattended_platform_approval_context())
+            or _is_unattended_platform_approval_context() or _is_batch_approval_context())
 
 
 def _is_gateway_approval_context() -> bool:
@@ -233,9 +242,12 @@ def _is_gateway_approval_context() -> bool:
     reason: those adapters have no ``send_exec_approval`` and no way to receive ``/approve`` replies.
     Submitting a pending approval there blocks the session for the full approval timeout (60-300 s) with no
     human who can resolve it (#37284, 87509). Their dangerous-command handling is governed by
-    ``approvals.unattended_mode`` config (default deny), mirroring cron.
+    ``approvals.unattended_mode`` config (default deny), mirroring cron. A batch run is likewise never a
+    gateway context, even when the environment it was launched from carries gateway markers: nobody in
+    that process can answer a card, so it must resolve from ``approvals.batch_mode``.
     """
-    if _is_cron_approval_context() or _is_unattended_platform_approval_context():
+    if (_is_batch_approval_context() or _is_cron_approval_context()
+            or _is_unattended_platform_approval_context()):
         return False
     return env_var_enabled("HERMES_GATEWAY_SESSION") or bool(_get_session_platform())
 
@@ -369,6 +381,13 @@ def _get_unattended_approval_mode() -> str:
     deny — an unattended session never silently runs a flagged action unless the
     operator explicitly trusts it."""
     return _binary_approval_mode("unattended_mode")
+
+
+def _get_batch_approval_mode() -> str:
+    """Approval mode for batch trajectory/RL runs (``batch_runner``); default
+    deny — a batch run ingests untrusted prompts and must never silently run a
+    flagged action (#144553)."""
+    return _binary_approval_mode("batch_mode")
 
 
 def _get_approval_transport_config() -> tuple[str, str | None]:

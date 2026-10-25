@@ -23,7 +23,7 @@ from utils import env_var_enabled, is_truthy_value
 from agent.i18n import t
 from tools import approval_context
 from tools.approval_context import (
-    _get_session_platform, _is_cron_approval_context,
+    _get_session_platform, _is_batch_approval_context, _is_cron_approval_context,
     _is_gateway_approval_context, _is_interactive_cli, _is_single_query_approval_context,
     _is_unattended_platform_approval_context, _resolve_cli_approval_callback, _should_fall_through_to_cli_approval,
     get_current_session_key,
@@ -605,7 +605,7 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
 @dataclass(frozen=True)
 class _Unattended:
     """One non-interactive context and the text every gate uses to explain it."""
-    name: str       # "single_query" | "cron" | "unattended"
+    name: str       # "batch" | "single_query" | "cron" | "unattended"
     cfg_key: str    # approvals.<cfg_key>: approve|deny
     clause: str     # "why nobody can approve" (lower-case sentence fragment)
     scope: str      # "in cron jobs" — completes "To allow ... {scope}"
@@ -634,13 +634,21 @@ _CRON_CTX = _Unattended(
     "cron", "cron_mode", "cron jobs run without a user present to approve it",
     "in cron jobs", "this cron profile is intentionally trusted",
 )
+_BATCH_CTX = _Unattended(
+    "batch", "batch_mode", "batch runs generate trajectories with no user present to approve it",
+    "in batch runs", "this batch run is intentionally trusted",
+)
 
 
 def _unattended_contexts() -> list[_Unattended]:
-    """Active unattended contexts in evaluation order: single-query first (``hermes chat -q``
-    exports HERMES_INTERACTIVE=1 but nobody answers); cron beats a platform marker because
+    """Active unattended contexts in evaluation order: batch first (an explicit process-level
+    marker beats the cron/platform markers a batch process may have inherited, so the denial
+    points at approvals.batch_mode); single-query next (``hermes chat -q`` exports
+    HERMES_INTERACTIVE=1 but nobody answers); cron beats a platform marker because
     cron binds the platform for delivery routing only."""
     contexts = []
+    if _is_batch_approval_context():
+        contexts.append(_BATCH_CTX)
     if _is_single_query_approval_context():
         contexts.append(_SINGLE_QUERY_CTX)
     if _is_cron_approval_context():
@@ -998,7 +1006,7 @@ def _run_approval_gate(
         log_args = (autoapprove_log_prefix, pattern_key, description)
         # Every unattended context resolves instantly — never a pending approval nobody can answer.
         deny_messages = {
-            "single_query": single_query_deny_message, "cron": cron_deny_message,
+            "batch": "", "single_query": single_query_deny_message, "cron": cron_deny_message,
             "unattended": unattended_deny_message,
         }
         for ctx in _unattended_contexts():
