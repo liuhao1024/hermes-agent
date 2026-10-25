@@ -5,6 +5,8 @@ exercise the dispatch site live in test_slash_access_dispatch.py.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -13,6 +15,7 @@ from gateway.slash_access import (
     policy_for_source,
     policy_from_extra,
 )
+from hermes_constants import get_hermes_home
 
 
 # ---------------------------------------------------------------------------
@@ -146,3 +149,86 @@ def test_blank_chat_type_resolves_to_the_gated_scope(extra, chat_type, admin, ga
     assert p.can_run("999", "stop") is (not gated)
     if admin is not None:
         assert p.is_admin(admin) is True
+
+
+# ---------------------------------------------------------------------------
+# Aliased identities — a WhatsApp admin listed in one form, messages in another
+# ---------------------------------------------------------------------------
+
+PHONE = "15551234567"
+LID = "77214955630717"
+
+
+def _write_lid_mapping(phone: str = PHONE, lid: str = LID) -> None:
+    """Mirror what the JS bridge writes: phone→lid and lid→phone (reverse)."""
+    session_dir = get_hermes_home() / "whatsapp" / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / f"lid-mapping-{phone}.json").write_text(json.dumps(lid), encoding="utf-8")
+    (session_dir / f"lid-mapping-{lid}_reverse.json").write_text(json.dumps(phone), encoding="utf-8")
+
+
+def _whatsapp_policy(admin_entries: list[str], chat_type: str = "dm"):
+    cfg = GatewayConfig(
+        platforms={
+            Platform.WHATSAPP: PlatformConfig(
+                enabled=True,
+                extra={"allow_admin_from": admin_entries, "group_allow_admin_from": admin_entries},
+            )
+        }
+    )
+    src = SessionSource(
+        platform=Platform.WHATSAPP, chat_id="G" if chat_type == "group" else "A", chat_type=chat_type, user_id=PHONE
+    )
+    return policy_for_source(cfg, src)
+
+
+class TestWhatsAppAliasedAdmin:
+
+    def test_admin_listed_as_bare_number_matches_phone_jid_sender(self):
+        # The documented form: a bare phone in allow_admin_from; WhatsApp delivers
+        # the JID spelling of the same number. No mapping files needed.
+        p = _whatsapp_policy([PHONE])
+
+        assert p.is_admin(f"{PHONE}@s.whatsapp.net") is True
+        assert p.is_admin(f"+{PHONE}") is True
+
+    def test_admin_listed_as_bare_number_matches_lid_sender(self):
+        # Current WhatsApp delivers most DMs as @lid; only the bridge's lid maps
+        # tie that form back to the listed number.
+        _write_lid_mapping()
+        p = _whatsapp_policy([PHONE])
+
+        assert p.is_admin(f"{LID}@lid") is True
+
+    def test_admin_listed_as_lid_matches_phone_jid_sender(self):
+        # The reverse listing: the operator pasted the LID, the message arrives
+        # as the phone JID.
+        _write_lid_mapping()
+        p = _whatsapp_policy([f"{LID}@lid"])
+
+        assert p.is_admin(f"{PHONE}@s.whatsapp.net") is True
+
+    def test_group_scope_resolves_aliases_too(self):
+        _write_lid_mapping()
+        p = _whatsapp_policy([PHONE], chat_type="group")
+
+        assert p.is_admin(f"{LID}@lid") is True
+        assert p.is_admin(f"{PHONE}@s.whatsapp.net") is True
+
+    def test_unlisted_identities_stay_non_admin(self):
+        _write_lid_mapping()
+        p = _whatsapp_policy([PHONE])
+
+        assert p.is_admin("7999@s.whatsapp.net") is False
+        assert p.is_admin("7999@lid") is False
+
+    def test_exact_platforms_keep_exact_matching(self):
+        # A platform without aliased identities must not grow alias matching.
+        cfg = GatewayConfig(
+            platforms={Platform.DISCORD: PlatformConfig(enabled=True, extra={"allow_admin_from": ["111"]})}
+        )
+        src = SessionSource(platform=Platform.DISCORD, chat_id="A", chat_type="dm", user_id="111")
+        p = policy_for_source(cfg, src)
+
+        assert p.alias_expander is None
+        assert p.is_admin("111@s.whatsapp.net") is False
