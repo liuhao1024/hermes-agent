@@ -582,6 +582,7 @@ _INDEX_BENIGN = {
     "permission_html_comment": "<!-- Requires SYSTEM_ALERT_WINDOW permission -->",
     "setuid_prose": "- [ ] **2.4.5(v)** No requesting root privileges or setuid attributes",
     "setuid_sandbox_flag": "args: ['--no-sandbox', '--disable-setuid-sandbox']",
+    "chmod_skipped_warning": 'warnings.append(f"chmod skipped for {output_path}: {exc}")',
     "diagnosis_guidance": "Do not tell the user that diagnosis requires a rebuild.",
     "sudo_in_docs": "- Amazon Linux 2: `sudo yum install -y postgresql`",
     "bind_all_in_docs": 'CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]',
