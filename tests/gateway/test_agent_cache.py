@@ -353,7 +353,7 @@ class TestSignatureCacheBustingKeys:
         folded = {"session": {"s": 1}, "live_file": {"f": 2}}
         seen = {}
 
-        def _fake_keys(user_config):
+        def _fake_keys(cls, user_config):
             seen["user_config"] = user_config
             return folded
 
