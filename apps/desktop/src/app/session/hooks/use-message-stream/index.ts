@@ -661,17 +661,62 @@ export function useMessageStream({
         if (streamId && nextMessages.some(m => m.id === streamId)) {
           // Seal the streaming bubble in place, marked interim so it renders
           // without an action footer (see ChatMessage.interim).
-          nextMessages = nextMessages.map(m =>
-            m.id === streamId
-              ? {
+          //
+          // A boundary (message.start) can leave an identical sealed interim
+          // from the previous occurrence right beside this bubble (#144609):
+          // the first copy materialized its own standalone bubble, and this
+          // seal would keep a second verbatim copy. Collapse the duplicate on
+          // the sealing side; the earlier bubble belongs to the previous
+          // occurrence's lifecycle and is never settled or deleted here.
+          const lastUserIndex = nextMessages.findLastIndex(message => message.role === 'user')
+          const normalizedText = authoritativeText.replace(/\s+/g, ' ').trim()
+
+          const hasTwinInterim = nextMessages.some(
+            (message, index) =>
+              index > lastUserIndex &&
+              message.id !== streamId &&
+              message.role === 'assistant' &&
+              message.interim === true &&
+              !message.hidden &&
+              chatMessageText(message).replace(/\s+/g, ' ').trim() === normalizedText
+          )
+
+          nextMessages = nextMessages.flatMap(m => {
+            if (m.id !== streamId) {
+              return [m]
+            }
+
+            if (!hasTwinInterim) {
+              return [
+                {
                   ...m,
                   parts: completeOpenTimelineParts(replaceTextPart(m.parts), occurredAt),
                   completedAt: occurredAt,
                   pending: false,
                   interim: true
                 }
-              : m
-          )
+              ]
+            }
+
+            // The twin already paints this text: drop this seal's verbatim
+            // copy. A bubble carrying more than text keeps rendering the rest
+            // (tool rows, reasoning); one carrying nothing else would seal
+            // into an empty shell, so it goes the way of the empty stream
+            // placeholders finalizeInterruptedMessages drops.
+            const withoutDuplicateText = m.parts.filter(part => part.type !== 'text')
+
+            return withoutDuplicateText.length
+              ? [
+                  {
+                    ...m,
+                    parts: completeOpenTimelineParts(withoutDuplicateText, occurredAt),
+                    completedAt: occurredAt,
+                    pending: false,
+                    interim: true
+                  }
+                ]
+              : []
+          })
         } else {
           // No streaming bubble. Usually a duplicate delivery of the interim
           // that just sealed the stream (two sockets, one backend — #120005
