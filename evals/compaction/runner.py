@@ -172,7 +172,28 @@ def _call(prompt: str, max_tokens: int = 2000) -> str:
         details = getattr(usage, "prompt_tokens_details", None)
         EVAL_USAGE["cached_tokens"] += int(getattr(details, "cached_tokens", 0) or 0) if details else 0
     if hasattr(resp, "choices"):
-        return resp.choices[0].message.content or ""
+        content = resp.choices[0].message.content or ""
+        if not content:
+            # A reasoning model can spend the whole budget on reasoning and
+            # return content="" (finish_reason="length"); surfacing "" here used
+            # to masquerade as a real result (empty search query → the recovery
+            # arm scored as if retrieval had happened, JSONDecodeError with no
+            # context). Fail loudly with the evidence instead (#144605).
+            reasoning_details = getattr(usage, "completion_tokens_details", None)
+            reasoning_tokens = (
+                int(getattr(reasoning_details, "reasoning_tokens", 0) or 0)
+                if reasoning_details is not None
+                else 0
+            )
+            raise RuntimeError(
+                f"model call returned empty content "
+                f"(finish_reason={getattr(resp.choices[0], 'finish_reason', None)!r}, "
+                f"completion_tokens={int(getattr(usage, 'completion_tokens', 0) or 0)}, "
+                f"reasoning_tokens={reasoning_tokens}); a reasoning model likely spent the "
+                f"whole max_tokens={max_tokens} budget on reasoning — set "
+                f"auxiliary.compression.reasoning_effort to none or raise the budget."
+            )
+        return content
     return str(resp)
 
 
@@ -220,7 +241,15 @@ def generate_questions(messages, n: int, cache_path: Path) -> list:
     region = summarized_region(cc, messages)
     text = serialize_for_exam(region)
     raw = _call(QUESTION_PROMPT.format(n=n, transcript=text), max_tokens=4000)
-    questions = _extract_json(raw)[:n]
+    try:
+        questions = _extract_json(raw)
+    except ValueError as exc:
+        # json.JSONDecodeError with no model output attached is undiagnosable;
+        # re-raise with the raw head so the operator sees what came back (#144605).
+        raise RuntimeError(
+            f"question generation returned unparseable JSON ({exc}); raw head: {raw[:200]!r}"
+        ) from exc
+    questions = questions[:n]
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(questions, indent=1), encoding="utf-8")
     return questions
@@ -367,7 +396,9 @@ def run_policy(name: str, spec: dict, messages, questions, out_dir: Path,
                 SEARCH_QUERY_PROMPT.format(
                     context_hint=hint, question=qa["q"],
                 ),
-                max_tokens=100,
+                # 100 sat below every reasoning model's floor: the budget died in
+                # reasoning before any query text was emitted (#144605).
+                max_tokens=1000,
             ).strip().strip('"')
             search_results = keyword_search(archive, query)
             answer = _call(
