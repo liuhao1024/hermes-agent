@@ -153,7 +153,16 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
         if meta is None or storage is None:
             return
         existing = storage.load_oauth_metadata()
-        if existing is None or str(existing.token_endpoint) != str(meta.token_endpoint):
+        # Compare the identifying endpoints too, not just the token endpoint: an authorization
+        # server that moves its issuer (or authorization endpoint) while keeping the token
+        # endpoint would otherwise leave the stale cache in place forever, and the next cold
+        # load would restore it for ``enforce_refresh_token_issuer`` to strip the fresh
+        # refresh token as issuer-mismatched (#144519). getattr: the cached model may be the
+        # device-flow subclass, where ``authorization_endpoint`` is optional.
+        if existing is None or any(
+            str(getattr(existing, field, None)) != str(getattr(meta, field, None))
+            for field in ("issuer", "authorization_endpoint", "token_endpoint")
+        ):
             storage.save_oauth_metadata(meta)
 
     async def _is_invalid_client_at_token_endpoint(self, response: Any) -> bool:
