@@ -8,6 +8,8 @@ job per event; the rendered prompt is transient per-run context; exclusive with 
 context). Per-route rate limiting,
 idempotency cache, body-size caps checked before reading. Generic HMAC V2 binds a timestamp for
 replay protection; body-only V1 is deprecated but accepted with a warning."""
+from __future__ import annotations
+
 
 import asyncio
 import base64

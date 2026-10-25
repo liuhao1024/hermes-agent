@@ -1,4 +1,6 @@
 """RoomLink room-member grants and capability HTTP handlers."""
+from __future__ import annotations
+
 
 import time
 import uuid
