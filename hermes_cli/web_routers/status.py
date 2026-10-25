@@ -251,17 +251,25 @@ def _merge_profile_gateway_platforms(gateway_platforms: dict, profile_platforms:
 def _bounded_health_probe():
     """Health probe with the route's blocking-call budget preserved. The resolver only
     reaches this rung when the local PID probe came up empty, so the timeout is paid at
-    most once per request and only in the cross-container case that needs it."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+    most once per request and only in the cross-container case that needs it.
+
+    The executor is created by hand rather than via ``with ThreadPoolExecutor(...)``:
+    leaving a ``with`` block calls ``shutdown(wait=True)``, which joins the worker and
+    so re-extends ``future.result(timeout=...)`` to the probe's own duration — a hung
+    probe would make the request wait for that instead of the budget here."""
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(_probe_gateway_health)
-        try:
-            return future.result(timeout=_GATEWAY_HEALTH_ROUTE_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            _log.warning("/api/status gateway health probe exceeded %.2fs; using local status",
-                         _GATEWAY_HEALTH_ROUTE_TIMEOUT)
-            return False, None
-        except Exception:
-            return False, None
+        return future.result(timeout=_GATEWAY_HEALTH_ROUTE_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        _log.warning("/api/status gateway health probe exceeded %.2fs; using local status",
+                     _GATEWAY_HEALTH_ROUTE_TIMEOUT)
+        return False, None
+    except Exception:
+        return False, None
+    finally:
+        # wait=False: never block the request on a probe we already gave up on.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _project_gateway_platforms(gateway_platforms: dict, configured: set[str] | None,
