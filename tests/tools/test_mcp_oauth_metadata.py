@@ -151,3 +151,83 @@ class TestManagerOAuthProviderMetadata:
         loaded = storage.load_oauth_metadata()
         assert loaded is not None
         assert str(loaded.token_endpoint) == "https://flow.example.com/token"
+
+
+    def test_persist_replaces_cache_when_only_issuer_changed(self, tmp_path, monkeypatch):
+        """An issuer move with the same token endpoint must replace the stale cache (#144519).
+
+        Before the fix the save was skipped (only ``token_endpoint`` was compared), the stale
+        issuer came back on the next cold load, and ``enforce_refresh_token_issuer`` stripped
+        the freshly granted refresh token as issuer-mismatched — parking the server until a
+        manual re-login once the access token expired.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("issuer-move-srv")
+        stale = OAuthMetadata.model_validate(
+            {
+                "issuer": "https://login.example.com",
+                "authorization_endpoint": "https://login.example.com/oauth/authorize",
+                "token_endpoint": "https://login.example.com/oauth/token",
+                "response_types_supported": ["code"],
+            }
+        )
+        storage.save_oauth_metadata(stale)
+        fresh = OAuthMetadata.model_validate(
+            {
+                "issuer": "https://connect.example.com",
+                "authorization_endpoint": "https://connect.example.com/oauth/authorize",
+                "token_endpoint": "https://login.example.com/oauth/token",  # unchanged
+                "response_types_supported": ["code"],
+            }
+        )
+        provider = _manager_provider_with_context(storage, oauth_metadata=fresh)
+
+        provider._persist_oauth_metadata_if_changed()
+
+        loaded = storage.load_oauth_metadata()
+        assert loaded is not None
+        assert str(loaded.issuer).rstrip("/") == "https://connect.example.com"
+
+
+    def test_persist_replaces_cache_when_only_authorization_endpoint_changed(self, tmp_path, monkeypatch):
+        """Same shape as the issuer move, but on ``authorization_endpoint`` (#144519)."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("authz-move-srv")
+        stale = OAuthMetadata.model_validate(
+            {
+                "issuer": "https://auth.example.com",
+                "authorization_endpoint": "https://old.example.com/oauth/authorize",
+                "token_endpoint": "https://auth.example.com/oauth/token",
+                "response_types_supported": ["code"],
+            }
+        )
+        storage.save_oauth_metadata(stale)
+        fresh = OAuthMetadata.model_validate(
+            {
+                "issuer": "https://auth.example.com",
+                "authorization_endpoint": "https://new.example.com/oauth/authorize",
+                "token_endpoint": "https://auth.example.com/oauth/token",  # unchanged
+                "response_types_supported": ["code"],
+            }
+        )
+        provider = _manager_provider_with_context(storage, oauth_metadata=fresh)
+
+        provider._persist_oauth_metadata_if_changed()
+
+        loaded = storage.load_oauth_metadata()
+        assert loaded is not None
+        assert str(loaded.authorization_endpoint).rstrip("/") == "https://new.example.com/oauth/authorize"
+
+
+    def test_persist_skips_save_when_metadata_unchanged(self, tmp_path, monkeypatch):
+        """Identical metadata stays a no-op: no needless rewrite of ``.meta.json``."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("no-change-srv")
+        meta = _make_metadata()
+        storage.save_oauth_metadata(meta)
+        provider = _manager_provider_with_context(storage, oauth_metadata=_make_metadata())
+
+        with patch.object(storage, "save_oauth_metadata") as save:
+            provider._persist_oauth_metadata_if_changed()
+
+        save.assert_not_called()
