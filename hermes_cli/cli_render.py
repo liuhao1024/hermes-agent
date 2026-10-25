@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import itertools
+import json
 import os
 import re
 import shutil
@@ -135,6 +136,61 @@ def _luminance_from_hex(hex_str: str) -> float | None:
 
 _DA1_REPLY_RE = re.compile(rb"\x1b\[\?[0-9;]*c")
 
+# A terminal that answers neither OSC 11 nor the DA1 fence pays the full probe budget on EVERY launch
+# (Apple Terminal replies with zero bytes). Remember that verdict so the wait happens once a day, not once
+# per process. Only the NEGATIVE verdict is cached: a terminal that answers keeps being probed every
+# launch, so a theme switch is still picked up on the next start.
+_OSC11_SILENT_TTL_SECONDS = 24 * 60 * 60
+
+# Env vars that identify the terminal the verdict belongs to — a different terminal gets its own probe.
+_OSC11_SILENT_ENV_KEYS = ("TERM", "TERM_PROGRAM", "COLORTERM")
+
+
+def _osc11_silent_cache_path():
+    """File holding the "this terminal never answers" verdict, or None when no home resolves."""
+    try:
+        from hermes_constants import get_hermes_dir
+
+        return get_hermes_dir("cache/terminal", "terminal_cache") / "osc11_silent.json"
+    except (ImportError, OSError):
+        return None  # no resolvable home: probe without a cache rather than fail startup
+
+
+def _osc11_terminal_fingerprint() -> str:
+    """Identity of the terminal a cached verdict is about."""
+    return "|".join((os.environ.get(key) or "").strip().lower() for key in _OSC11_SILENT_ENV_KEYS)
+
+
+def _osc11_terminal_known_silent() -> bool:
+    """True when this terminal already burned a whole OSC 11/DA1 budget without answering (#144550)."""
+    path = _osc11_silent_cache_path()
+    if path is None:
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False  # missing / unreadable / not JSON — probe as usual
+    if not isinstance(data, dict) or data.get("terminal") != _osc11_terminal_fingerprint():
+        return False
+    try:
+        recorded = float(data.get("at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= time.time() - recorded < _OSC11_SILENT_TTL_SECONDS
+
+
+def _remember_osc11_terminal_silent() -> None:
+    """Record that this terminal answered nothing, so the next launch skips the wait."""
+    path = _osc11_silent_cache_path()
+    if path is None:
+        return
+    with suppress(Exception):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"terminal": _osc11_terminal_fingerprint(), "at": time.time()}),
+            encoding="utf-8",
+        )
+
 
 def _query_osc11_background() -> str | None:
     """Terminal background via OSC 11 as "#RRGGBB", or None.
@@ -152,6 +208,8 @@ def _query_osc11_background() -> str | None:
         return None
     if any(os.environ.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
         return None
+    if _osc11_terminal_known_silent():
+        return None  # this terminal ignored both queries within the last day: nothing to wait for
     try:
         import select
         import termios
@@ -174,6 +232,7 @@ def _query_osc11_background() -> str | None:
         # Read until the DA1 fence closes; the 1s deadline only covers terminals ignoring DA1.
         deadline = time.monotonic() + 1.0
         buf = b""
+        silent = True  # any byte (or a broken read) clears it; a full timeout leaves it set
         while time.monotonic() < deadline:
             r, _, _ = select.select([fd], [], [], deadline - time.monotonic())
             if not r:
@@ -181,12 +240,19 @@ def _query_osc11_background() -> str | None:
             try:
                 chunk = os.read(fd, 64)
             except OSError:
+                silent = False
                 break
             if not chunk:
+                silent = False
                 break
+            silent = False
             buf += chunk
             if _DA1_REPLY_RE.search(buf):
                 break
+        if silent:
+            # Zero bytes in the whole budget, so the wait cannot become a colour: remember the terminal
+            # and let the next launch skip it instead of paying another ~1 s of startup (#144550).
+            _remember_osc11_terminal_silent()
         # Reply: \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\ — components are 1-4 hex digits.
         m = re.search(rb"rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", buf)
         if not m:
