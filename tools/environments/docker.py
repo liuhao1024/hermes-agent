@@ -326,6 +326,9 @@ def docker_runtime_start_hint(executable: str) -> str:
 #   DAC_OVERRIDE  - root can write to bind-mounted dirs owned by the host user
 #   CHOWN/FOWNER  - package managers need to set file ownership
 # /tmp is size-limited and nosuid but allows exec (pip/npm builds need it).
+# ``exec`` must be given explicitly: Docker's --tmpfs defaults are
+# rw,nosuid,nodev,noexec, and omitting it silently breaks anything that
+# drops a native binary or .node addon into /tmp and dlopens it (#144320).
 # ``--pids-limit``/``--cpus``/``--memory`` live in resource_args instead, gated
 # on ``_cgroup_limits_available`` (unprivileged LXCs lack the controllers).
 _BASE_SECURITY_ARGS = [
@@ -333,7 +336,7 @@ _BASE_SECURITY_ARGS = [
     "--cap-add", "DAC_OVERRIDE",
     "--cap-add", "CHOWN",
     "--cap-add", "FOWNER",
-    "--tmpfs", "/tmp:rw,nosuid,size=512m",  # no-tmp: ok — container tmpfs mount spec
+    "--tmpfs", "/tmp:rw,exec,nosuid,size=512m",  # no-tmp: ok — container tmpfs mount spec
     "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m"]
 
 # Fork-bomb guard, applied only when the pids cgroup controller is available. The pids cgroup counts
