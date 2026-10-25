@@ -217,6 +217,84 @@ describe('durable submit acknowledgement', () => {
     expect(submits[1]).not.toHaveProperty('submission_id')
     expect(submits[1]).toMatchObject({ text: 'hi remote' })
   })
+
+  // #144186: `attachments` is a canonical-admission key; the legacy `hermes serve`
+  // contract is extra="forbid" and refused the whole submit, so an image send to a
+  // remote backend rolled back even though image staging had already queued the bytes.
+  it('a legacy backend receives the image turn without the canonical-only attachments key', async () => {
+    const image = {
+      id: 'img',
+      kind: 'image' as const,
+      label: 'photo.png',
+      path: '/staged/photo.png',
+      mime: 'image/png',
+      attachedSessionId: RUNTIME_SESSION_ID
+    }
+
+    const submits: Array<Record<string, unknown>> = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'prompt.submit') {return {} as never}
+      submits.push(params!)
+
+      if ('submission_id' in params!) {
+        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'), { code: 4000 })
+      }
+
+      return { status: 'streaming' } as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('describe this', { attachments: [image] })).toBe(true)
+    expect(submits).toHaveLength(2)
+    expect(submits[0]).not.toHaveProperty('attachments')
+    expect(submits[1]).not.toHaveProperty('attachments')
+    expect(submits[1]).not.toHaveProperty('submission_id')
+  })
+
+  // A connection that looks canonical (native_dial) but peers with an older legacy
+  // contract still gets its one downgrade retry — the image list must go in the
+  // same strip as submission_id, or the retry dies on the very next 4000.
+  it('the legacy downgrade retry strips the attachments key beside submission_id', async () => {
+    $connection.set({ connectionId: 'local', wsUrl: 'ws://localhost/ws?native_dial=1' } as never)
+
+    const image = {
+      id: 'img',
+      kind: 'image' as const,
+      label: 'photo.png',
+      path: '/staged/photo.png',
+      mime: 'image/png',
+      attachedSessionId: RUNTIME_SESSION_ID
+    }
+
+    const submits: Array<Record<string, unknown>> = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'prompt.submit') {return {} as never}
+      submits.push(params!)
+
+      if ('submission_id' in params! || 'attachments' in params!) {
+        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted, attachments: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'), { code: 4000 })
+      }
+
+      return { status: 'streaming' } as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    try {
+      expect(await handle!.submitText('skewed backend', { attachments: [image] })).toBe(true)
+      expect(submits).toHaveLength(2)
+      expect(submits[1]).not.toHaveProperty('submission_id')
+      expect(submits[1]).not.toHaveProperty('attachments')
+    } finally { $connection.set(null) }
+  })
 })
 
 describe('submit timeout admission fences', () => {

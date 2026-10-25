@@ -1084,7 +1084,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           session_id: targetId,
           text,
           submission_id: submissionId,
-          ...(imageAttachments.length && { attachments: imageAttachments }),
+          // `attachments` is a canonical-admission key only: the legacy `hermes
+          // serve` contract is extra="forbid" and refuses the submit outright
+          // (#144186). Legacy sends staged the images via image.attach_bytes
+          // above, so the list is redundant there anyway.
+          ...(imageAttachments.length && serverQueue && { attachments: imageAttachments }),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.
@@ -1169,7 +1173,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
                   prepared.legacyAttempted = true
                   await writePreparedSubmission(retryKey, prepared)
-                  const { submission_id: _id, ...legacyParams } = params
+                  // Same downgrade strips the canonical-only image list: a
+                  // version-skewed peer refusing both keys must still get a
+                  // sendable identityless retry (#144186).
+                  const { submission_id: _id, attachments: _attachments, ...legacyParams } = params
 
                   const result = await requestGateway<SubmitReceipt>(
                     'prompt.submit',
