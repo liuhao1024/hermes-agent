@@ -293,6 +293,16 @@ class TestWorkerSpawnEnv:
             return FakeProc()
 
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        # Hermetic against a systemd-unit pytest host (#144329): with
+        # INVOCATION_ID set, _restart_safe_worker_argv probes scope topology
+        # through the shared helper and its run-missing guard raises before
+        # the Popen this test captures. Pin the off-systemd in-process
+        # dispatch, as the tests in tests/cron/test_restart_safe_worker.py do.
+        from tools.process_registry import GatewayChildDispatch
+        monkeypatch.setattr(
+            "tools.process_registry.restart_safe_gateway_child_argv",
+            lambda command, **_: GatewayChildDispatch("in_process", command),
+        )
         kb.create_board("spawntest")
 
         task = kb.Task(
