@@ -111,3 +111,60 @@ def retry_network(
                 exc, delay, attempt, _ATTEMPTS,
             )
             (wait or time.sleep)(delay)
+
+
+def _config_flag(text: str, section: str, key: str) -> bool:
+    """Whether top-level ``section:`` sets ``key`` to a truthy scalar.
+
+    PM's bootstrap interpreter runs before any dependency is installed, so no
+    YAML library is importable there and this narrow stdlib reader is all that
+    can see config.yaml. Only the flat ``section:\\n  key: value`` shape is
+    recognized — comments, quoting and the loader's two-space layout are
+    handled; flow mappings and anchors are not. Truthiness mirrors what
+    ruamel's loader hands hermes_cli (``true``/``yes``/``on``/``1``).
+    """
+    seen_section = False
+    child_indent: int | None = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if not seen_section:
+            seen_section = indent == 0 and stripped == f"{section}:"
+            continue
+        if indent == 0:
+            break  # a sibling top-level key ends the section
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue  # deeper nesting belongs to another key
+        name, sep, value = stripped.partition(":")
+        if sep and name.strip() == key:
+            return value.strip().strip("'\"").lower() in ("true", "yes", "on", "1")
+    return False
+
+
+def apply_configured_ipv4_preference() -> None:
+    """Apply the user's ``network.force_ipv4`` to this process, best-effort.
+
+    hermes_cli applies the same flag through ``apply_ipv4_preference`` before
+    its HTTP clients exist, but pm boots first — on a bare bootstrap Python
+    where hermes_cli's YAML loader cannot run — so its downloader silently
+    ignored the setting: every AAAA record of a dead-IPv6 host burned the
+    full 60 s connect timeout, repeated by ``retry_network`` (#144208).
+    An unreadable config or absent flag leaves networking untouched.
+    """
+    try:
+        from hermes_constants import apply_ipv4_preference, get_config_path
+
+        text = get_config_path().read_text(encoding="utf-8-sig")
+    except (ImportError, OSError):
+        return
+    try:
+        force = _config_flag(text, "network", "force_ipv4")
+    except Exception:  # health: allow BLE001 -- best-effort: a malformed flag must never block the bootstrap install
+        return
+    if force:
+        apply_ipv4_preference(force=True)

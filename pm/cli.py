@@ -14,6 +14,7 @@ from pathlib import Path
 from pm import termux_libs
 from pm.install import _facts, _lockfile, _reclaim_set_aside, _store, ensure, stage_only
 from pm.operations import lock_project
+from pm.network import apply_configured_ipv4_preference
 from pm.package import InstallError
 from pm.paths import repo_root
 from pm.registry import get_package, source_install_packages, tool_roots
@@ -910,6 +911,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "lock" and (args.name is None) != (args.version is None):
         lock_parser.error("--bump NAME and VERSION go together; run with neither to relock uv.lock")
+    # pm's downloader dials before hermes_cli ever runs, so this is the first
+    # entry point where network.force_ipv4 can take effect (#144208).
+    apply_configured_ipv4_preference()
     from pm.runtime import is_runtime, run_cli
 
     try:
