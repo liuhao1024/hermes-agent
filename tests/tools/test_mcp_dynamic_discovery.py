@@ -1,5 +1,6 @@
 """Tests for MCP dynamic tool discovery (notifications/tools/list_changed)."""
 
+import anyio
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -180,6 +181,82 @@ class TestRefreshTools:
             assert "mcp__restored_srv__live_tool" in mock_registry.get_all_tool_names()
             assert "mcp__restored_srv__live_tool" in resolve_toolset("restored_srv")
             assert server._registered_tool_names == ["mcp__restored_srv__live_tool"]
+
+    @staticmethod
+    def _connection_closed_error():
+        """A real MCPError shaped like the #144491 traceback (``Connection closed`` from the
+        streamable-HTTP transport). mcp 2.0 renamed ``McpError`` to ``MCPError`` and replaced
+        its ``ErrorData`` positional with flat ``code`` / ``message`` arguments."""
+        exceptions = pytest.importorskip("mcp.shared.exceptions", reason="MCP SDK not installed")
+        try:
+            return exceptions.MCPError(code=-32000, message="Connection closed")
+        except TypeError:
+            from mcp import types
+            return exceptions.McpError(types.ErrorData(code=-32000, message="Connection closed"))
+
+    @pytest.mark.asyncio
+    async def test_refresh_retries_on_swapped_session_after_stale_closure(self, mock_registry):
+        """#144491: a tools/list_changed refresh that fires on a session being torn down (an
+        HTTP reconnect raced the notification) fails with ``Connection closed``. When run()
+        has already swapped in the live session, one retry against it republishes the tools —
+        an unchanged server sends no further list_changed, so skipping would leave the chat
+        without its tools until a later refresh or a gateway restart."""
+        from toolsets import resolve_toolset
+
+        server = MCPServerTask("handover_srv")
+        server._config = {}
+        server._tools = [_make_mcp_tool("old_tool", "")]
+        live_session = SimpleNamespace(
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[_make_mcp_tool("old_tool", "")]))
+        )
+
+        def _swap_then_close(*args, **kwargs):
+            server.session = live_session  # the reconnect's handshake lands mid-refresh, before list_tools resolves
+            raise self._connection_closed_error()
+
+        stale_session = SimpleNamespace(list_tools=AsyncMock(side_effect=_swap_then_close))
+        server.session = stale_session
+        with patch("tools.registry.registry", mock_registry):
+            server._registered_tool_names = _register_server_tools("handover_srv", server, {})
+
+            await server._refresh_tools()  # snapshot = stale session; the call swaps, then fails closed
+
+            assert "mcp__handover_srv__old_tool" in mock_registry.get_all_tool_names()
+            assert "mcp__handover_srv__old_tool" in resolve_toolset("handover_srv")
+            assert server._registered_tool_names == ["mcp__handover_srv__old_tool"]
+
+    @pytest.mark.asyncio
+    async def test_closed_session_refresh_without_swap_skips_like_none(self, mock_registry, caplog):
+        """#144491 companion: when the transport dies with no reconnect (the session reference
+        is unchanged), the refresh is a quiet no-op — no 'dynamic tool refresh failed' crash —
+        and the existing registration stays intact for the reconnect's own discovery."""
+        server = MCPServerTask("dying_srv")
+        server._config = {}
+        server._tools = [_make_mcp_tool("old_tool", "")]
+        dead_session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=anyio.ClosedResourceError())
+        )
+        server.session = dead_session
+        with patch("tools.registry.registry", mock_registry):
+            server._registered_tool_names = _register_server_tools("dying_srv", server, {})
+            server.session = dead_session  # no swap: nothing to retry against
+            with caplog.at_level(logging.ERROR, logger="tools.mcp_tool"):
+                await server._refresh_tools()
+            assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+            assert "mcp__dying_srv__old_tool" in mock_registry.get_all_tool_names()
+            assert server._registered_tool_names == ["mcp__dying_srv__old_tool"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_non_transport_error_still_propagates(self, mock_registry):
+        """Only session-expired failures are absorbed: an implementation error on a live
+        session keeps raising into the scheduled refresh's logger instead of being masked."""
+        server = MCPServerTask("broken_srv")
+        server._config = {}
+        server.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=RuntimeError("protocol broke"))
+        )
+        with pytest.raises(RuntimeError, match="protocol broke"):
+            await server._refresh_tools()
 
 class TestMessageHandler:
     """Tests for MCPServerTask._make_message_handler dispatch."""

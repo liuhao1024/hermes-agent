@@ -7,9 +7,9 @@ import json
 import logging
 import time
 from typing import Iterable, Optional
-from tools.mcp_tool_errors import _is_method_not_found_error, _unwrap_exception_group
+from tools.mcp_tool_errors import _is_method_not_found_error, _is_session_expired_error, _unwrap_exception_group
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
-from tools.mcp_tool_common import _core
+from tools.mcp_tool_common import _core, _exc_str
 from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -148,7 +148,24 @@ class MCPServerHealthMixin:
                 if session is None:
                     logger.debug("MCP server '%s': skipping dynamic tool refresh; session not connected", self.name)
                     return
-                new_mcp_tools = await _core._paginate_full_list(session.list_tools, "tools", self.name)
+                try:
+                    new_mcp_tools = await _core._paginate_full_list(session.list_tools, "tools", self.name)
+                except Exception as exc:
+                    if not _is_session_expired_error(exc):
+                        raise
+                    # The snapshotted session was torn down mid-refresh: a reconnect/hourly
+                    # handover raced the tools/list_changed notification, and the closed
+                    # transport fails every call on the stale reference (#144491). With no
+                    # session swap there is nothing to refresh against — skip like the None
+                    # case above and let the reconnect's own discovery re-list. With a swap,
+                    # one retry against the live session republishes the tools the chat still
+                    # needs (an unchanged server sends no further tools/list_changed); a second
+                    # failure propagates to the scheduled refresh's logger instead of masking it.
+                    if self.session is session or self.session is None:
+                        logger.debug("MCP server '%s': skipping dynamic tool refresh; session closed mid-refresh (%s)",
+                                     self.name, _exc_str(exc))
+                        return
+                    new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
             # Remove only stale names first — no nuke-and-repave: live turns may hold tool-call
             # IDs pointing at existing handlers; in-place replacement avoids "not connected" races.
             self._deregister_owned(old_tool_names - {mcp_prefixed_tool_name(self.name, tool.name) for tool in new_mcp_tools})
