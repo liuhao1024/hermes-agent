@@ -86,6 +86,49 @@ _hermes_ensure_own_tab()
 del _hermes_ensure_own_tab
 """
 
+# Prepended to the model's code on the first exec after a long idle gap: the daemon's tab can be
+# gone or recycled into an internal one meanwhile (Chrome tab discarding, #144278), and the exec
+# then fails with a misleading error (e.g. ModuleNotFoundError for a helper import) or silently
+# no-ops. ensure_real_tab() switches back to a real tab and is a no-op on a healthy session.
+_IDLE_STALE_RECOVERY_GAP_S = 30 * 60
+_STALE_TAB_RECOVERY_PREAMBLE = """\
+# hermes: recover the browser session from a stale/internal tab after an idle gap
+try:
+    ensure_real_tab()
+except Exception:
+    pass  # best-effort: worst case is pre-fix behavior
+"""
+# Route key -> last browser_exec dispatch time, for the idle-gap check above.
+_last_exec_at: dict[str, float] = {}
+
+
+def _recover_after_idle(route_key: str, route_started: float) -> bool:
+    """True on the first exec after a long idle gap (a first-ever call is not a recovery)."""
+    last_exec = _last_exec_at.get(route_key)
+    return last_exec is not None and route_started - last_exec > _IDLE_STALE_RECOVERY_GAP_S
+
+
+def _exec_preambles(session: str, private_browser: Any, recover_after_idle: bool) -> str:
+    """Code prepended to the model's exec code: the own-tab pin for named sessions on a SHARED
+    browser, else the stale-tab recovery on the first exec after a long idle gap. Mutually
+    exclusive: the own-tab preamble lands the daemon on a fresh about:blank tab, which
+    ensure_real_tab() counts as internal and would immediately abandon."""
+    if session and not private_browser:
+        return _OWN_TAB_PREAMBLE
+    return _STALE_TAB_RECOVERY_PREAMBLE if recover_after_idle else ""
+
+
+def _attach_stale_session_hint(result: dict) -> None:
+    """A non-zero exit right after an idle gap usually means a stale session — teach the recovery
+    instead of letting the misleading error (e.g. ModuleNotFoundError for a helper import) stand."""
+    if result.get("exit_code") != 0:
+        result["stale_session_hint"] = (
+            "If this call ran after an idle gap and navigation silently failed (or the error is an "
+            "unexpected ModuleNotFoundError), the browser session went stale: call ensure_real_tab() "
+            "first and retry. The helpers (new_tab, goto_url, js, page_info, …) are pre-imported — "
+            "there is no browser_use_helpers module to import them from."
+        )
+
 _DEFAULT_TIMEOUT_S = 300
 _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 1800
@@ -703,10 +746,13 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
                               "dashes, or underscores (e.g. 'r7k2').")
         env["BU_NAME"] = session
+    route_started = time.time()
+    recover_after_idle = _recover_after_idle(route_key, route_started)
     env, route_err, local_sidecar, generation = _route_exec_current(
         env, session, task_id, bool(local), local_sidecar, route_key)
     if route_err:
         return tool_error(route_err)
+    _last_exec_at[route_key] = route_started  # a failed route leaves the idle clock running
     if local_sidecar:
         env["BU_NAME"] = _sidecar_daemon_name(session)
     _exec_route_is_sidecar[route_key] = local_sidecar
@@ -717,8 +763,9 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
     # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
-    if session and not private_browser:
-        code = _OWN_TAB_PREAMBLE + code
+    preamble = _exec_preambles(session, private_browser, recover_after_idle)
+    if preamble:
+        code = preamble + code
 
     workspace = _workspace_dir(task_id)
     if workspace:
@@ -767,6 +814,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         "exit_code": proc.returncode,
         "output": redact_sensitive_text(proc.stdout, force=True),
     }
+    _attach_stale_session_hint(result)
     if workspace:
         result["workspace"] = workspace
     if session:

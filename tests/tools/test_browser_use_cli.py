@@ -578,6 +578,74 @@ class TestOwnTabPreamble:
         ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
 
 
+class TestIdleStaleRecovery:
+    """After a long idle gap the harness daemon's tab can be gone or recycled into an internal one
+    (Chrome tab discarding), so the first exec after the gap fails with a misleading error (#144278).
+    The stale-recovery preamble runs ensure_real_tab() once on that first call — a no-op on a healthy
+    session. Shared named sessions re-pin via the own-tab preamble instead and must not get it."""
+
+    def _run(self, tmp_path, monkeypatch, *, session="", shared_cdp="", last_exec=None):
+        monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override", lambda: shared_cdp)
+        monkeypatch.setattr(bs_cloud, "get_cloud_provider", lambda: None)
+        monkeypatch.setattr(bu_cli, "_last_exec_at", {})
+        if last_exec is not None:
+            bu_cli._last_exec_at[bu_cli._backend_cache_key(None, session)] = last_exec
+        cli = _fake_cli(tmp_path, "cat\n")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        return json.loads(bu_cli.browser_exec("print('payload')", session=session))
+
+    def test_first_call_after_idle_gap_gets_recovery(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, last_exec=time.time() - 3600)
+        assert result["success"] is True
+        assert "ensure_real_tab()" in result["output"]
+        assert result["output"].index("ensure_real_tab()") < result["output"].index("print('payload')")
+
+    def test_active_session_gets_no_recovery(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, last_exec=time.time() - 10)
+        assert result["success"] is True
+        assert "ensure_real_tab()" not in result["output"]
+
+    def test_first_ever_call_gets_no_recovery(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch)
+        assert result["success"] is True
+        assert "ensure_real_tab()" not in result["output"]
+
+    def test_shared_named_session_gets_own_tab_preamble_only(self, tmp_path, monkeypatch):
+        """The own-tab preamble lands the daemon on a fresh about:blank tab, which counts as internal —
+        ensure_real_tab() would switch away and break the isolation it just established."""
+        result = self._run(tmp_path, monkeypatch, session="r7k2",
+                           shared_cdp="http://127.0.0.1:9222", last_exec=time.time() - 3600)
+        assert result["success"] is True
+        assert "_hermes_ensure_own_tab" in result["output"]
+        assert "ensure_real_tab()" not in result["output"]
+
+    def test_recovery_preamble_is_valid_python(self):
+        import ast
+
+        ast.parse(bu_cli._STALE_TAB_RECOVERY_PREAMBLE)
+        ast.parse(bu_cli._STALE_TAB_RECOVERY_PREAMBLE + "print('x')")
+
+    def test_failure_result_carries_stale_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override", lambda: "")
+        monkeypatch.setattr(bs_cloud, "get_cloud_provider", lambda: None)
+        monkeypatch.setattr(bu_cli, "_last_exec_at", {})
+        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "boom" >&2\nexit 3\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        result = json.loads(bu_cli.browser_exec("print(1)"))
+        assert result["success"] is False
+        assert "ensure_real_tab()" in result.get("stale_session_hint", "")
+
+    def test_success_result_has_no_stale_hint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override", lambda: "")
+        monkeypatch.setattr(bs_cloud, "get_cloud_provider", lambda: None)
+        monkeypatch.setattr(bu_cli, "_last_exec_at", {})
+        cli = _fake_cli(tmp_path, "cat > /dev/null\necho ok\n")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        result = json.loads(bu_cli.browser_exec("print(1)"))
+        assert result["success"] is True
+        assert "stale_session_hint" not in result
+
+
 class TestProviderPickerIntegration:
     """The `hermes tools` Browser Automation picker rows."""
 
