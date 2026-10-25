@@ -428,7 +428,16 @@ class ProviderProfile:
 
         try:
             with open_credentialed_url(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
+                raw = resp.read()
+                # Profiles that forward Accept-Encoding: gzip (via
+                # default_headers) get a gzipped body back — urllib never
+                # decompresses, and the UnicodeDecodeError below would swallow
+                # the live catalog into the static fallback (#144328).
+                if (resp.headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+                    import gzip
+
+                    raw = gzip.decompress(raw)
+                data = json.loads(raw.decode())
             items = data if isinstance(data, list) else data.get("data", [])
             from hermes_cli.chat_catalog import chat_catalog_ids
 
