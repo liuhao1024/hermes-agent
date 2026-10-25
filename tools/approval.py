@@ -666,7 +666,11 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
             advice="Find an alternative approach that avoids this command.")}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
-    if is_dangerous and not _is_permanently_approved(pattern_key):
+    # No permanent-allowlist exemption here: a deny mode is the operator's "no dangerous
+    # command without a human in the loop" contract for this context, and an interactive
+    # "Always Allow" click (whose consent was "this command, now, with me watching") must
+    # not silently rewrite it (#144434).
+    if is_dangerous:
         result = block(f"Command flagged as dangerous ({description})")
         if ctx.name == "single_query":
             result.update(pattern_key=pattern_key, description=description)
@@ -1169,17 +1173,19 @@ def check_all_command_guards(command: str, env_type: str,
     approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
-    if _command_matches_permanent_allowlist(command):
-        return _approved()
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
-    # Outside CLI/gateway/ask flows we never block on approvals: each
-    # unattended context applies its configured deny/approve mode, else allow.
+    # Unattended deny resolves BEFORE the permanent allowlist: an interactive "Always Allow"
+    # click must not exempt the same command class from a deny contract the operator set for
+    # unattended runs (cron_mode / single_query_mode / unattended_mode) — #144434. The
+    # allowlist keeps its veto only where a human is present to have granted it.
     if not is_cli and not is_gateway and not is_ask:
         for ctx in _unattended_contexts():
             result = _unattended_deny(command, ctx)
             if result is not None:
                 return result
+        return _approved()
+    if _command_matches_permanent_allowlist(command):
         return _approved()
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)

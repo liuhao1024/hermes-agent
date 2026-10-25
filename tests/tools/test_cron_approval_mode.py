@@ -216,8 +216,10 @@ class TestCronDenyModeAllGuards:
             result = check_all_command_guards("echo hello", "local")
             assert result["approved"]
 
-    def test_permanent_pattern_key_allows_matching_command_in_cron_deny(self, monkeypatch):
-        """A canonical dangerous-pattern key in command_allowlist applies in unattended mode."""
+    def test_permanent_pattern_key_does_not_veto_cron_deny(self, monkeypatch):
+        """A permanent command_allowlist entry (an interactive Always Allow click) does not
+        exempt the command from cron deny: the unattended deny resolves before the
+        allowlist, so the operator's no-human-no-dangerous-commands contract holds (#144434)."""
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
         monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
@@ -229,7 +231,7 @@ class TestCronDenyModeAllGuards:
         with mock_patch("tools.approval_context._get_cron_approval_mode", return_value="deny"):
             result = check_all_command_guards("python3 - <<'PY'\nprint('ok')\nPY", "local")
 
-        assert result["approved"] is True
+        assert result["approved"] is False
 
     def test_combined_guard_approve_mode(self, monkeypatch):
         monkeypatch.setenv("HERMES_CRON_SESSION", "1")
