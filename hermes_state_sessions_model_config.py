@@ -9,6 +9,16 @@ from typing import Any, Callable, Optional
 from hermes_state_common import _sql_json_extract
 
 
+def _parse_model_config(raw: Any) -> dict[str, Any]:
+    """Tolerant ``model_config`` decode: JSON text or dict -> dict copy; anything else -> {}."""
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def update_conversation_model_config_value(db, session_id: str, key: str,
                                            update: Callable[[Any], Any]) -> Optional[str]:
     """Read a conversation-wide ``key`` at *session_id*'s compression tip and write ``update(value)``
@@ -16,7 +26,6 @@ def update_conversation_model_config_value(db, session_id: str, key: str,
     copy, and a rotation cannot publish between finding the tip and writing it (the child would keep
     the old copy). ``update`` may run more than once (lock retry) and must be pure; returning None
     removes the key. Returns the id written, None when the row does not exist."""
-    from hermes_state_sessions import _parse_model_config
 
     def _do(conn) -> Optional[str]:
         tip = db._compression_tip_on(conn, session_id)

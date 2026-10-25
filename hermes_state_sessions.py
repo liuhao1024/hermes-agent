@@ -24,6 +24,7 @@ from hermes_state_common import (
     _source_match_clause, emit_session_deleted, launch_stub_filter_sql,
 )
 from hermes_state_compression import _CHAIN_CAP, _UNSET_CREATED_SQL
+from hermes_state_sessions_model_config import _parse_model_config
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -70,16 +71,6 @@ _LINEAGE_CTE_SQL = """
                 UNION
                 SELECT id FROM descendants
               )"""
-
-
-def _parse_model_config(raw: Any) -> dict[str, Any]:
-    """Tolerant ``model_config`` decode: JSON text or dict -> dict copy; anything else -> {}."""
-    if isinstance(raw, str) and raw.strip():
-        try:
-            raw = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def _cwd_prefix_clause(cwd_prefix: str) -> tuple[str, list[str]]:
@@ -1350,13 +1341,15 @@ class SessionSessionsMixin:
         id_query: str | None = None, search_query: str | None = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str | None = None, include_hidden: bool = False,
         include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
-    ) -> list[dict[str, Any]]:
+        return_recency_count: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
         ``include_pinned`` back-fills pins the page missed, still obeying the other
         filters except archived: a pin is an explicit keep, so a pinned row stamped
         archived must still return. ``local_created_sources`` restricts ``source='local'``
-        rows to those surfaces before LIMIT/OFFSET."""
+        rows to those surfaces before LIMIT/OFFSET. ``return_recency_count`` pairs the rows with
+        the LIMIT/OFFSET window size BEFORE the pinned back-fill — the page size for has_more (#144349)."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
@@ -1436,6 +1429,7 @@ class SessionSessionsMixin:
             """
             params.extend([limit, offset])
         sessions = [self._list_row(row) for row in self._read_all(query, params)]
+        recency_count = len(sessions)
         # Pinned back-fill runs BEFORE compression projection so a back-filled root
         # projects to its tip like any other row. Do not inherit the archived
         # constraint: the sidebar lists with include_archived=False, and a pin
@@ -1473,7 +1467,7 @@ class SessionSessionsMixin:
         # last_read_at is lineage-stamped, so root and tip watermarks agree.
         for s in sessions:
             s["unread"] = self.session_unread(s)
-        return sessions
+        return (sessions, recency_count) if return_recency_count else sessions
 
     def session_lifecycle_statuses(self, session_ids: list[str]) -> dict[str, str]:
         """``{session_id: status}`` from each session's LAST message row (``'empty'`` when none); one
