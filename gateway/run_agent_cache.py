@@ -72,6 +72,29 @@ class GatewayAgentCacheMixin:
             out[f"memory.{key}"] = value
         return out
 
+    @classmethod
+    def _live_file_cache_busting_config(cls) -> dict:
+        """Cache-busting values read from the live config.yaml — the source ``agent_init`` bakes
+        compression / context-length / memory settings from on every build (it re-reads the file),
+        NOT from the frozen policy snapshot the session's ``user_config`` comes from. ``{}`` on any
+        load failure: the session view still participates, matching the pre-fold behavior."""
+        try:
+            from hermes_cli.config import load_config_readonly
+            return cls._extract_cache_busting_config(load_config_readonly())
+        except Exception:  # health: allow BLE001 -- a config-read fault must not fail every turn's signature; degrade to the session view alone
+            return {}
+
+    @classmethod
+    def _signature_cache_busting_keys(cls, user_config: dict | None) -> dict:
+        """Signature input folding BOTH config views: the session's (a snapshot frozen at creation —
+        checkpoints / disabled-toolset settings reach the agent from it) and the live file's.
+        Hashing only the frozen view made a mid-session config.yaml edit a silent no-op for
+        policy-bound sessions (#144615); either view changing now busts the cached agent."""
+        return {
+            "session": cls._extract_cache_busting_config(user_config),
+            "live_file": cls._live_file_cache_busting_config(),
+        }
+
     # Kept for the process lifetime: loading a provider imports its plugin module, and this runs on every inbound message.
     _MEMORY_IDENTITY_PROVIDER_MEMO: dict[str, Any] = {}
 

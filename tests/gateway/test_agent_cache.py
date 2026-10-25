@@ -10,6 +10,7 @@ Verifies that the agent cache correctly:
 """
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -266,6 +267,108 @@ class TestExtractCacheBustingConfig:
         assert self._provider_declared_keys(out) == []
         assert "tools.registry_generation" in out
         assert calls == ([] if provider is None else [("p", False)])
+
+
+class TestSignatureCacheBustingKeys:
+    """#144615: the signature folds the LIVE config.yaml view beside the session's frozen policy
+    snapshot — agent_init bakes compression/context/memory values from the file on every build, so
+    a mid-session config edit must bust a policy-bound session's cached agent even though its
+    frozen snapshot never changes."""
+
+    @staticmethod
+    def _sig(user_config, live_file):
+        from gateway.run import GatewayRunner
+
+        with patch.object(
+            GatewayRunner, "_live_file_cache_busting_config", classmethod(lambda cls: live_file),
+        ):
+            keys = GatewayRunner._signature_cache_busting_keys(user_config)
+        return GatewayRunner._agent_config_signature(
+            "m", {"api_key": "k", "base_url": "u", "provider": "p"}, [], "", cache_keys=keys,
+        )
+
+    def test_live_file_edit_busts_the_frozen_session_view(self):
+        """The bug: a policy-bound session's snapshot carries its pre-edit compression values
+        forever; the folded live-file view is what notices the edit."""
+        frozen = {"compression": {"threshold_tokens": None, "proactive_prune_tokens": 0}}
+        assert self._sig(frozen, {"compression.threshold_tokens": 500_000}) != self._sig(
+            frozen, {"compression.threshold_tokens": 150_000}
+        )
+
+    def test_unchanged_views_keep_the_signature_stable(self):
+        """No churn: identical views must hash identically, or every turn would rebuild."""
+        frozen = {"compression": {"threshold_tokens": 150_000}}
+        live = {"compression.threshold_tokens": 150_000}
+        assert self._sig(frozen, live) == self._sig(frozen, live)
+
+    def test_session_view_change_alone_still_busts(self):
+        """The frozen view keeps participating — checkpoints / disabled-toolset settings ride it."""
+        live = {"compression.threshold_tokens": 150_000}
+        assert self._sig({"checkpoints": {"enabled": True}}, live) != self._sig(
+            {"checkpoints": {"enabled": False}}, live
+        )
+
+    def test_live_file_view_failure_degrades_to_the_session_view(self):
+        """A config-read fault folds an empty live view in (session view alone — pre-fold
+        behavior) instead of failing every turn's signature computation."""
+        from gateway.run import GatewayRunner
+
+        frozen = {"compression": {"threshold_tokens": 150_000}}
+        keys = GatewayRunner._signature_cache_busting_keys(frozen)
+        assert keys["session"] == GatewayRunner._extract_cache_busting_config(frozen)
+        with patch.object(GatewayRunner, "_live_file_cache_busting_config", classmethod(lambda cls: {})):
+            degraded = GatewayRunner._signature_cache_busting_keys(frozen)
+        assert degraded == {"session": keys["session"], "live_file": {}}
+
+    def test_resolve_turn_agent_hashes_both_config_views(self, monkeypatch):
+        """The wiring: _resolve_turn_agent must feed the signature the FOLDED views, not the bare
+        frozen snapshot — hashing only the session view is exactly the gap #144615 survived in."""
+        from gateway.config import Platform
+        from gateway.run import GatewayRunner
+        from gateway.session_execution import GatewaySessionAgentMixin
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._agent_cache = {}
+        runner._agent_cache_lock = None
+        runner._session_db = None
+        runner._apply_fallback_chain_to_agent = MagicMock()
+        runner._refresh_fallback_model = MagicMock(return_value=None)
+
+        mixin = GatewaySessionAgentMixin.__new__(GatewaySessionAgentMixin)
+        mixin._runner = runner
+        mixin._ctx = SimpleNamespace(
+            user_config={"compression": {"threshold_tokens": 150_000}},
+            source=SimpleNamespace(platform=Platform.TELEGRAM, user_id="u1", user_id_alt=None),
+            session_key="telegram:1", session_id="sid",
+            enabled_toolsets=[], disabled_toolsets=None, _interrupt_depth=0,
+            AIAgent=MagicMock(),
+        )
+        captured = {}
+
+        def _fake_lookup(sig, *args):
+            captured["sig"] = sig
+            return GatewaySessionAgentMixin._CachedAgentLookup(agent=MagicMock(), reused=True)
+
+        mixin._lookup_cached_agent = _fake_lookup
+        folded = {"session": {"s": 1}, "live_file": {"f": 2}}
+        seen = {}
+
+        def _fake_keys(user_config):
+            seen["user_config"] = user_config
+            return folded
+
+        monkeypatch.setattr(GatewayRunner, "_signature_cache_busting_keys", classmethod(_fake_keys))
+        mixin._resolve_turn_agent(
+            {"model": "m", "runtime": {"api_key": "k", "base_url": "u", "provider": "p"}},
+            "telegram", "", 10, None, {},
+        )
+        assert seen["user_config"] == {"compression": {"threshold_tokens": 150_000}}
+        expected = GatewayRunner._agent_config_signature(
+            "m", {"api_key": "k", "base_url": "u", "provider": "p"}, [], "", cache_keys=folded,
+            user_id="u1", user_id_alt=None, skip_context_files=False,
+        )
+        assert captured["sig"] == expected
+
 
 class TestAgentCacheLifecycle:
     """End-to-end cache behavior with real AIAgent construction."""
