@@ -971,6 +971,31 @@ def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _record_auto_loaded_skill_views(
+    loaded_names: list[str], task_id: str | None
+) -> None:
+    """Count each auto-loaded skill as an already-served skill_view: the prompt block
+    carries the full content, so a later identical view would only duplicate it. The
+    re-render here must match the way skill_view serves content (preprocess on) or the
+    digests never line up; any failure just leaves the repeat view full. Best-effort:
+    never blocks session start."""
+    if not task_id or not loaded_names:
+        return
+    try:
+        from tools.skills_tool import skill_view
+        from tools.skills_tool_dedup import record_preloaded_skill_view
+    except Exception:  # health: allow BLE001 -- dedup tooling is optional; session start proceeds without it
+        return
+    for name in dict.fromkeys(loaded_names):
+        try:
+            result = skill_view(name, task_id=task_id)
+            parsed = json.loads(result)
+        except Exception:  # health: allow BLE001 -- one unreadable skill keeps its full view; never block session start
+            continue
+        if isinstance(parsed, dict) and parsed.get("success"):
+            record_preloaded_skill_view(task_id, name, None, parsed, result)
+
+
 def build_auto_load_prompt(
     task_id: str | None = None, user_config: dict | None = None, home_override: Path | None = None,
 ) -> tuple[str, list[str], list[str]]:
@@ -996,6 +1021,7 @@ def build_auto_load_prompt(
                           "the user overrides them.]"),
             task_id, disabled_names=_disabled_skill_names(), disabled_as_missing=True,
         )
+        _record_auto_loaded_skill_views(loaded_names, task_id)
         return "\n\n".join(prompt_parts), loaded_names, missing
     finally:
         if home_token is not None:
