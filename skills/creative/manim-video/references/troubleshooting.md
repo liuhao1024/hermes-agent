@@ -132,4 +132,4 @@ mob.resume_updating()
 2. Isolate the broken scene -- render only that one
 3. Replace `self.play()` with `self.add()` to see final state instantly
 4. Print positions: `print(mob.get_center())`
-5. Clear cache: delete `media/` directory
+5. Bypass and clear the cache: `manim -ql --disable_caching --flush_cache script.py Scene` re-renders without reusing cached animations, then deletes that scene's cached partial movie files for that quality. Do not delete the whole `media/` tree: it also holds rendered videos, stills and manim-voiceover audio.

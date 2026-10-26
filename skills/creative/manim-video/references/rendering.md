@@ -139,7 +139,7 @@ The official `manim-voiceover` plugin integrates TTS directly into scene code, a
 
 ```bash
 pip install "manim-voiceover[elevenlabs]"
-# Or for free/local TTS:
+# Or other remote TTS services (both require network access):
 pip install "manim-voiceover[gtts]"    # Google TTS (free, lower quality)
 pip install "manim-voiceover[azure]"   # Azure Cognitive Services
 ```
