@@ -268,7 +268,10 @@ class _KanbanDispatcher:
                 try:
                     os.environ["HERMES_KANBAN_BOARD"] = slug
                     try:
-                        triage_ids = _decomp.list_triage_ids()
+                        # Unassigned = parked (desktop "unassigned (parked —
+                        # won't run)") — never auto-decompose it; only an
+                        # explicit decompose/specify command may.
+                        triage_ids = _decomp.list_triage_ids(exclude_unassigned=True)
                     except Exception as exc:
                         logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                         triage_ids = []

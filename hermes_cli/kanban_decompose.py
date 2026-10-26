@@ -336,8 +336,17 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+def list_triage_ids(*, tenant: Optional[str] = None, exclude_unassigned: bool = False) -> list[str]:
+    """Return task ids currently in the triage column.
+
+    ``exclude_unassigned=True`` skips parked cards (``assignee IS NULL``): the
+    desktop New-task form promises ``unassigned (parked — won't run)`` by
+    leaving the assignee empty, so the automatic tick must not decompose them.
+    Explicit entry points (``kanban decompose --all``, ``specify --all``) keep
+    enumerating them — an explicit command is the release.
+    """
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
+    if exclude_unassigned:
+        rows = [row for row in rows if row.assignee]
     return [row.id for row in rows]
