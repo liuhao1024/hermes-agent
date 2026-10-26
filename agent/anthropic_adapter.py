@@ -797,10 +797,20 @@ def normalize_stream_usage(message_stream: Any) -> Any:
     return message_stream
 
 
+_STREAM_WORD_RE = re.compile(r"(?<![\w-])stream(?:ing|s)?(?![\w-])")
+
+
+def _mentions_stream_unsupported(err_lower: str) -> bool:
+    """True when the error text rejects *streaming* itself. "stream" as a substring also sits
+    inside "upstream" and "stream-json", so a 400 that merely quotes them ("upstream said: X
+    is not supported", #144896) is a field rejection, not a streaming one."""
+    return bool(_STREAM_WORD_RE.search(err_lower)) and "not supported" in err_lower
+
+
 def _is_stream_unavailable_error(exc: Exception) -> bool:
     """True when an Anthropic stream call should fall back to create()."""
     err_lower = str(exc).lower()
-    if "stream" in err_lower and "not supported" in err_lower:
+    if _mentions_stream_unsupported(err_lower):
         return True
     if "unexpected event order" in err_lower:
         return True

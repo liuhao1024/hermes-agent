@@ -3534,11 +3534,15 @@ class _StreamingCall(StreamingWaitMonitor):
                 "⚠️ Provider stream returned an empty keepalive frame — retrying this turn "
                 "without streaming (streaming stays off for this session).")
             return
-        from agent.anthropic_adapter import _is_stream_unavailable_error
+        from agent.anthropic_adapter import (
+            _is_stream_unavailable_error,
+            _mentions_stream_unsupported,
+        )
+
         if not _is_stream_unavailable_error(e):
             return
         _err_lower = str(e).lower()
-        _is_stream_unsupported = "stream" in _err_lower and "not supported" in _err_lower
+        _is_stream_unsupported = _mentions_stream_unsupported(_err_lower)
         if "unexpected event order" in _err_lower and not _is_stream_unsupported:
             # Custom anthropic_messages SSE out of order (#72833): re-streaming repeats it.
             # Bedrock keeps turn_recovery's sticky Converse switch instead.
