@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -72,7 +73,22 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 
   // Re-assert ?profile= after navigations that dropped it (bare nav links)
   // and after state-only changes. No-ops when already in sync.
+  //
+  // The very first run is skipped: an initial deep link to `/` mounts the
+  // route tree's own redirect (RootRedirect's <Navigate to="/sessions">) in
+  // the same commit, and child effects run first — its navigation is already
+  // queued when this effect fires with the ORIGINAL location in scope. A
+  // setSearchParams here would rewrite that in-flight redirect back onto `/`,
+  // the <Navigate> effect never re-runs, and the dashboard parks on a blank
+  // `/` until a manual reload (which now carries ?profile= and syncs on the
+  // first render). Once the redirect lands, the deps below re-run and assert
+  // the param against the settled path.
+  const urlSyncMounted = useRef(false);
   useEffect(() => {
+    if (!urlSyncMounted.current) {
+      urlSyncMounted.current = true;
+      return;
+    }
     if ((profile || "") === (urlProfile ?? "")) return;
     setSearchParams(
       (prev) => {

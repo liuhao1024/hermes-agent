@@ -8,6 +8,9 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   MemoryRouter,
+  Navigate,
+  Route,
+  Routes,
   useLocation,
   useNavigate,
   type NavigateFunction,
@@ -52,6 +55,16 @@ function seen() {
   return { profile: probe.dataset.profile, url: probe.dataset.url };
 }
 
+const locationRef: { url?: string } = {};
+
+function LocationProbe() {
+  const { pathname, search } = useLocation();
+  useEffect(() => {
+    locationRef.url = pathname + search;
+  }, [pathname, search]);
+  return null;
+}
+
 async function mount(initialEntry: string) {
   container = document.createElement("div");
   document.body.append(container);
@@ -61,6 +74,29 @@ async function mount(initialEntry: string) {
       <MemoryRouter initialEntries={[initialEntry]}>
         <ProfileProvider>
           <Probe />
+        </ProfileProvider>
+      </MemoryRouter>,
+    ),
+  );
+}
+
+// Mirrors the app shell: `/` is RootRedirect's <Navigate to="/sessions">,
+// mounted under the same ProfileProvider that re-asserts ?profile=. A
+// location probe outside <Routes> always renders so the test can see where
+// the router actually parked, and the probe inside asserts the landing page.
+async function mountWithRootRedirect(initialEntry: string) {
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root.render(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <ProfileProvider>
+          <LocationProbe />
+          <Routes>
+            <Route path="/" element={<Navigate to="/sessions" replace />} />
+            <Route path="*" element={<Probe />} />
+          </Routes>
         </ProfileProvider>
       </MemoryRouter>,
     ),
@@ -90,5 +126,23 @@ describe("ProfileProvider URL sync", () => {
 
     await act(async () => container.querySelector("button")!.click());
     expect(seen()).toEqual({ profile: "gamma", url: "/config?profile=gamma" });
+  });
+
+  it("does not overwrite the landing redirect when the initial URL has no ?profile=", async () => {
+    // First visit to `/` (server-injected scope, empty query): the route
+    // redirect to /sessions and the profile re-assert run in the same commit.
+    // The re-assert must not send the browser back to `/` — that parks the
+    // dashboard on a blank page until a manual reload adds the param.
+    (
+      window as unknown as { __HERMES_DASHBOARD_PROFILE__?: string }
+    ).__HERMES_DASHBOARD_PROFILE__ = "default";
+    try {
+      await mountWithRootRedirect("/");
+      expect(locationRef.url).toBe("/sessions?profile=default");
+      expect(container.querySelector("button")).not.toBeNull();
+    } finally {
+      delete (window as unknown as { __HERMES_DASHBOARD_PROFILE__?: string })
+        .__HERMES_DASHBOARD_PROFILE__;
+    }
   });
 });
