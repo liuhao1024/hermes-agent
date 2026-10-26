@@ -274,7 +274,9 @@ class ManagedWorker:
             stopper.cancel()
             arrived.cancel()
 
-    def interrupt(self):
+    def interrupt(self, text=None):
+        # Busy-path callers hand over the would-be follow-up text; the managed control protocol
+        # has no pending-text channel, so the stop alone is the contract here.
         self.control({'type': 'stop'})
 
     def respond(self, kind, prompt_id, value):
