@@ -132,7 +132,11 @@ def _split_tree_text(full_text: str) -> tuple[str, str]:
     return summary, tree
 
 _MODIFIER_NAMES = frozenset({"cmd", "command", "shift", "option", "alt", "ctrl", "control", "fn"})
-_KEY_ALIASES = {"command": "cmd", "alt": "option", "control": "ctrl"}
+# ``alt`` must reach the driver verbatim: every cua-driver platform accepts it (macOS maps alt and
+# option to the same flag), but only macOS knows ``option`` — the Linux/Windows hotkeys treat it as
+# a non-modifier and silently drop it, so "ctrl+alt+n" arrived as Ctrl+N (#145174). An explicit
+# ``option`` from the model is still passed through for macOS-only flows.
+_KEY_ALIASES = {"command": "cmd", "control": "ctrl"}
 
 def _parse_key_combo(keys: str) -> tuple[Optional[str], list[str]]:
     """Parse 'cmd+s' / 'ctrl-alt-t' into (key, modifiers); last non-modifier wins."""
