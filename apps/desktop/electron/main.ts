@@ -6155,12 +6155,17 @@ function sendBackendExit(payload) {
   webContents.send('hermes:backend-exit', payload)
 }
 
-function sendClosePreviewRequested() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+// Deliver a close-active-tab request to `window` — the window the gesture was
+// pressed in. Callers without a per-window context (deep links) pass nothing
+// and keep addressing the primary window (#145198).
+function sendClosePreviewRequested(window?) {
+  const target = window && !window.isDestroyed() ? window : mainWindow
+
+  if (!target || target.isDestroyed()) {
     return
   }
 
-  const { webContents } = mainWindow
+  const { webContents } = target
 
   if (!webContents || webContents.isDestroyed()) {
     return
@@ -6174,18 +6179,22 @@ function sendClosePreviewRequested() {
  * pane. `reload` also has an app-level fallback (reload the window); `back` and
  * `forward` mean nothing outside the browser, so the renderer just ignores them.
  */
-function sendPreviewNavCommand(command: 'back' | 'forward' | 'reload') {
+function sendPreviewNavCommand(command: 'back' | 'forward' | 'reload', window?) {
   // The user is inside the page itself — main is the only party that can see
   // that, so act here and never round-trip.
   if (commandFocusedGuest(command, electronWebContents.getFocusedWebContents())) {
     return
   }
 
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  // Route to the window the gesture came from; only gesture sources without a
+  // window of their own (deep links) fall back to the primary window (#145198).
+  const target = window && !window.isDestroyed() ? window : mainWindow
+
+  if (!target || target.isDestroyed()) {
     return
   }
 
-  const { webContents } = mainWindow
+  const { webContents } = target
 
   if (!webContents || webContents.isDestroyed()) {
     return
@@ -6208,7 +6217,7 @@ function installBrowserNavGestures(window) {
     if (direction === 'left' || direction === 'right') {
       // Swipe LEFT moves the page left, revealing what's behind it — that's
       // back. Matches Safari, Chrome, and Finder.
-      sendPreviewNavCommand(direction === 'left' ? 'back' : 'forward')
+      sendPreviewNavCommand(direction === 'left' ? 'back' : 'forward', window)
     }
   })
 
@@ -6220,7 +6229,7 @@ function installBrowserNavGestures(window) {
     // Claim it either way: unhandled, Chromium walks the HOST document's
     // history, which would navigate the app shell itself.
     event.preventDefault()
-    sendPreviewNavCommand(command === 'browser-backward' ? 'back' : 'forward')
+    sendPreviewNavCommand(command === 'browser-backward' ? 'back' : 'forward', window)
   })
 }
 
@@ -6424,7 +6433,7 @@ function buildApplicationMenu() {
             // `before-input-event` handler below intercept ⌘W and route it to the
             // renderer's close-active-tab. Clicking the item still closes the tab
             // (or window) via the same request.
-            click: () => sendClosePreviewRequested(),
+            click: () => sendClosePreviewRequested(BrowserWindow.getFocusedWindow()),
             label: 'Close'
           }
         : { role: 'quit' }
@@ -6469,7 +6478,7 @@ function buildApplicationMenu() {
       // No accelerator: ⌘R is claimed in `installPreviewShortcut`, which works
       // on every platform (this menu exists only on macOS). Declaring it here
       // too would fire the item and the input hook for one keypress.
-      { click: () => sendPreviewNavCommand('reload'), label: 'Reload' },
+      { click: () => sendPreviewNavCommand('reload', BrowserWindow.getFocusedWindow()), label: 'Reload' },
       { role: 'forceReload' },
       {
         label: 'Toggle Developer Tools',
@@ -6616,7 +6625,7 @@ function installPreviewShortcut(window) {
         return
       }
 
-      sendClosePreviewRequested()
+      sendClosePreviewRequested(window)
 
       return
     }
@@ -6628,7 +6637,7 @@ function installPreviewShortcut(window) {
     // the unconditional whole-window escape hatch.
     if (action === 'reload') {
       event.preventDefault()
-      sendPreviewNavCommand('reload')
+      sendPreviewNavCommand('reload', window)
     }
   })
 }
@@ -12256,7 +12265,7 @@ function installPreviewGuestEscapeHatch() {
 
         case 'close-preview': {
           event.preventDefault()
-          sendClosePreviewRequested()
+          sendClosePreviewRequested(owner)
 
           break
         }
