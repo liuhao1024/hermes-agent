@@ -21,6 +21,7 @@ Optional ``--header KEY:VALUE`` flags pass HTTP headers (repeatable).
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
 import urllib.error
@@ -76,18 +77,26 @@ def main() -> int:
                    help="HTTP timeout in seconds (default: 20)")
     args = p.parse_args()
 
-    req = urllib.request.Request(args.url, headers={"User-Agent": "Hermes-Watcher/1.0"})
-    for k, v in args.header:
-        req.add_header(k, v)
-
     try:
+        req = urllib.request.Request(args.url, headers={"User-Agent": "Hermes-Watcher/1.0"})
+        for k, v in args.header:
+            req.add_header(k, v)
         with urllib.request.urlopen(req, timeout=args.timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
-        print(f"watch_http_json: HTTP {e.code} from {args.url}", file=sys.stderr)
+        # Close explicitly: implicit cleanup may warn with the sensitive reason.
+        e.close()
+        print(f"watch_http_json: HTTP {e.code}", file=sys.stderr)
         return 2
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        print(f"watch_http_json: network error: {e}", file=sys.stderr)
+        # Exception text/reasons can contain URLs, headers, or response data.
+        category = type(e).__name__
+        if isinstance(e, urllib.error.URLError):
+            category += f" ({type(e.reason).__name__})"
+        print(f"watch_http_json: network error: {category}", file=sys.stderr)
+        return 2
+    except (ValueError, http.client.HTTPException) as e:
+        print(f"watch_http_json: request error: {type(e).__name__}", file=sys.stderr)
         return 2
 
     try:
