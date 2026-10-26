@@ -225,3 +225,154 @@ class TestRekeyProfileState:
             "SELECT obligation_id, session_key FROM delivery_obligations")}
         assert keys == {"ob_gone": "agent:newname:feishu:dm:chatA",
                         "ob_keep": "agent:keepme:feishu:dm:chatB"}
+
+
+class TestRekeyStateMetaReceipts:
+    """``state_meta`` receipts carry the profile's absolute home (#145200): left stale after a
+    rename, every restore of the renamed profile's own Bot Chat refuses ``profile_mismatch``
+    (``owned_receipt`` compares ``receipt['profile_id']`` against the authority's home), and a
+    local receipt cannot simply be re-pathed because the session id is *derived* from the home."""
+
+    @staticmethod
+    def _home(name, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_constants import get_default_hermes_root
+        return str(get_default_hermes_root() / "profiles" / name)
+
+    def _local_receipt(self, profile_home, session_id="local-abc", route=None):
+        route = route or f"agent:oldname:local:dm:{session_id}"
+        return {
+            "profile_id": profile_home, "principal_id": "user1", "request_id": "req-1",
+            "session_id": session_id, "route": route,
+            "entry": {"session_key": route, "session_id": session_id,
+                      "created_at": "2026-10-26T00:00:00+00:00",
+                      "origin": {"platform": "local", "chat_id": session_id,
+                                 "user_id": "user1", "chat_type": "dm", "profile": "oldname"}},
+            "policy": {"source": "gui", "cwd": "/tmp", "request_json": "{}"},
+        }
+
+    def _write_meta(self, db, key, value):
+        db._write_sql("INSERT INTO state_meta(key, value) VALUES (?, ?)",
+                      (key, json.dumps(value)))
+
+    def _read_meta(self, db, key):
+        row = db._read_one("SELECT value FROM state_meta WHERE key = ?", (key,))
+        return None if row is None else json.loads(row["value"])
+
+    def test_rekeys_local_creation_receipt_and_legacy_binds_it(self, db, tmp_path, monkeypatch):
+        old_home = self._home("oldname", monkeypatch, tmp_path)
+        new_home = self._home("newname", monkeypatch, tmp_path)
+        sid = "local-abc"
+        db.create_session(
+            sid, "local", session_key="agent:oldname:local:dm:local-abc",
+            profile_name="oldname", chat_id=sid, user_id="user1", chat_type="dm")
+        self._write_meta(db, "gateway.local_policy.v1:" + sid, self._local_receipt(old_home))
+        # Another profile's receipt must be left untouched.
+        self._write_meta(db, "gateway.local_policy.v1:local-keep", self._local_receipt(
+            "/elsewhere/profiles/keepme", session_id="local-keep",
+            route="agent:keepme:local:dm:local-keep"))
+
+        counts = db.rekey_profile_state("oldname", "newname")
+
+        assert counts["local_receipts"] == 1
+        row = self._read_meta(db, "gateway.local_policy.v1:" + sid)
+        assert row["profile_id"] == new_home
+        assert row["route"] == "agent:newname:local:dm:local-abc"
+        assert row["entry"]["session_key"] == "agent:newname:local:dm:local-abc"
+        assert row["entry"]["origin"]["profile"] == "newname"
+        # The id derivation broke with the new home, so the receipt is now legacy-bound to its
+        # transcript — the exact shape adoption writes, which the restore checks read without
+        # re-deriving the id.
+        assert row["legacy_session_id"] == sid
+        assert self._read_meta(db, "gateway.local_legacy.v1:" + sid) == {
+            "session_id": sid, "profile_id": new_home,
+            "principal_id": "user1", "legacy_session_id": sid}
+        # The sessions row the entry check compares against moved namespaces with the receipt.
+        assert db._read_one("SELECT session_key FROM sessions WHERE id = ?", (sid,))[
+            "session_key"] == "agent:newname:local:dm:local-abc"
+        # Bystander receipt untouched.
+        kept = self._read_meta(db, "gateway.local_policy.v1:local-keep")
+        assert kept["profile_id"] == "/elsewhere/profiles/keepme"
+        assert "legacy_session_id" not in kept
+
+    def test_rekeys_adopted_legacy_receipt_and_row_together(self, db, tmp_path, monkeypatch):
+        old_home = self._home("oldname", monkeypatch, tmp_path)
+        new_home = self._home("newname", monkeypatch, tmp_path)
+        sid = "old-transcript-7"
+        adopted = self._local_receipt(old_home, session_id=sid,
+                                      route="agent:oldname:local:dm:" + sid)
+        adopted["legacy_session_id"] = sid
+        self._write_meta(db, "gateway.local_policy.v1:" + sid, adopted)
+        self._write_meta(db, "gateway.local_legacy.v1:" + sid, {
+            "session_id": sid, "profile_id": old_home,
+            "principal_id": "user1", "legacy_session_id": sid})
+
+        counts = db.rekey_profile_state("oldname", "newname")
+
+        assert counts["local_receipts"] == 1
+        assert counts["local_legacy"] == 1
+        row = self._read_meta(db, "gateway.local_policy.v1:" + sid)
+        assert row["profile_id"] == new_home
+        assert row["legacy_session_id"] == sid
+        assert self._read_meta(db, "gateway.local_legacy.v1:" + sid)["profile_id"] == new_home
+
+    def test_receipt_with_conflicting_legacy_row_keeps_its_old_refusal(self, db, tmp_path, monkeypatch):
+        """A legacy row that disagrees with its receipt is a corrupted pair no rewrite can
+        legitimize: legacy-bound reads compare all four fields, so re-pathing the receipt would
+        trade ``profile_mismatch`` for ``storage_unavailable``. Leave the pair exactly as it was."""
+        old_home = self._home("oldname", monkeypatch, tmp_path)
+        sid = "local-corrupt"
+        self._write_meta(db, "gateway.local_policy.v1:" + sid, self._local_receipt(
+            old_home, session_id=sid, route="agent:oldname:local:dm:" + sid))
+        self._write_meta(db, "gateway.local_legacy.v1:" + sid, {
+            "session_id": sid, "profile_id": old_home,
+            "principal_id": "someone-else", "legacy_session_id": sid})
+
+        counts = db.rekey_profile_state("oldname", "newname")
+
+        row = self._read_meta(db, "gateway.local_policy.v1:" + sid)
+        assert row["profile_id"] == old_home
+        assert "legacy_session_id" not in row
+        assert counts["local_receipts"] == 0
+
+    def test_rekeys_api_session_binding(self, db, tmp_path, monkeypatch):
+        old_home = self._home("oldname", monkeypatch, tmp_path)
+        new_home = self._home("newname", monkeypatch, tmp_path)
+        self._write_meta(db, "gateway.api.binding.v1.api-sess-1", {
+            "profile_id": old_home, "session_id": "api-sess-1",
+            "route": "agent:oldname:api:dm:api-sess-1",
+            "entry": {"session_key": "agent:oldname:api:dm:api-sess-1",
+                      "session_id": "api-sess-1",
+                      "origin": {"platform": "api_server", "chat_id": "api-sess-1",
+                                 "user_id": "api", "chat_type": "dm",
+                                 "profile": "oldname"}}})
+        # A declared-conversation row only names the session id; no profile identity to move.
+        self._write_meta(db, "gateway.api.conversation.v1.declared-1", "api-sess-1")
+
+        counts = db.rekey_profile_state("oldname", "newname")
+
+        assert counts["api_bindings"] == 1
+        row = self._read_meta(db, "gateway.api.binding.v1.api-sess-1")
+        assert row["profile_id"] == new_home
+        assert row["route"] == "agent:newname:api:dm:api-sess-1"
+        assert row["entry"]["session_key"] == "agent:newname:api:dm:api-sess-1"
+        assert row["entry"]["origin"]["profile"] == "newname"
+        assert self._read_meta(db, "gateway.api.conversation.v1.declared-1") == "api-sess-1"
+
+    def test_rekeys_hosted_transport_selector_and_target_home(self, db, tmp_path, monkeypatch):
+        old_home = self._home("oldname", monkeypatch, tmp_path)
+        new_home = self._home("newname", monkeypatch, tmp_path)
+        self._write_meta(db, "gateway.hosted.transport.v1:room-sess-1", {
+            "source_home": "/elsewhere/profiles/initiator",
+            "selector": {"room_id": "room-1", "member_id": "member-9", "profile": "oldname"},
+            "target_home": old_home})
+
+        counts = db.rekey_profile_state("oldname", "newname")
+
+        assert counts["hosted_transport"] == 1
+        binding = self._read_meta(db, "gateway.hosted.transport.v1:room-sess-1")
+        assert binding["target_home"] == new_home
+        assert binding["selector"]["profile"] == "newname"
+        # Cross-profile reference: the source home belongs to another store's rekey.
+        assert binding["source_home"] == "/elsewhere/profiles/initiator"
+

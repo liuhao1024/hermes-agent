@@ -671,7 +671,17 @@ class SessionGatewayMixin:
         self._write_sql("DELETE FROM gateway_hygiene_state WHERE session_key = ?", (session_key,))
 
     def rekey_profile_state(self, old_name: str, new_name: str) -> dict[str, int]:
-        """Atomically rewrite exact profile identity in this state database."""
+        """Atomically rewrite exact profile identity in this state database.
+
+        Beyond the row tables, ``state_meta`` receipts carry absolute profile identity the row
+        rekeys above never touch (#145200): local creation receipts (``gateway.local_policy.v1:*``,
+        ``profile_id`` compared against the authority's home at every restore), their legacy
+        bindings, hosted-room transport selectors (``gateway.hosted.transport.v1:*``) and API
+        session bindings all refuse with ``profile_mismatch`` after a rename. A local receipt
+        cannot simply be re-pathed — the session id is *derived* from the profile home — so one
+        whose derivation breaks becomes a legacy-bound receipt (``legacy_session_id`` plus the
+        matching legacy row, the exact shape adoption writes), which the restore checks read
+        without re-deriving the id."""
         old, new = (old_name or "").strip(), (new_name or "").strip()
         counts: dict[str, int] = {}
         if not old or not new or old == new:
@@ -775,6 +785,134 @@ class SessionGatewayMixin:
                     "UPDATE gateway_routing SET session_key = ?, entry_json = ? WHERE rowid = ?",
                     (new_session_key, new_json, rowid))
             counts["gateway_routing"] = len(routing)
+
+            if "state_meta" not in existing:
+                return
+            from hermes_state_local import POLICY_PREFIX, API_BINDING_PREFIX, HOSTED_BINDING_PREFIX
+            from hermes_state_local_migration import LEGACY_PREFIX
+            from hermes_state_keys import local_identity
+            from hermes_constants import get_default_hermes_root
+            profiles_root = get_default_hermes_root() / "profiles"
+            home_map = {str(profiles_root / old): str(profiles_root / new)}
+            try:
+                home_map[str((profiles_root / old).resolve())] = str((profiles_root / new).resolve())
+            except OSError:
+                pass
+
+            def _repath_route(entry):
+                if isinstance(entry, dict):
+                    if isinstance(entry.get("session_key"), str) and entry["session_key"].startswith(old_ns):
+                        entry["session_key"] = new_ns + entry["session_key"][ns_len:]
+                    origin = entry.get("origin")
+                    if isinstance(origin, dict) and origin.get("profile") == old:
+                        origin["profile"] = new
+
+            # Local creation receipts, legacy bindings, hosted-room selectors and API bindings
+            # each match the OLD identity by VALUE (absolute home path, or the bare profile name
+            # in a hosted selector) and are left exactly as they were otherwise: a store shared
+            # with a differently-rooted install keeps its receipts' own provenance.
+            legacy_rows = conn.execute(
+                "SELECT key, value FROM state_meta WHERE key GLOB ?", (LEGACY_PREFIX + "*",)).fetchall()
+            rekeyed_legacy = 0
+            for key, raw in legacy_rows:
+                try:
+                    row = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(row, dict) or row.get("profile_id") not in home_map:
+                    continue
+                row["profile_id"] = home_map[row["profile_id"]]
+                conn.execute("UPDATE state_meta SET value=? WHERE key=?",
+                             (json.dumps(row, ensure_ascii=False), key))
+                rekeyed_legacy += 1
+            counts["local_legacy"] = rekeyed_legacy
+
+            policy_rows = conn.execute(
+                "SELECT key, value FROM state_meta WHERE key GLOB ?", (POLICY_PREFIX + "*",)).fetchall()
+            rekeyed_receipts = 0
+            for key, raw in policy_rows:
+                try:
+                    receipt = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(receipt, dict) or receipt.get("profile_id") not in home_map:
+                    continue
+                receipt["profile_id"] = home_map[receipt["profile_id"]]
+                if isinstance(receipt.get("route"), str) and receipt["route"].startswith(old_ns):
+                    receipt["route"] = new_ns + receipt["route"][ns_len:]
+                _repath_route(receipt.get("entry"))
+                sid = receipt.get("session_id")
+                if ("legacy_session_id" not in receipt
+                        and local_identity(receipt["profile_id"], receipt.get("principal_id"),
+                                           receipt.get("request_id")) != sid):
+                    # The derivation the restore re-runs broke with the new home; pin the
+                    # receipt to its existing transcript through the legacy binding instead.
+                    # A stale legacy row that disagrees with this receipt is a corrupted pair
+                    # no rewrite can legitimize — leave the whole receipt at its old refusal.
+                    legacy_key = LEGACY_PREFIX + str(sid)
+                    saved = conn.execute("SELECT value FROM state_meta WHERE key=?",
+                                         (legacy_key,)).fetchone()
+                    expected = {"session_id": sid, "profile_id": receipt["profile_id"],
+                                "principal_id": receipt.get("principal_id"),
+                                "legacy_session_id": sid}
+                    try:
+                        saved_row = None if saved is None else json.loads(saved[0])
+                    except (ValueError, TypeError):
+                        # Unreadable legacy row: treat as disagreement, keep the old refusal.
+                        saved_row = object()
+                    if saved_row is not None and saved_row != expected:
+                        continue
+                    if saved is None:
+                        conn.execute("INSERT INTO state_meta(key,value) VALUES(?,?)",
+                                     (legacy_key, json.dumps(expected, ensure_ascii=False)))
+                    receipt["legacy_session_id"] = sid
+                conn.execute("UPDATE state_meta SET value=? WHERE key=?",
+                             (json.dumps(receipt, ensure_ascii=False), key))
+                rekeyed_receipts += 1
+            counts["local_receipts"] = rekeyed_receipts
+
+            api_rows = conn.execute(
+                "SELECT key, value FROM state_meta WHERE key GLOB ?", (API_BINDING_PREFIX + "*",)).fetchall()
+            rekeyed_api = 0
+            for key, raw in api_rows:
+                try:
+                    receipt = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(receipt, dict) or receipt.get("profile_id") not in home_map:
+                    continue
+                receipt["profile_id"] = home_map[receipt["profile_id"]]
+                if isinstance(receipt.get("route"), str) and receipt["route"].startswith(old_ns):
+                    receipt["route"] = new_ns + receipt["route"][ns_len:]
+                _repath_route(receipt.get("entry"))
+                conn.execute("UPDATE state_meta SET value=? WHERE key=?",
+                             (json.dumps(receipt, ensure_ascii=False), key))
+                rekeyed_api += 1
+            counts["api_bindings"] = rekeyed_api
+
+            hosted_rows = conn.execute(
+                "SELECT key, value FROM state_meta WHERE key GLOB ?", (HOSTED_BINDING_PREFIX + "*",)).fetchall()
+            rekeyed_hosted = 0
+            for key, raw in hosted_rows:
+                try:
+                    binding = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(binding, dict):
+                    continue
+                changed = False
+                if binding.get("target_home") in home_map:
+                    binding["target_home"] = home_map[binding["target_home"]]
+                    changed = True
+                selector = binding.get("selector")
+                if isinstance(selector, dict) and selector.get("profile") == old:
+                    selector["profile"] = new
+                    changed = True
+                if changed:
+                    conn.execute("UPDATE state_meta SET value=? WHERE key=?",
+                                 (json.dumps(binding, ensure_ascii=False), key))
+                    rekeyed_hosted += 1
+            counts["hosted_transport"] = rekeyed_hosted
 
         self._execute_write(_do)
         return counts

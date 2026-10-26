@@ -7,6 +7,9 @@ from hermes_state_runtime import RuntimeStoreError, _epoch, _json
 POLICY_PREFIX = 'gateway.local_policy.v1:'
 API_BINDING_PREFIX = 'gateway.api.binding.v1.'
 API_DECLARED_PREFIX = 'gateway.api.conversation.v1.'
+# Defined here, not in ``gateway/session_hosted_transport.py``: the store-side profile rekey
+# (#145200) scans these rows without importing the gateway layer.
+HOSTED_BINDING_PREFIX = 'gateway.hosted.transport.v1:'
 
 
 def commit_local_session(db, *, epoch, receipt):
