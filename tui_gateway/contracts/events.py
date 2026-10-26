@@ -111,6 +111,21 @@ event("free_tier.challenge", FreeTierChallengePayload,
           "(broadcast); the desktop loads ``url`` in a hidden window.")
 
 
+class NousReloginRequiredPayload(Payload):
+    """``hermes_cli/nous_auth_keepalive.py::_announce_relogin_required`` — the stored Nous login
+    died a terminal auth death (``invalid_grant``/revoked) and was quarantined; only a re-login
+    restores it. Broadcast once per outage; the desktop raises a visible re-login notice (#145231).
+    """
+
+    provider: str
+    message: str
+
+
+event("nous_auth.relogin_required", NousReloginRequiredPayload,
+      doc="The background Nous keepalive hit a terminal auth death and cleared the stored login "
+          "(broadcast, once per outage); the desktop raises a re-login notice.")
+
+
 class ErrorPayload(Payload):
     """Every ``_emit("error", …)`` site sets exactly ``message``."""
 

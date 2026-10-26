@@ -203,3 +203,102 @@ def test_keepalive_binds_launch_scope_for_multiplexed_pool_refresh(tmp_path, mon
         set_multiplex_active(previous_multiplex)
 
     assert seen == ["https://inference.example/v1"]
+
+
+class _FakeGatewayServer:
+    """Stand-in for the imported ``tui_gateway.server`` module the announcement probes.
+
+    The class attributes satisfy tests/conftest.py's autouse teardown, which probes
+    whatever currently sits at ``sys.modules["tui_gateway.server"]`` and snapshots/resets
+    these globals on it.
+    """
+
+    _sessions = {}
+    _methods = {}
+    _cfg_cache = None
+    _cfg_sig = None
+    _cfg_path = None
+    _db = None
+    _db_error = None
+    _real_stdout = None
+
+    def __init__(self, transports):
+        self._live_transports = transports
+        self.events = []
+
+    def _broadcast_global_event(self, event, payload=None):
+        self.events.append((event, payload))
+
+
+def _singleton_relogin_state(monkeypatch, outcomes):
+    """Pool-less singleton state whose refresh raises AuthError until ``outcomes`` is exhausted;
+    every call after that succeeds. ``outcomes`` entries: True = fail with relogin_required.
+    """
+    from hermes_cli.auth_constants import AuthError
+
+    pending = list(outcomes)
+
+    def _resolve(**kwargs):
+        if pending and pending.pop(0):
+            raise AuthError(
+                "No access token found for Nous Portal login.",
+                provider="nous", code="auth_missing_access_token", relogin_required=True,
+            )
+        return {"provider": "nous", "access_token": "fresh"}
+
+    class _Pool:
+        def has_credentials(self):
+            return False
+
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(
+        keepalive, "get_provider_auth_state", lambda provider: {"access_token": "stored"}
+    )
+    monkeypatch.setattr(keepalive, "resolve_nous_runtime_credentials", _resolve)
+
+
+def test_keepalive_announces_relogin_once_per_outage(monkeypatch):
+    """A dead login reaches the user once, not once per tick; recovery re-arms the notice."""
+    import sys
+
+    server = _FakeGatewayServer(transports=[object()])
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    # fail, fail (same outage), succeed (recovered), fail (a later outage).
+    _singleton_relogin_state(monkeypatch, outcomes=[True, True, False, True])
+    keepalive._clear_relogin_announcement()
+
+    # Two failing ticks on the same outage: one broadcast, the second stays log-only.
+    assert keepalive.refresh_nous_auth_keepalive_once() is False
+    assert keepalive.refresh_nous_auth_keepalive_once() is False
+    assert [(event, payload["provider"]) for event, payload in server.events] == [
+        (keepalive.NOUS_RELOGIN_EVENT, "nous")
+    ]
+
+    # A successful refresh clears the dead state and re-arms the notice...
+    assert keepalive.refresh_nous_auth_keepalive_once() is True
+    # ...so a later outage announces again instead of staying silent forever.
+    assert keepalive.refresh_nous_auth_keepalive_once() is False
+    assert [(event, payload["provider"]) for event, payload in server.events] == [
+        (keepalive.NOUS_RELOGIN_EVENT, "nous"),
+        (keepalive.NOUS_RELOGIN_EVENT, "nous"),
+    ]
+
+
+def test_keepalive_stays_silent_without_connected_clients(monkeypatch):
+    """No gateway clients: nothing to announce to, and the tick still fails cleanly."""
+    import sys
+
+    server = _FakeGatewayServer(transports=[])
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    _singleton_relogin_state(monkeypatch, outcomes=[True, True])
+    keepalive._clear_relogin_announcement()
+
+    assert keepalive.refresh_nous_auth_keepalive_once() is False
+    assert server.events == []
+
+    # The latch is still unset: clients that connect later get the notice on the next tick.
+    server._live_transports = [object()]
+    assert keepalive.refresh_nous_auth_keepalive_once() is False
+    assert [(event, payload["provider"]) for event, payload in server.events] == [
+        (keepalive.NOUS_RELOGIN_EVENT, "nous")
+    ]

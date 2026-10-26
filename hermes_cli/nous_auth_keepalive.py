@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from typing import Optional
 
@@ -32,10 +33,49 @@ NOUS_AUTH_KEEPALIVE_MIN_INTERVAL_SECONDS = 60
 NOUS_AUTH_KEEPALIVE_TICKS_PER_LIFETIME = 4
 NOUS_AUTH_KEEPALIVE_INITIAL_DELAY_SECONDS = 60
 NOUS_AUTH_KEEPALIVE_INTERVAL_CONFIG_KEY = "keepalive_interval_seconds"
+# Surface-global event raised when the stored Nous login is dead and only a re-login
+# can restore it. Clients that render it (desktop) turn this into a visible notice.
+NOUS_RELOGIN_EVENT = "nous_auth.relogin_required"
 
 _keepalive_lock = threading.Lock()
 _keepalive_stop = threading.Event()
 _keepalive_thread: Optional[threading.Thread] = None
+# One notice per outage: ticks that keep failing on the same dead token stay log-only.
+_relogin_announce_lock = threading.Lock()
+_relogin_announced = False
+
+
+def _clear_relogin_announcement() -> None:
+    """Re-arm the notice after auth recovers, so a later outage announces again."""
+    global _relogin_announced
+    with _relogin_announce_lock:
+        _relogin_announced = False
+
+
+def _announce_relogin_required(exc: Exception) -> None:
+    """Broadcast the dead-login state once per outage so the user hears about it.
+
+    The keepalive ticks every few minutes, and every tick after a terminal auth death
+    raises the same re-login error; without a latch that cadence would become notice
+    spam the user has to dismiss. Mirrors ``anon_challenge._announce``: only a process
+    that already imported the gateway server has connected clients, and importing it
+    just to find nobody listening would also write an event frame to stdout.
+    """
+    global _relogin_announced
+    with _relogin_announce_lock:
+        if _relogin_announced:
+            return
+    server = sys.modules.get("tui_gateway.server")
+    if server is None or not getattr(server, "_live_transports", None):
+        return
+    try:
+        server._broadcast_global_event(
+            NOUS_RELOGIN_EVENT, {"provider": "nous", "message": str(exc)[:200]})
+    except Exception:
+        logger.debug("Nous re-login broadcast failed", exc_info=True)
+        return
+    with _relogin_announce_lock:
+        _relogin_announced = True
 
 
 def _timeout_seconds(value: Optional[float]) -> float:
@@ -161,6 +201,8 @@ def refresh_nous_auth_keepalive_once(
             min_key_ttl_seconds=max(60, int(min_key_ttl_seconds)), min_access_ttl_seconds=min_access_ttl_seconds
         )
         if pool_result is not None:
+            if pool_result:
+                _clear_relogin_announcement()
             return pool_result
         state = get_provider_auth_state("nous")
         if not state:
@@ -178,10 +220,12 @@ def refresh_nous_auth_keepalive_once(
             with background_caller():
                 resolve_nous_runtime_credentials(timeout_seconds=_timeout_seconds(timeout_seconds))
             logger.debug("Nous auth keepalive: refreshed singleton auth state")
+            _clear_relogin_announcement()
             return True
         except Exception as exc:
             if isinstance(exc, AuthError) and exc.relogin_required:
                 logger.info("Nous auth keepalive requires re-login: %s", exc)
+                _announce_relogin_required(exc)
             else:
                 logger.debug("Nous auth keepalive failed: %s", exc)
             return False

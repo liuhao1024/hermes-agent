@@ -45,6 +45,8 @@ _SUBAGENT_RELAY = re.compile(r"\"(subagent\.[a-z_]+)\"")
 _DESKTOP_UI_EMIT = re.compile(r"desktop_ui\.(?:emit|emit_or_error)\(\s*\"([a-z_][a-z0-9_.]*)\"")
 _SETUP_READY = re.compile(r"^SETUP_READY_EVENT = \"([a-z_.]+)\"", re.MULTILINE)
 _FREE_TIER_CHALLENGE = re.compile(r"^CHALLENGE_EVENT = \"([a-z_.]+)\"", re.MULTILINE)
+# Nous keepalive dead-login broadcast (hermes_cli/nous_auth_keepalive.py).
+_NOUS_RELOGIN = re.compile(r"^NOUS_RELOGIN_EVENT = \"([a-z_.]+)\"", re.MULTILINE)
 # Session-authority local-viewer turn projections (gateway/local_viewer_events.py).
 _LOCAL_VIEWER_PUBLISH = re.compile(r"\b(?:publish|_publish_execution)\(\s*\"([a-z_][a-z0-9_.]*)\"")
 
@@ -74,6 +76,7 @@ def emitted_event_names() -> set[str]:
         names.update(_DESKTOP_UI_EMIT.findall(_read(src)))
     names.update(_SETUP_READY.findall(_read(REPO / "hermes_cli" / "free_tier_bootstrap.py")))
     names.update(_FREE_TIER_CHALLENGE.findall(_read(REPO / "hermes_cli" / "anon_challenge.py")))
+    names.update(_NOUS_RELOGIN.findall(_read(REPO / "hermes_cli" / "nous_auth_keepalive.py")))
     names.update(_LOCAL_VIEWER_PUBLISH.findall(_read(REPO / "gateway" / "local_viewer_events.py")))
     return names
 

@@ -17,6 +17,7 @@ import { isSessionGone } from '@/store/session-gone-latch'
 import { noteSessionEvent } from '@/store/session-states'
 import { setSessionDraftingTool } from '@/store/tool-drafting'
 
+import { handleAuthReloginEvent } from './auth-relogin'
 import { handleDeferredPickEvent } from './deferred-pick'
 import { handleDesktopBridgeEvent } from './desktop-bridge'
 import { handleFreeTierEvent } from './free-tier'
@@ -86,6 +87,7 @@ const PROVIDER_WAIT_SUPERSEDING_EVENT_TYPES = new Set([
 const HANDLERS: GatewayEventHandler[] = [
   handleLifecycleEvent,
   handleFreeTierEvent,
+  handleAuthReloginEvent,
   handleOnboardingEvent,
   handleSessionInfoEvent,
   handleDeferredPickEvent,
