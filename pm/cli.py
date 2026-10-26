@@ -410,9 +410,18 @@ def cmd_install(args) -> int:
 
         # Naming a declined default is the opt-back-in: updates carry it again.
         record_declined(remove=args.names)
-    if not cross_target and (not args.names or tools_only):
+    if not cross_target and (not args.names or tools_only) and tool_names:
         from pm.install import activate
 
+        # Whole-closure (bare) and --tools-only installs publish the store's
+        # tool closure, so a missing tool must stop the sync that follows
+        # (9c11bb96bd). Narrow installs are exempt by design: naming tools
+        # (with or without --extra) installs only those and does not sync the
+        # full closure, and the venv build resolves its own pinned uv + python
+        # from the store by absolute path (pm._uv._toolchain). A pure
+        # `--extra` sync is the one that must not die on pre-existing drift of
+        # tools it never installs — its tool closure is empty, so tool_names
+        # is falsy and the gate is skipped.
         problems = activate(allow_incomplete=True)
         if problems:
             print(f"✗ tools not on PATH before venv sync: {'; '.join(problems)}", flush=True)
