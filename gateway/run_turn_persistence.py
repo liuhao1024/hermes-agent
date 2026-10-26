@@ -20,7 +20,7 @@ from contextlib import nullcontext, suppress
 from contextvars import copy_context
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
-from gateway.platforms.base import BasePlatformAdapter
+from gateway.platforms.base import BasePlatformAdapter, _mark_notify_metadata
 from gateway.platforms.event import MessageEvent
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
@@ -581,7 +581,12 @@ class GatewayTurnPersistenceMixin:
             # The queued-follow-up lane uploads this response's attachments itself; re-scanning here
             # would upload every file a second time.
             if response and adapter and not agent_result.get("media_already_delivered"):
-                await self._deliver_media_from_response(response, event, adapter)
+                # This media completes the user-visible reply: mark it notify-worthy like the
+                # non-streamed attachments (#144897) — in `important` mode it must still ring.
+                await self._deliver_media_from_response(
+                    response, event, adapter,
+                    thread_metadata=_mark_notify_metadata(self._event_thread_metadata(event, source)),
+                )
             # Streaming delivered the body, but the footer was held back (`not already_sent` gate).
             if _footer_line and adapter:
                 try:
