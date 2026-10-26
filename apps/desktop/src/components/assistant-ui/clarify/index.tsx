@@ -6,11 +6,11 @@ import { useMemo, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
-import { $settledClarifyResults, sessionClarifyRequest } from '@/store/clarify'
+import { $settledClarifyResults, type ClarifyRequest, sessionClarifyRequest } from '@/store/clarify'
 
 import { selectMessageRunning } from '../tool/fallback-model'
 
-import { readClarifyArgs } from './parse'
+import { type ClarifyArgs, readClarifyArgs } from './parse'
 import { ClarifyToolPending } from './pending'
 import { ClarifyToolSettled } from './settled'
 import { useUndeliveredClarify } from './use-undelivered'
@@ -31,6 +31,21 @@ export const ClarifyTool = (props: ToolCallMessagePartProps) => {
 // would show a later card the answer of an earlier one.
 const requestIdByToolCall = new Map<string, string>()
 
+// Whether this row may follow the session's live request: only when its own
+// args cover every question the request asks. A one-at-a-time batch re-arms
+// the same row for its next question, so the row must keep up — but a
+// duplicate row left behind by a re-delivered activate must not paint the
+// current question as a second live card. No request means nothing to follow.
+function rowCoversRequest(request: ClarifyRequest | null, args: ClarifyArgs): boolean {
+  if (!request) {
+    return true
+  }
+
+  const asked = new Set((args.questions ?? []).map(entry => entry.question.trim()))
+
+  return asked.size > 0 && request.questions.every(question => asked.has(question.question.trim()))
+}
+
 function ClarifyToolLive(props: ToolCallMessagePartProps) {
   // The tool row is in whichever session's transcript rendered it — read THAT
   // session's clarify (primary or tile), not the globally-active one.
@@ -48,8 +63,9 @@ function ClarifyToolLive(props: ToolCallMessagePartProps) {
   const settledResults = useStore($settledClarifyResults)
   const requestId = requestIdByToolCall.get(rowKey)
   const settledResult = requestId && request?.requestId !== requestId ? settledResults[requestId] : undefined
+  const covers = rowCoversRequest(request, fromArgs)
 
-  if (request && !settledResult && request.requestId !== requestId) {
+  if (request && !settledResult && request.requestId !== requestId && covers) {
     requestIdByToolCall.set(rowKey, request.requestId)
   }
 
@@ -57,6 +73,13 @@ function ClarifyToolLive(props: ToolCallMessagePartProps) {
 
   if (settledResult) {
     return <ClarifyToolSettled {...props} result={settledResult} />
+  }
+
+  // A row that does not carry the live question (a re-delivered duplicate, an
+  // earlier call) is history: it renders its own args as a plain tool row,
+  // never as the session's one interactive card.
+  if (request && !covers && !answered) {
+    return <ToolFallback {...props} />
   }
 
   // Stopped mid-prompt with no result — don't leave a dead interactive panel.
