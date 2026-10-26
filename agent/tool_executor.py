@@ -751,7 +751,19 @@ def _dispatch_authorized_once(
 
     from agent.terminal_approval_batch import prepare_current_terminal
     prepare_current_terminal(ref)
-    _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+
+    def _begin_if_not_interrupted() -> None:
+        # A trusted pre-dispatch callback (plugin pre_tool_call hook or guardrail) may
+        # interrupt the turn while an authorized sibling sits parked at this gate; the
+        # blocked call's no-callback advance releases it before the poll loop gets its
+        # next slice to abandon the gate (#145255). Re-check at this dispatch edge:
+        # raise _BatchAbandoned so the batch synthesizes "cancelled" instead of starting
+        # a tool the turn already gave up on.
+        if agent._interrupt_requested:
+            raise _BatchAbandoned(ref.name)
+        _begin_tool_execution(agent, ref, display_index)
+
+    _advance_start_order(_begin_if_not_interrupted)
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
