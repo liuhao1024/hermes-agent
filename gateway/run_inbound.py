@@ -650,6 +650,36 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             with suppress(RuntimeStoreError):
                 await authority.interrupt(actor, ref, handle.execution_generation)
 
+    async def _cancel_paused_route_queue(self, _quick_key: str) -> int:
+        """/new on a route whose FIFO is paused on a lost (``unknown``) turn. The pause notice
+        promised the queued followers stay saved for the operator's resume, and /stop honors that;
+        a messaging chat has no resume control, so /new is its only way out — the break must not
+        strand the saved inputs silently. Cancel the still-queued ``messaging:*`` rows of the
+        route's logical owner and return their count, so the reset reply can say what happened
+        (#145177). The ``unknown`` head itself stays fenced for audit; automation wakes stay with
+        ``move_route_wakes``."""
+        from gateway.session_authorities import active_authority
+        authority = active_authority(self)
+        sid = authority.logical_owner(self.session_store.peek_session_id(_quick_key)) if authority else None
+        if not sid or sid not in authority.sessions:
+            return 0
+        from gateway.session_contract import Principal, SessionRef
+        from hermes_state_runtime import RuntimeStoreError, list_session_admissions
+        ref = SessionRef(authority.profile_id, sid)
+        actor = Principal('messaging-control', authority.profile_id,
+                          frozenset({'session:submit', 'session:control'}), 'reset')
+        rows = await asyncio.to_thread(list_session_admissions, authority.db, session_id=sid)
+        if not any(row['status'] == 'unknown' for row in rows):
+            return 0  # not paused: _hm_stop_owner_turn already cancelled the queued rows
+        dropped = 0
+        for row in rows:
+            if row['status'] == 'queued' and row['principal_id'].startswith('messaging:'):
+                # Claimed meanwhile (stale_generation): it runs where it is, not dropped.
+                with suppress(RuntimeStoreError):
+                    await authority.cancel_queued(actor, ref, row['admission_id'])
+                    dropped += 1
+        return dropped
+
     def _hm_busy_telegram_grace_queue(
         self, event: MessageEvent, source: SessionSource, _quick_key: str, effective_busy_input_mode: str
     ) -> bool:

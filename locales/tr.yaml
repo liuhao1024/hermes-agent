@@ -329,6 +329,7 @@ gateway:
     title_error_untitled: "\n⚠️ {error} — oturum başlıksız başlatıldı."
     title_empty_untitled: "\n⚠️ Temizlik sonrası başlık boş — oturum başlıksız başlatıldı."
     tip: "\n✦ İpucu: {tip}"
+    dropped_paused_queue: "\n⚠️ Önceki oturum duraklatılmışken gönderdiğin {count} mesaj işlenmedi ve temizlendi — hâlâ gerekiyorsa yeniden gönder."
   restart:
     in_progress: "⏳ Gateway yeniden başlatma zaten sürüyor..."
     restarting: "♻ Gateway yeniden başlatılıyor. 60 saniye içinde bildirim almazsanız konsoldan `hermes gateway restart` ile yeniden başlatın."

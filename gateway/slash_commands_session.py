@@ -198,6 +198,9 @@ class GatewaySessionCommandsMixin:
         source = event.source
         session_key = self._session_key_for_source(source)
         await self._hm_stop_owner_turn(session_key)  # idle and confirmed resets too (N53)
+        # A chat paused on a lost turn has no resume control: /new is its way out, so its saved
+        # followers are cancelled here and reported (a paused /stop keeps them, #145177).
+        dropped_paused = await self._cancel_paused_route_queue(session_key)
         self._invalidate_session_run_generation(session_key, reason="session_reset")
         # Evict the running-agent slot now that the generation is bumped: the in-flight run's own
         # guarded release (old generation) returns False and would leave a zombie slot that silently
@@ -266,6 +269,8 @@ class GatewaySessionCommandsMixin:
         except Exception:
             _tip_line = ""
         body = f"{header}\n\n{session_info}" if session_info else header
+        if dropped_paused:
+            body += t("gateway.reset.dropped_paused_queue", count=dropped_paused)
         return EphemeralReply(f"{body}{_tip_line}")
 
     async def _reset_titled_header(self, header: str, session_id: str, title_arg: str) -> str:

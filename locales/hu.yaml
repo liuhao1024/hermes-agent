@@ -332,6 +332,7 @@ gateway:
     title_error_untitled: "\n⚠️ {error} — a munkamenet cím nélkül indult."
     title_empty_untitled: "\n⚠️ Tisztítás után a cím üres — a munkamenet cím nélkül indult."
     tip: "\n✦ Tipp: {tip}"
+    dropped_paused_queue: "\n⚠️ Az előző munkamenet szünete alatt elküldött {count} üzenet nem lett feldolgozva, és törlésre került — ha még szükséges, küldd el újra."
   restart:
     in_progress: "⏳ Az átjáró újraindítása már folyamatban van..."
     restarting: "♻ Átjáró újraindítása. Ha 60 másodpercen belül nem kapsz értesítést, indítsd újra a konzolból a `hermes gateway restart` paranccsal."

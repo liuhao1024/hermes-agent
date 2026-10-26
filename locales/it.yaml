@@ -329,6 +329,7 @@ gateway:
     title_error_untitled: "\n⚠️ {error} — sessione avviata senza titolo."
     title_empty_untitled: "\n⚠️ Il titolo è vuoto dopo la pulizia — sessione avviata senza titolo."
     tip: "\n✦ Suggerimento: {tip}"
+    dropped_paused_queue: "\n⚠️ {count} messaggio/i inviati mentre la sessione precedente era in pausa non sono stati elaborati e sono stati rimossi — inviali di nuovo se ancora necessari."
   restart:
     in_progress: "⏳ Riavvio del gateway già in corso..."
     restarting: "♻ Riavvio del gateway. Se non ricevi una notifica entro 60 secondi, riavvia dalla console con `hermes gateway restart`."
