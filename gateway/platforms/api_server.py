@@ -506,22 +506,23 @@ def _multimodal_validation_error(exc: ValueError, *, param: str) -> web.Response
 
 
 def _reap_disconnected_agent_processes(
-    agent: Any, *, source: str = "api_server_sse_disconnect") -> None:
+    agent: Any, *, source: str = "api_server_sse_disconnect",
+    is_still_current: Optional[Any] = None) -> None:
     """Reap background processes an abandoned API-server turn created (these turns bypass
     ``TurnRunner``). Daemon-thread fire-and-forget; epoch-gated so a stale reaper never kills
     a newer run's process on a shared task_id.
 
     Mirrors the gateway-turn cleanup in ``gateway/run.py`` (#76115) for this API-server surface, which runs
     its own agent lifecycle via ``_run_agent`` and never passes through ``TurnRunner`` — so it needs its own
-    trigger for the same baseline-diff reap.
+    trigger for the same baseline-diff reap. Callers whose turn ownership is not epoch-published
+    (canonical session-authority turns) hand in their own ``is_still_current`` claim check instead.
     """
     process_task_id = getattr(agent, "_gateway_turn_process_task_id", "")
     process_baseline = getattr(agent, "_gateway_turn_process_baseline", None)
     if not process_task_id or process_baseline is None:
         return
     epoch = getattr(agent, "_gateway_turn_process_epoch", None)
-    is_still_current: Optional[Any] = None
-    if epoch is not None:
+    if epoch is not None and is_still_current is None:
         def _epoch_still_current(_task_id=process_task_id, _epoch=epoch):
             # Skip only when a NEWER run claimed this task_id. A missing entry means
             # our own clear pruned it — no newer claimant, so the reap must proceed.

@@ -147,7 +147,7 @@ async def stop_run(adapter, run_id):
         try:
             await authority.cancel_queued(actor, ref, row['admission_id'])
         except RuntimeStoreError as exc:
-            # The drain claimed the head between the read above and the cancel commit: the run is
+            # The drain claimed the head between the read above and the cancel commits: the run is
             # executing now, so Stop that exact claim below instead of refusing a live run.
             if exc.reason != 'stale_generation':
                 raise
@@ -161,10 +161,32 @@ async def stop_run(adapter, run_id):
     if row['status'] == 'started':
         await authority.interrupt(actor, ref, row['generation'])
         adapter._stopping_run_ids.add(run_id)
+        _reap_stopped_admission_processes(authority, row)
         return {'run_id': run_id, 'status': 'stopping', 'admission_id': row['admission_id']}
     elif row['status'] == 'unknown':
         raise RuntimeStoreError('unknown_execution')
     return run_projection(adapter, run_id)
+
+
+def _reap_stopped_admission_processes(authority, row):
+    """Reap the background processes the stopped admission's turn created — the same contract
+    the legacy in-process stop branch applies (``api_server_runs._handle_stop_run``). Only the
+    agent this exact generation adopted is reaped from: a cached resident agent belongs to an
+    earlier turn, and once the turn returns, ``adopted`` is cleared so a late stop reaps nothing
+    (the work it left running is deliberate). The claim check rides along into the reaper thread,
+    so a replacement turn claiming the session mid-reap keeps its own processes."""
+    session_id = row['target_session_id']
+    adopted_generation, agent = authority.adopted.get(session_id, (None, None))
+    if adopted_generation != row['generation'] or agent is None:
+        return
+
+    def _this_generation_still_current():
+        current_generation, current_agent = authority.adopted.get(session_id, (None, None))
+        return current_generation == row['generation'] and current_agent is agent
+
+    from gateway.platforms.api_server import _reap_disconnected_agent_processes
+    _reap_disconnected_agent_processes(
+        agent, source="api_server_run_stop", is_still_current=_this_generation_still_current)
 
 
 async def resolve_unknown_run(adapter, run_id, body):
