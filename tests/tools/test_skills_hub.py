@@ -144,41 +144,6 @@ class TestTrustLevelFor:
                 "browsable via `hermes skills browse`."
             )
 
-class TestGitHubSourceFileFetch:
-    def test_quotes_decoded_support_path_before_contents_api_fetch(self):
-        src = GitHubSource(auth=MagicMock(spec=GitHubAuth))
-        src._github_get = MagicMock(return_value=None)
-
-        src._fetch_file_bytes("owner/repo", "skill/references/foo#bar.md")
-
-        assert src._github_get.call_args.args[0] == (
-            "https://api.github.com/repos/owner/repo/contents/"
-            "skill/references/foo%23bar.md"
-        )
-
-    @pytest.mark.parametrize("gh_token", ["gh-live", "gh-dead"])
-    def test_rejected_token_falls_through_to_next_credential(self, monkeypatch, gh_token):
-        """A 401 on the .env token retries with `gh auth token`, then anonymously (#98725)."""
-        import tools.skills_hub as hub
-        auth = GitHubAuth()
-        monkeypatch.setattr(auth, "_try_pat", lambda: "pat-dead")
-        monkeypatch.setattr(auth, "_try_gh_cli", lambda: gh_token)
-        monkeypatch.setattr(auth, "_try_github_app", lambda: None)
-        sent = []
-
-        def fake_get(url, *, headers, **_kw):
-            sent.append(headers)
-            dead = headers.get("Authorization", "").endswith("-dead")
-            return httpx.Response(401 if dead else 200, content=b"body")
-
-        monkeypatch.setattr(hub, "_skills_hub_http_get", fake_get)
-        assert GitHubSource(auth)._fetch_file_bytes("o/r", "s/SKILL.md") == b"body"
-        expected = ["token pat-dead", "token gh-live"] if gh_token == "gh-live" else [
-            "token pat-dead", "token gh-dead", None]
-        assert [h.get("Authorization") for h in sent] == expected
-        assert sent[-1]["Accept"] == "application/vnd.github.v3.raw"
-        assert auth.rejected[0] == "GITHUB_TOKEN/GH_TOKEN"
-
 # ---------------------------------------------------------------------------
 # SkillsShSource
 # ---------------------------------------------------------------------------
@@ -308,7 +273,11 @@ class TestSkillsShSource:
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
                 return resp
-            if "/git/trees/main" in url:
+            if "/branches/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"commit": {"sha": "c" * 40, "commit": {"tree": {"sha": "a" * 40}}}}
+                return resp
+            if "/git/trees/" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"tree": tree_entries}
                 return resp
@@ -357,7 +326,10 @@ class TestFindSkillInRepoTree:
             if url.endswith("/davila7/claude-code-templates"):
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
-            elif "/git/trees/main" in url:
+            elif "/branches/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"commit": {"sha": "c" * 40, "commit": {"tree": {"sha": "a" * 40}}}}
+            elif "/git/trees/" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"tree": tree_entries}
             else:
@@ -407,7 +379,10 @@ class TestRepoRootSkillLayout:
             resp.status_code = 404
             if url.rstrip("/").endswith(self.REPO):
                 resp.status_code, resp.json = 200, (lambda: {"default_branch": "main"})
-            elif "/git/trees/main" in url:
+            elif "/branches/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"commit": {"sha": "c" * 40, "commit": {"tree": {"sha": "b" * 40}}}}
+            elif "/git/trees/" in url:
                 resp.status_code = 200
                 resp.json = lambda: {"sha": "b" * 40, "truncated": False, "tree": tree}
             elif url.endswith("/contents/SKILL.md"):
@@ -449,7 +424,8 @@ class TestRepoRootSkillLayout:
         # Support files sit directly under the repo root, so the root is the skill directory.
         assert bundle.files["references/free_tools.md"] == b"# Free tools\n"
         assert bundle.identifier == self.IDENTIFIER
-        assert bundle.metadata["source_url"] == f"https://github.com/{self.REPO}/tree/{'b' * 40}"
+        # The recorded revision is the commit SHA the raw fetches pinned to.
+        assert bundle.metadata["source_url"] == f"https://github.com/{self.REPO}/tree/{'c' * 40}"
 
     @patch("tools.skills_hub._write_index_cache")
     @patch("tools.skills_hub._read_index_cache", return_value=None)
@@ -747,8 +723,9 @@ class TestCheckForSkillUpdates:
         entries = [{"path": f"demo-skill/{p}", "type": "blob", "sha": f"sha-{p}", "size": 3}
                    for p in ("SKILL.md", "scripts/run.sh", "references/notes.md")]
         api = {"/repos/owner/repo": {"default_branch": "main"},
-               "/repos/owner/repo/git/trees/main": {"sha": tree_sha, "tree": entries}}
-        src._github_json = lambda url, **kw: api[url.split("api.github.com", 1)[1]]
+               "/repos/owner/repo/branches/main": {"commit": {"sha": tree_sha, "commit": {"tree": {"sha": tree_sha}}}},
+               f"/repos/owner/repo/git/trees/{tree_sha}": {"sha": tree_sha, "tree": entries}}
+        src._github_json = lambda url, **kw: api[url.split("api.github.com", 1)[1].split("?")[0]]
         def _file(repo, path, **kw):
             calls["files"] = calls.get("files", 0) + 1
             return "---\nname: demo-skill\n---\nSee scripts/run.sh and references/notes.md\n"

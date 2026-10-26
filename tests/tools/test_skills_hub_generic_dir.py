@@ -33,6 +33,7 @@ def test_finds_single_generic_skills_directory_when_slug_is_stale(mock_get):
         tree_entries = [{"path": "README.md", "type": "blob"}, {"path": lone, "type": "blob"}]
         mock_get.side_effect = [
             MagicMock(status_code=200, json=lambda: {"default_branch": "main"}),
+            MagicMock(status_code=200, json=lambda: {"commit": {"sha": "c" * 40, "commit": {"tree": {"sha": "a" * 40}}}}),
             MagicMock(status_code=200, json=lambda t=tree_entries: {"tree": t}),
         ]
 

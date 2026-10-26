@@ -301,7 +301,7 @@ class GitHubSource(SkillSource):
             complete = self._collect_tree_files(repo, skill_dir, tree[1], pinned_ref, referenced, files)
             if complete is None:
                 return None
-            # A bundle with a transiently failed blob fetch must not record the tree sha: the
+            # A bundle with a transiently failed blob fetch must not record the revision: the
             # update check would otherwise see "same revision" and never re-fetch the gap (#101454).
             revision = (pinned_ref or tree[0]) if complete else ""
         else:
@@ -316,8 +316,9 @@ class GitHubSource(SkillSource):
         )
 
     def current_revision(self, identifier: str) -> str:
-        """Tree sha the default branch currently resolves to — one cached tree lookup per repo,
-        no blob downloads — so an update check can skip refetching unchanged skills."""
+        """Commit sha the default branch currently resolves to (the ref raw fetches pin to) — one
+        cached tree lookup per repo, no blob downloads — so an update check can skip refetching
+        unchanged skills."""
         if (split := _split_repo_id(identifier)) is None:
             return ""
         repo, _ = split
@@ -440,16 +441,28 @@ class GitHubSource(SkillSource):
         if repo_data is None:
             return None
         default_branch = repo_data.get("default_branch", "main")
+        # The revision pinned into every raw URL must be a commit SHA: raw.githubusercontent.com
+        # only resolves commit-ish refs and 404s a tree SHA, which turned every pinned raw fetch
+        # into a wasted round trip followed by the Contents API call it was meant to avoid (#144851).
+        # The branch endpoint answers the commit and its tree in one call; the tree walk then pins
+        # to the same revision by asking for the commit's tree directly.
+        branch_data = self._github_json(f"{_API}/{repo}/branches/{default_branch}")
+        if branch_data is None:
+            return None
+        branch_commit = branch_data.get("commit") or {}
+        commit_sha = branch_commit.get("sha", "")
+        tree_sha = ((branch_commit.get("commit") or {}).get("tree") or {}).get("sha", "")
         tree_data = self._github_json(
-            f"{_API}/{repo}/git/trees/{default_branch}", params={"recursive": "1"}, timeout=30.0,
+            f"{_API}/{repo}/git/trees/{tree_sha or commit_sha or default_branch}",
+            params={"recursive": "1"}, timeout=30.0,
         )
         if tree_data is None:
             return None
         if tree_data.get("truncated"):
             logger.debug("Git tree truncated for %s", repo)
             return None
-        if isinstance(tree_data.get("sha"), str) and tree_data["sha"]:
-            self._tree_revisions[repo] = tree_data["sha"]
+        if commit_sha:
+            self._tree_revisions[repo] = commit_sha
         self._tree_cache[repo] = tree = (default_branch, tree_data.get("tree", []))
         return tree
 
@@ -562,7 +575,7 @@ class GitHubSource(SkillSource):
             return None
 
     def _fetch_file_bytes(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[bytes]:
-        """Fetch exact file bytes. ``ref`` pins to a tree SHA (see ``fetch`` on
+        """Fetch exact file bytes. ``ref`` pins to a revision SHA (see ``fetch`` on
         the TOCTOU); None keeps the legacy unpinned behavior. A pinned file comes from
         raw.githubusercontent.com first: the same bytes at the same commit, outside the REST rate
         limit. Through the Contents API every file in a skill folder cost one call, so an anonymous
@@ -584,7 +597,23 @@ class GitHubSource(SkillSource):
             f"{_API}/{repo}/contents/{quote(path, safe='/')}", params={"ref": ref} if ref else None,
             headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
         )
-        return resp.content if resp is not None and resp.status_code == 200 else None
+        if resp is not None and resp.status_code == 200:
+            return resp.content
+        # The quota can also die before the tree call, which is exactly the unpinned path: the
+        # caller has no revision to lose, so an unpinned raw read at HEAD still serves the install
+        # (#144851). A pinned ref never takes this — its raw try above already 404'd the blob at
+        # that revision, and HEAD bytes would silently break the pin.
+        if resp is not None and not ref and not self._raw_unusable and _is_rate_limit_response(resp):
+            try:
+                raw = hub()._skills_hub_http_get(
+                    f"https://raw.githubusercontent.com/{repo}/HEAD/{quote(path, safe='/')}",
+                    timeout=15.0, follow_redirects=False)
+            except (httpx.HTTPError, OSError, ValueError):  # ValueError: SSRFConnectionBlocked
+                self._raw_unusable = True
+            else:
+                if raw.status_code == 200:
+                    return raw.content
+        return None
 
     def _get_skillsh_groupings(self, repo: str) -> Optional[dict[str, str]]:
         """Repo-root ``skills.sh.json`` groupings flattened to ``{skill_name: title}``. ``skills.sh.json``
