@@ -12,6 +12,7 @@ The parent needs an elevated token (the hosted runner has one) to stand in for t
 install; ``make_user_dir`` only grants when the creating process is elevated.
 """
 import json
+import logging
 import subprocess
 import sys
 import textwrap
@@ -338,3 +339,25 @@ def test_elevated_grants_never_reach_a_junction_target_outside_the_home(home_wit
     home_acl = subprocess.run(["icacls", str(home / "cache")], capture_output=True, text=True, check=True).stdout
     user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
     assert sid in home_acl or user.lower() in home_acl.lower(), home_acl
+
+
+def test_a_home_that_is_itself_a_junction_refuses_quietly(tmp_path, monkeypatch, caplog):
+    """#145002: the home itself may be the operator's own junction (HERMES_HOME moved to another
+    drive). The grant is still refused — it never follows the link — but the refusal is a DEBUG
+    record now, not a WARNING that repeated on every command for as long as the setup exists."""
+    import _winapi
+
+    import hermes_dir_acl
+
+    real = tmp_path / "real-home"
+    real.mkdir()
+    linked = tmp_path / "linked-home"
+    _winapi.CreateJunction(str(real), str(linked))
+    monkeypatch.setenv("HERMES_HOME", str(linked))
+    with caplog.at_level(logging.DEBUG, logger="hermes_dir_acl"):
+        hermes_dir_acl.make_user_dir(linked, exist_ok=True)
+        assert hermes_dir_acl.grant_user_access(linked) is False
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert [r for r in caplog.records
+            if r.levelno == logging.DEBUG and "linked-home" in r.getMessage()]
+    linked.rmdir()  # removes the junction itself, not the target

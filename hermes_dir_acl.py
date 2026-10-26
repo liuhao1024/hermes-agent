@@ -260,7 +260,27 @@ def _expected_final(path: Path) -> str | None:
     return os.path.join(os.path.realpath(home), *Path(os.path.abspath(path)).relative_to(home).parts)
 
 
+def _is_home_itself(path: Path) -> bool:
+    """True when *path* is the Hermes home itself. The home (and above) is the operator's own
+    choice and may legitimately be a link — an entry INSIDE it is what same-user code can swap
+    (see :func:`_components_below_home`) — so a refused grant on the home itself is the safe
+    answer, not a security signal worth repeating on every command (#145002)."""
+    try:
+        from hermes_constants import get_hermes_home
+        home = os.path.abspath(get_hermes_home())
+    except (ImportError, OSError):
+        return False
+    return os.path.normcase(os.path.abspath(path)) == os.path.normcase(home)
+
+
 def _warn_refused(path: Path, exc: BaseException) -> None:
+    if _is_home_itself(path):
+        log.debug("Not granting the current user access to %s while elevated: it is the Hermes "
+                  "home itself and a junction, symlink or other reparse point; an elevated grant "
+                  "never follows a link, so entries on the real directory behind it are not "
+                  "granted from here. Links INSIDE the home are still refused with a warning.",
+                  path)
+        return
     log.warning("Not granting the current user access to %s while elevated (%s): an elevated grant "
                 "never follows a junction or link out of the Hermes home. If this is your own link, "
                 "point HERMES_HOME (or the link) at the real directory.", path, exc)
@@ -276,7 +296,8 @@ def grant_user_access(path: str | Path, *, elevated: bool | None = None, repair_
     """Give the token's user an inheriting full-control ACE on *path* when this process is elevated.
 
     True when a grant was attempted and did not fail; False off Windows, when not elevated, when
-    *path* is a junction/symlink/reparse point (refused, one warning), or when the grant failed
+    *path* is a junction/symlink/reparse point (refused, one warning — DEBUG-level instead when
+    *path* is the Hermes home itself, the operator's own choice of link), or when the grant failed
     (logged; the directory itself still exists). *elevated* defaults to the probed host fact.
 
     With *repair_children* (an existing dir an earlier elevated run may have filled), a write that
@@ -412,9 +433,10 @@ def make_user_dir(path: str | Path, mode: int = 0o777, *, parents: bool = False,
     Off Windows or unelevated this is ``Path.mkdir`` and nothing else. Elevated, every directory
     this call created (missing parents included) is granted the user's inheriting full-control ACE,
     and an existing leaf (the repair case) once per directory object per process, except that a
-    component that is a junction/symlink/reparse point stops the grants with one warning. An
-    existing leaf without ``exist_ok`` is still granted before the ``FileExistsError``. *elevated*
-    is the host fact (default: probed); production passes nothing."""
+    component that is a junction/symlink/reparse point stops the grants with one warning (DEBUG
+    when that component is the Hermes home itself — the operator's own choice of link, #145002).
+    An existing leaf without ``exist_ok`` is still granted before the ``FileExistsError``.
+    *elevated* is the host fact (default: probed); production passes nothing."""
     target = Path(path)
     if not _elevated(elevated):
         target.mkdir(mode=mode, parents=parents, exist_ok=exist_ok)

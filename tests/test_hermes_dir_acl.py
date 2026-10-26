@@ -4,6 +4,7 @@ proved by ``test_hermes_dir_acl_windows.py`` on Windows CI).
 No test pretends to be on Windows: elevation is a host fact the functions take as data (or the
 process_is_elevated probe stands in for it on a production path), and only the native writer
 (``_grant_with_pywin32``) is replaced, to record what an elevated grant would have touched."""
+import logging
 import os
 from pathlib import Path
 
@@ -345,3 +346,35 @@ def test_icacls_tree_fallback_walks_the_tree_once(tmp_path, monkeypatch):
 
 def _no_pywin32(*_a, **_k):
     raise ImportError("pywin32 missing")
+
+
+def test_refusing_the_home_itself_is_debug_not_a_repeated_warning(tmp_path, monkeypatch, caplog):
+    """#145002: HERMES_HOME itself is the operator's own choice and may legitimately be a link
+    (a junction to another drive, say). The refusal stays — a grant never follows it — but it is
+    not a security signal, so it must not repeat as a WARNING on every command; a link INSIDE
+    the home is still the loud, swappable case."""
+    real = tmp_path / "real-home"
+    real.mkdir()
+    linked = tmp_path / "linked-home"
+    linked.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(linked))
+    monkeypatch.setattr(hermes_dir_acl, "process_is_elevated", lambda: True)
+    monkeypatch.setattr(hermes_dir_acl, "_granted", set())
+    touched = []
+    monkeypatch.setattr(hermes_dir_acl, "_grant_with_pywin32",
+                        lambda path, *_a, **_k: touched.append(os.path.realpath(path)))
+    with caplog.at_level(logging.DEBUG, logger="hermes_dir_acl"):
+        hermes_dir_acl.make_user_dir(linked, exist_ok=True)  # the initialize-home call
+        hermes_dir_acl.grant_user_access(linked)  # a direct grant on the home
+    assert touched == [], "a grant followed the home's own link"
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert [r for r in caplog.records
+            if r.levelno == logging.DEBUG and "linked-home" in r.getMessage()]
+
+    # A link below the home is still the loud case: same refusal, WARNING, no grant.
+    (real / "cache").mkdir()
+    (linked / "cache" / "images").symlink_to(real, target_is_directory=True)
+    with caplog.at_level(logging.WARNING, logger="hermes_dir_acl"):
+        hermes_dir_acl.make_user_dir(linked / "cache" / "images", exist_ok=True)
+    assert [r for r in caplog.records if "never follows a junction" in r.getMessage()]
+    assert touched == []
