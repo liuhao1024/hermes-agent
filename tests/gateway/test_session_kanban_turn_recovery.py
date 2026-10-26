@@ -78,3 +78,27 @@ def test_unprovable_claim_denies_retry_and_goal_continuation(tmp_path, monkeypat
 
     assert result["failed"] and len(agent.calls) == 1 and goal_calls == []
     assert session_kanban.worker_exit_code(path, context) == kb.KANBAN_RATE_LIMIT_EXIT_CODE
+
+
+def test_goal_turn_keeps_the_dispatcher_author(tmp_path, monkeypatch):
+    """The goal-mode continuation is the dispatcher's turn too, same as the first turn and the
+    in-place retry (#144861): the recovery test above pins those two, nothing pinned the goal
+    `turn()` callback, so a regression dropping the kwarg there would pass CI (#145050)."""
+    path, context, frame = _claimed_frame(tmp_path, monkeypatch, goal_mode=True)
+    blocks = []
+
+    def _fake_goal_loop(**kw):
+        real_block = kw["block_fn"]
+        kw["block_fn"] = lambda reason: (blocks.append(reason), real_block(reason))
+        kw["run_turn"]("continue the goal")
+
+    monkeypatch.setattr("hermes_cli.goals.run_kanban_goal_loop", _fake_goal_loop)
+    agent = _Agent([{"completed": True, "final_response": "first"},
+                    {"completed": True, "final_response": "second"}])
+
+    result = session_kanban.run_worker_turns(agent, frame, [])
+
+    assert result["final_response"] == "second" and len(agent.calls) == 2
+    assert agent.calls[1] == ("continue the goal", [{"role": "user", "content": "from-store"}])
+    assert agent.authors == [{"id": "kanban:dispatcher", "name": "Kanban dispatcher", "is_bot": True}] * 2
+    assert blocks == [] and session_kanban.worker_exit_code(path, context) == 0
