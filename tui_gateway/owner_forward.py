@@ -84,7 +84,10 @@ async def connect_owner(home: Path, endpoint):
     ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
     url, protocols = gateway_ws_target(endpoint, ticket)
     # Loopback owner dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
-    async with connect(url, subprotocols=protocols, open_timeout=10, proxy=None) as ws:
+    # max_size matches ``gateway_client.connect_gateway``'s default: the ``session.resume`` answer
+    # this dial makes first carries the whole history, which dwarfs the library's 1 MiB default.
+    async with connect(url, subprotocols=protocols, open_timeout=10, proxy=None,
+                       max_size=8 * 1024 * 1024) as ws:
         if ws.subprotocol != GATEWAY_WS_PROTOCOL:
             raise OwnerUnavailable("the gateway answered with another protocol")
         async with GatewayClient(ws) as client:
