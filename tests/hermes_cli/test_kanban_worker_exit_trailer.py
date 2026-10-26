@@ -132,6 +132,42 @@ def test_plain_budget_trip_still_auto_recovers(kanban_home):
         assert kb.get_task(conn, tids[1]).status == "ready"
 
 
+def test_stale_trailer_from_a_previous_run_is_not_booked_on_the_live_rerun(kanban_home):
+    """A re-run appends to the same worker log: until the replacement worker exits, the
+    tail still ends with the *previous* run's trailer. Reading it books the old rc=0 on
+    the live run (#141758) — a worker was recorded ``exited cleanly (rc=0)`` while alive
+    and the dispatcher spawned a second reviewer beside it. Trailer bytes followed by
+    later output belong to a finished run; the live one has no exit to read yet."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rerun", assignee="a")
+        _dead_worker_with_log(conn, tid, 72001, 0)
+        log = kb.worker_log_path(tid)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("dispatching attempt 2 — the replacement worker is streaming output\n")
+
+        assert kbd._worker_log_exit_code(tid) is None
+
+        kbd.detect_crashed_workers(conn)
+        run = conn.execute(
+            "SELECT outcome, error, metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (tid,)).fetchone()
+        assert kb._json_dict(run["metadata"]).get("protocol_violation") is None
+        assert "pid 72001 not alive" in (run["error"] or "")
+
+
+def test_trailer_followed_only_by_blank_lines_still_books(kanban_home):
+    """Blank padding after the trailer is not new-run output: the logged exit stays
+    readable, so the sweep still books the real protocol violation."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="blank-tail", assignee="a")
+        _dead_worker_with_log(conn, tid, 73001, 0)
+        log = kb.worker_log_path(tid)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("\n\n")
+
+        assert kbd._worker_log_exit_code(tid) == 0
+
+
 def test_exit_single_query_writes_trailer_only_for_kanban_workers(monkeypatch, capsys):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     with pytest.raises(SystemExit) as exc:

@@ -265,14 +265,23 @@ def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
     or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    wins — the log is append-mode across re-runs — but only while it is still
+    the last thing in the file: bytes after a trailer belong to a later run's
+    output, so that trailer describes a finished run, not the live one being
+    swept (#141758).
     """
     try:
         raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
     except Exception:
         return None
-    matches = _EXIT_TRAILER_RE.findall(raw or "")
-    return int(matches[-1]) if matches else None
+    match = None
+    for match in _EXIT_TRAILER_RE.finditer(raw or ""):
+        pass
+    if match is None:
+        return None
+    if (raw[match.end():] or "").strip():
+        return None
+    return int(match.group(1))
 
 
 def reap_worker_zombies() -> list[int]:
