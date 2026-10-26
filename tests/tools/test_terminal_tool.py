@@ -35,7 +35,7 @@ def test_actual_sudo_command_uses_configured_password(monkeypatch):
 
     transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command("sudo apt install -y ripgrep")
 
-    assert transformed == "sudo -S -p '' apt install -y ripgrep"
+    assert transformed == "LC_ALL=C sudo -S -p '' apt install -y ripgrep"
     assert sudo_stdin == "testpass\n"
 
 
@@ -50,7 +50,7 @@ def test_explicit_empty_sudo_password_tries_empty_without_prompt(monkeypatch):
 
     transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command("sudo true")
 
-    assert transformed == "sudo -S -p '' true"
+    assert transformed == "LC_ALL=C sudo -S -p '' true"
     assert sudo_stdin == "\n"
 
 
@@ -100,7 +100,7 @@ def test_literal_sudo_executables_receive_password_stdin(monkeypatch):
         for executable in ("sudo", "/usr/bin/sudo", "'/opt/my tools/sudo'", '"/usr/bin/sudo"'):
             command = prefix + executable + " -u root true"
             rewritten, stdin = terminal_tool_sudo._transform_sudo_command(command)
-            assert rewritten == prefix + executable + " -S -p '' -u root true"
+            assert rewritten == prefix + "LC_ALL=C " + executable + " -S -p '' -u root true"
             assert stdin == "testpass\n"
 
 
@@ -122,3 +122,45 @@ def test_sudo_rewrite_preserves_env_operands_and_prose(monkeypatch):
 def test_count_real_sudo_invocations_ignores_mentions(monkeypatch):
     assert terminal_tool_sudo._count_real_sudo_invocations("grep sudo README.md") == 0
     assert terminal_tool_sudo._count_real_sudo_invocations("sudo a; sudo b") == 2
+
+
+def test_sudo_1_9_counted_wrong_password_clears_cached_password(monkeypatch):
+    """sudo >= 1.9 counts the attempts ("sudo: 1 incorrect password attempt"); the bare-form
+    substring only matched after three tries, so a rejected password stayed cached and the
+    user was never re-prompted (with `sudo -S` the retry reads EOF, so the count is 1)."""
+    monkeypatch.delenv("SUDO_PASSWORD", raising=False)
+    output = "Sorry, try again.\n\nsudo: no password was provided\nsudo: 1 incorrect password attempt\n"
+    assert terminal_tool_sudo._sudo_wrong_password_failure(output)
+    terminal_tool_sudo._set_cached_sudo_password("stale")
+    assert terminal_tool_sudo._invalidate_cached_sudo_on_auth_failure("sudo true", output)
+    assert terminal_tool_sudo._get_cached_sudo_password() == ""
+
+
+def test_sudo_wrong_password_failure_matches_all_rejection_forms():
+    for output in (
+        "sudo: authentication failed",
+        "sudo: incorrect password attempt",
+        "sudo: 1 incorrect password attempt",
+        "sudo: 3 incorrect password attempts",
+        "sudo: maximum 3 incorrect authentication attempts",
+        "Sorry, try again.",
+    ):
+        assert terminal_tool_sudo._sudo_wrong_password_failure(output), output
+    for output in (
+        "sudo: no password was provided",
+        "sudo: a password is required",
+        "sudo: no tty present",
+        "apt-get install -y ripgrep",
+    ):
+        assert not terminal_tool_sudo._sudo_wrong_password_failure(output), output
+
+
+def test_sudo_rewrite_pins_c_locale_so_markers_survive_localization(monkeypatch):
+    """sudo prints its own diagnostics in the caller's locale, so on a localized system no
+    English marker ever matches. The shell-prefix assignment scopes LC_ALL=C to the sudo
+    process only: env_reset keeps it off the target command, and a command-line VAR=val
+    still wins over an earlier assignment (sudo passes it to the target verbatim)."""
+    monkeypatch.setenv("SUDO_PASSWORD", "testpass")
+    transformed, sudo_stdin = terminal_tool_sudo._transform_sudo_command("sudo apt install -y ripgrep")
+    assert transformed == "LC_ALL=C sudo -S -p '' apt install -y ripgrep"
+    assert sudo_stdin == "testpass\n"

@@ -108,19 +108,23 @@ def _handle_sudo_failure(output: str, env_type: str) -> str:
     return output + f"\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
 
 
-# sudo -S rejects a bad cached/interactive password with these messages.
-_SUDO_WRONG_PASSWORD_MARKERS = (
-    "sudo: authentication failed",
-    "sudo: incorrect password attempt",
-    "sudo: maximum 3 incorrect authentication attempts",
-    "sudo: 3 incorrect password attempts",
+# sudo -S rejects a bad cached/interactive password with messages matching this pattern.
+# A regex, not substrings: sudo >= 1.9 counts the attempts ("sudo: 1 incorrect password
+# attempt"), which the old bare-form substring only matched after three tries — so a
+# rejected password stayed cached and the user was never re-prompted. The rewrite below
+# pins LC_ALL=C on the sudo process, keeping these English markers matchable everywhere.
+_SUDO_WRONG_PASSWORD_RE = re.compile(
+    r"incorrect password attempts?"
+    r"|maximum \d+ incorrect authentication attempts?"
+    r"|sudo: authentication failed"
+    r"|sorry, try again",
+    re.IGNORECASE,
 )
 
 
 def _sudo_wrong_password_failure(output: str) -> bool:
     """Return True when sudo rejected a piped password."""
-    lowered = (output or "").lower()
-    return any(marker in lowered for marker in _SUDO_WRONG_PASSWORD_MARKERS)
+    return bool(_SUDO_WRONG_PASSWORD_RE.search(output or ""))
 
 
 def _invalidate_cached_sudo_on_auth_failure(command: str | None, output: str) -> bool:
@@ -374,7 +378,13 @@ def _rewrite_real_sudo_invocations(command: str) -> tuple[str, int]:
         in_env = executable == "env"
         env_options = in_env
         if executable == "sudo":
-            out[-1] += " -S -p ''"
+            # Shell-prefix assignment, scoped to the sudo process only: sudo prints its own
+            # diagnostics (wrong-password lines included) in the caller's locale, and the
+            # failure detection above only knows the English markers — a localized sudo
+            # would otherwise keep a rejected password cached forever. env_reset keeps
+            # LC_ALL off the target command, and a command-line VAR=val the user wrote
+            # still wins over this one for the target.
+            out[-1] = f"LC_ALL=C {out[-1]} -S -p ''"
             sudo_count += 1
     return "".join(out), sudo_count
 
