@@ -113,6 +113,31 @@ def _png_metrics(png_b64: str, width: int, height: int) -> tuple[int, int, int]:
     detected_width, detected_height = _image_dimensions_from_bytes(raw)
     return len(raw), *((detected_width, detected_height) if detected_width and detected_height else (width, height))
 
+def _downscale_png_b64_to_max_dimension(png_b64: str, max_dimension: int) -> str:
+    """Longest-edge PNG downscale for full-screen grabs. ``max_image_dimension`` is pushed to
+    the driver at session start, but the driver clamps its WINDOW lanes only —
+    ``get_desktop_state`` comes back at native resolution, so on a 5K display the base64
+    payload blows past the provider's image cap and the turn fails (#145033). Best effort:
+    the payload is returned unchanged when Pillow is unavailable, decoding fails, or the
+    image already fits — a capture the model can see beats no capture."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(base64.b64decode(png_b64, validate=False))) as img:
+            width, height = img.size
+            if max(width, height) <= max_dimension:
+                return png_b64
+            scale = max_dimension / max(width, height)
+            img = img.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            logger.info("Full-screen capture %dx%d exceeds max_image_dimension=%d; downscaled to %dx%d",
+                        width, height, max_dimension, img.width, img.height)
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:  # health: allow BLE001 -- best-effort downscale: any decode/encode failure falls through to the native capture
+        logger.debug("full-screen downscale to max_image_dimension failed: %s", e)
+        return png_b64
+
 def _is_desktop_window(w: dict[str, Any], names: tuple[str, ...] = _DESKTOP_WINDOW_NAMES) -> bool:
     return any(name in f"{w.get('app_name', '')} {w.get('title', '')}".lower() for name in names)
 
@@ -360,6 +385,9 @@ class _CaptureMixin:
         png_b64, image_mime_type = _image_from_tool_result(out)
         if not png_b64:
             return self._failed_capture(mode, _NO_DESKTOP_IMAGE_MSG)
+        from tools.computer_use import cua_backend as _cb  # lazy: cua_backend imports this module at import time
+        if (max_dim := _cb._computer_use_max_image_dimension()) is not None:
+            png_b64 = _downscale_png_b64_to_max_dimension(png_b64, max_dim)
         sc = out.get("structuredContent") or {}
         png_bytes_len, width, height = _png_metrics(png_b64, int(sc.get("screenshot_width") or sc.get("screen_width") or 0),
                                                     int(sc.get("screenshot_height") or sc.get("screen_height") or 0))

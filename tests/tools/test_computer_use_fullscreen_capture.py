@@ -14,6 +14,8 @@ with the sentinel split + no-elements guidance note.
 from __future__ import annotations
 
 import base64
+import io
+import sys
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -23,6 +25,14 @@ _PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAADUlEQVR4nG"
     "NgGAUgAAABCAABgukLHQAAAABJRU5ErkJggg=="
 )
+
+
+def _png_b64_of_size(width: int, height: int) -> str:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 class _FakeSession:
@@ -166,6 +176,47 @@ class TestFullScreenLane:
         assert not session.called("get_desktop_state"), (
             "an exact pid/window target must win over the app sentinel"
         )
+
+
+class TestFullScreenMaxImageDimension:
+    """#145033: ``max_image_dimension`` is pushed to the driver, which clamps its WINDOW
+    lanes only — ``get_desktop_state`` comes back at native resolution, so a 5K display
+    yields a multi-MB base64 payload the provider rejects (>5 MB image cap)."""
+
+    def test_oversized_full_screen_capture_is_downscaled_to_cap(self, monkeypatch):
+        monkeypatch.setattr("tools.computer_use.cua_backend._computer_use_max_image_dimension",
+                            lambda: 100)
+        big = _png_b64_of_size(448, 252)  # 4.5x the cap on the long edge
+        session = _FakeSession(desktop_image=big)
+        backend = _make_backend(session)
+
+        cap = backend.capture(mode="vision", app="screen")
+
+        assert (cap.width, cap.height) == (100, 56), "longest edge must land on the cap, aspect kept"
+        assert cap.png_bytes_len < len(base64.b64decode(big)), "downscale must shrink the payload"
+        assert cap.png_b64, "downscaled capture must still carry pixels"
+
+    def test_within_cap_capture_is_returned_byte_for_byte(self, monkeypatch):
+        monkeypatch.setattr("tools.computer_use.cua_backend._computer_use_max_image_dimension",
+                            lambda: 1456)
+        session = _FakeSession()
+        backend = _make_backend(session)
+
+        cap = backend.capture(mode="vision", app="screen")
+
+        assert cap.png_b64 == _PNG_B64, "no silent re-encode of already-compliant captures"
+
+    def test_missing_pillow_still_returns_the_native_capture(self, monkeypatch):
+        big = _png_b64_of_size(448, 252)
+        monkeypatch.setattr("tools.computer_use.cua_backend._computer_use_max_image_dimension",
+                            lambda: 100)
+        monkeypatch.setitem(sys.modules, "PIL", None)
+        session = _FakeSession(desktop_image=big)
+        backend = _make_backend(session)
+
+        cap = backend.capture(mode="vision", app="screen")
+
+        assert cap.png_b64 == big, "Pillow-less environments keep today's (passthrough) behavior"
 
 
 class TestDesktopShellLane:
