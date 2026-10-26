@@ -1128,9 +1128,11 @@ _TOUR_PROBE_TIMEOUT_S = 10
 _TOUR_BRIDGE_UNAVAILABLE = json.dumps({
     "success": False,
     "error": ("No Hermes Desktop window answered the tour request. The tour is driven by the desktop app's "
-              "renderer, which updates separately from this backend, so an app build older than the tour tool "
-              "has nothing listening. Update the Hermes Desktop app and start a new session. Do not retry tour "
-              "in this session.")})
+              "renderer, which updates separately from this backend — the usual cause is an app build older "
+              "than the tour tool with nothing listening. Update the Hermes Desktop app and start a new "
+              "session; do not retry tour in this session. If the app is current, the answer may have been "
+              "dropped backend-side instead: enable debug logging for gateway.session_controls and look for "
+              "'dropping response'.")})
 
 
 def _tour_request(sid: str, payload: dict) -> str:
@@ -1172,9 +1174,11 @@ _PREVIEW_ACTION_BRIDGE_UNAVAILABLE = json.dumps({
     "success": False,
     "error": ("No Hermes Desktop window answered the preview action request. The drive_preview / "
               "annotate_preview bridge is served by the desktop app's renderer, which updates "
-              "separately from this backend, so an app build older than the tool has nothing "
-              "listening. Update the Hermes Desktop app, open a page with open_preview, and try "
-              "again in this session after a short cooldown.")})
+              "separately from this backend — the usual cause is an app build older than the tool "
+              "with nothing listening. Update the Hermes Desktop app, open a page with "
+              "open_preview, and try again in this session after a short cooldown. If the app is "
+              "current and a page is open, the answer may have been dropped backend-side instead: "
+              "enable debug logging for gateway.session_controls and look for 'dropping response'.")})
 
 # One in-flight cooldown-expiry reprobe per session: concurrent callers fail fast.
 _preview_action_reprobe: dict[str, object] = {}
