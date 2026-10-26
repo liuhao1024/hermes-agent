@@ -290,8 +290,15 @@ class SSHEnvironment(BaseEnvironment):
 
     def cleanup(self):
         if self._sync_manager:
-            logger.info("SSH: syncing files from sandbox...")
-            self._sync_manager.sync_back()
+            if getattr(self, "_executed_any_command", False):
+                logger.info("SSH: syncing files from sandbox...")
+                self._sync_manager.sync_back()
+            else:
+                # Nothing ever executed here (#145011): the initial push is the only state, so a
+                # pull-back would download the whole remote .hermes/ and rewrite it locally
+                # unchanged. Idle dashboard reconnects create and reap sandboxes without a
+                # single command — each one cost ~2x the tree size on persistent storage.
+                logger.debug("SSH: skipping sync-back — no command ever ran in this sandbox")
         for socket in self._control_sockets():
             if not socket.exists():
                 continue

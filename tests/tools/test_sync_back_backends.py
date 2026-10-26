@@ -166,6 +166,9 @@ class TestSSHCleanup:
         monkeypatch.setattr(ssh_env, "FileSyncManager", TrackingSyncManager)
 
         env = SSHEnvironment(host="h", user="u")
+        # #145011: cleanup() pulls back only what commands may have changed; this test pins
+        # the ORDER of that pull-back against the ControlMaster exit, so pretend one ran.
+        env._executed_any_command = True
 
         # Create a fake control socket so cleanup tries the SSH exit
         import tempfile

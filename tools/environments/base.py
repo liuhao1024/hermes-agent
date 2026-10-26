@@ -328,6 +328,10 @@ class BaseEnvironment(ABC):
         # True when login bash is unusable (e.g. broken Git-for-Windows startup)
         # so execute() must fall back to non-login ``bash -c``, not ``bash -l``.
         self._prefer_nonlogin = False
+        # Set by execute(): whether anything ever ran in this environment. A sandbox that was
+        # brought up but never executed a command cannot have produced remote-side changes, so
+        # remote backends can skip the teardown pull-back entirely (#145011).
+        self._executed_any_command = False
 
     # --- Abstract methods ---
     def _run_bash(
@@ -688,6 +692,7 @@ class BaseEnvironment(ABC):
         See #94285.
         """
         self._before_execute()
+        self._executed_any_command = True
 
         exec_command, sudo_stdin = self._prepare_command(command)
         # Guard against the `A && B &` subshell-wait trap by default; callers

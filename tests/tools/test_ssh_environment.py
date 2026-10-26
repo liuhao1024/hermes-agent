@@ -453,3 +453,39 @@ class TestRealSSHBackend:
         assert _run(f"wc -c < {shlex.quote(path)}")["output"].strip() == str(len(content.encode()))
         read = json.loads(read_file_tool(path, task_id="ssh_test"))
         assert "beta: ünïcödé ✓" in read["content"], read
+
+
+class TestCleanupSyncBackGate:
+    """#145011: an idle dashboard reconnect creates and reaps a sandbox without ever running a
+    command. Pulling the whole remote .hermes/ back as a tar and extracting it just to apply
+    "nothing changed" cost ~2x the tree size on persistent storage per teardown."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_connection(self, monkeypatch):
+        monkeypatch.setattr("tools.environments.ssh.subprocess.run",
+                            lambda *a, **k: subprocess.CompletedProcess([], 0))
+        monkeypatch.setattr("tools.environments.ssh.subprocess.Popen",
+                            lambda *a, **k: MagicMock(stdout=iter([]), stderr=iter([]),
+                                                      stdin=MagicMock()))
+        monkeypatch.setattr("tools.environments.base.time.sleep", lambda _: None)
+
+    def _env(self):
+        env = SSHEnvironment(host="h", user="u")
+        env._sync_manager = MagicMock()
+        return env
+
+    def test_no_command_no_pull_back(self):
+        env = self._env()
+        env.cleanup()
+        env._sync_manager.sync_back.assert_not_called()
+
+    def test_a_command_reenables_the_pull_back(self, monkeypatch):
+        monkeypatch.setattr(
+            "tools.environments.base_output.subprocess.Popen",
+            lambda *a, **k: MagicMock(poll=lambda: 0, returncode=0, stdout=iter([]),
+                                      stderr=iter([]), stdin=MagicMock(), pid=0))
+        env = self._env()
+        env.execute("true")
+        assert env._executed_any_command
+        env.cleanup()
+        env._sync_manager.sync_back.assert_called_once_with()
