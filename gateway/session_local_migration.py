@@ -86,7 +86,11 @@ def legacy_launch_params(row):
     route = SessionGatewayMixin.session_gateway_runtime(row)
     route = {key: value.strip() for key, value in route.items() if isinstance(value, str) and value.strip()}
     billing_base_url = row.get('billing_base_url')
-    if 'base_url' not in route and isinstance(billing_base_url, str) and billing_base_url.strip():
+    # Only a real endpoint revives a route: a virtual route's settlement stamp (MoA's
+    # ``moa://local``, #144984) is a billing record, and pairing it into the launch would make
+    # every later resume refuse the session as an invalid base_url.
+    if ('base_url' not in route and isinstance(billing_base_url, str)
+            and billing_base_url.strip().startswith(('http://', 'https://'))):
         route['base_url'] = billing_base_url.strip()
         # The reader returns a bare ``custom`` billing provider with its endpoint and drops ``auto``:
         # an endpoint left without a provider is a custom route, never one to pair with the

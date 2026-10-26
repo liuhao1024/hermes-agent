@@ -887,9 +887,11 @@ class SessionGatewayMixin:
             # the readers' bare-custom heal (canonical_custom_identity) can recover custom:<name>
             # from that endpoint instead of resume recombining the stored model with the ambient
             # default (#136323); an endpoint no longer configured still heals to nothing. "auto"
-            # bills through the router with no attributable endpoint and stays filtered.
+            # bills through the router with no attributable endpoint and stays filtered. A virtual
+            # route's settlement stamp (MoA's ``moa://local``, #144984) is not an endpoint: pairing
+            # it here would freeze a URL no client may send and resume would refuse the session.
             billing_base_url = str((session_meta or {}).get("billing_base_url") or "").strip()
-            if billing_base_url:
+            if billing_base_url and billing_base_url.startswith(("http://", "https://")):
                 top_level.setdefault("base_url", billing_base_url)
                 top_level["provider"] = "custom"
         if top_level:

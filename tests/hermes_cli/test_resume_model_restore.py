@@ -481,6 +481,20 @@ def test_session_gateway_runtime_bare_custom_falls_back_to_billing_base_url():
     assert SessionDB.session_gateway_runtime(meta) == {}
 
 
+def test_session_gateway_runtime_skips_virtual_route_settlement_stamp():
+    """#144984: a MoA turn pins ``base_url: moa://local`` and the usage stamp records it as the
+    row's billing_base_url. The sentinel is a settlement record, not an endpoint — surfacing it
+    as the resume route would freeze a URL the launch check refuses, so the session could never
+    be reopened. The bare-custom pair heals only from a real http(s) endpoint."""
+    meta = _row()
+    meta["billing_provider"] = "custom"
+    meta["billing_base_url"] = "moa://local"
+    assert SessionDB.session_gateway_runtime(meta) == {}
+    # A non-bare virtual provider stamp is equally not a route endpoint.
+    meta["billing_provider"] = "moa"
+    assert SessionDB.session_gateway_runtime(meta) == {"provider": "moa"}
+
+
 GLM_OLD, GLM_NEW = "http://10.0.0.5:8000/v1", "http://10.0.0.6:8000/v1"
 
 
