@@ -232,6 +232,23 @@ def _endpoint_owner(saved, config):
                             detail=f'{identity} no longer serves the saved endpoint; select a model to continue')
 
 
+def _host_dashboard_stamps(config):
+    """Stamps a redeemed native ticket may additionally adopt: the host's own dashboard login.
+
+    A dashboard-login client (hermes-mobile) mints rows through the WS upgrade, so its chats land
+    stamped ``basic:<username>`` — neither the native subject nor a login label, so the stamp
+    otherwise walls the host's own Desktop off from its own phone forever (#144814). A basic login
+    is a single credential this host configured: a row stamped with it was written through this
+    gateway's own gate, the trust domain the redeemed native ticket already belongs to. Every
+    other stamp (another local user, another login name, an issuer-bearing subject) stays foreign
+    (RT-32, #140183 review F1)."""
+    auth = ((config or {}).get('dashboard') or {}).get('basic_auth') or {}
+    username = str(auth.get('username') or '').strip()
+    if not username:
+        return frozenset()
+    return frozenset({f'basic:{username}'})
+
+
 def adopt_legacy_session(authority, actor, row):
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
@@ -239,9 +256,12 @@ def adopt_legacy_session(authority, actor, row):
             or not {'session:read', 'session:create'} <= actor.capabilities):
         raise RuntimeStoreError('not_found')
     from hermes_state_local_migration import LEGACY_CREATION_SOURCES, validate_legacy_row
-    validate_legacy_row(authority.db, row, subject=actor.subject)
+    from gateway.run import _load_gateway_config
+    config = _load_gateway_config()
+    native_stamps = _host_dashboard_stamps(config)
+    validate_legacy_row(authority.db, row, subject=actor.subject, native_stamps=native_stamps)
     authority._require_admission_open()
-    from gateway.run import _load_gateway_config, _resolve_gateway_model
+    from gateway.run import _resolve_gateway_model
     from gateway.session_policy import build_policy, bind_launch_key
     from gateway.session_local_recovery import restore_local_session
     from hermes_state_local import commit_local_session
@@ -252,7 +272,6 @@ def adopt_legacy_session(authority, actor, row):
     params, api_mode = legacy_launch_params(row)
     params['source'] = LEGACY_CREATION_SOURCES.get(row['source'], row['source'])
     private = {}
-    config = _load_gateway_config()
     params, api_mode = legacy_bot_chat_launch(row, params, api_mode, config)
     model_cfg = config.get('model')
     if isinstance(model_cfg, dict) and ('provider' in params or 'base_url' in params):
@@ -313,7 +332,7 @@ def adopt_legacy_session(authority, actor, row):
         with active_session_liveness_guard(row['id'], registry_home=Path(authority.db.db_path).parent) as active:
             if active:
                 raise RuntimeStoreError('runtime_coordination_required')
-            commit_local_session(authority.db, epoch=authority.epoch, receipt=receipt)
+            commit_local_session(authority.db, epoch=authority.epoch, receipt=receipt, native_stamps=native_stamps)
     except ActiveSessionRegistryError as exc:
         raise RuntimeStoreError('runtime_coordination_required') from exc
     return restore_local_session(authority, sid)

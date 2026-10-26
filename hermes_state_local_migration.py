@@ -41,29 +41,33 @@ def login_owned_by(row, subject):
     return _login_label(subject) == user_id
 
 
-def validate_legacy_row(db, row, *, subject=None):
+def validate_legacy_row(db, row, *, subject=None, native_stamps=()):
     # Unrouted old local history only. Existing identity, foreign profile,
     # API, messaging, delegate and canonical rows require their own authority.
     # ``subject``: the adopting caller, whose own login stamp is not a foreign identity. A ``user_id``
     # stamp equal to ``subject`` itself names that principal: it is already its history by
     # ``authorize_history``'s rule, so it adopts like an unstamped row.
+    # ``native_stamps``: stamps a redeemed native ticket may additionally adopt, computed by the
+    # gateway caller that owns the host config (a dashboard-login client's chats, #144814). Every
+    # other caller (stored listing, bot chat, receipt rebinding) passes none and keeps the stamp
+    # as its boundary (RT-32, #140183 review F1).
     user_id = row.get('user_id')
     if (row['source'] not in LEGACY_LOCAL_SOURCES
             or any(row.get(k) for k in ('session_key', 'chat_id', 'origin_json'))
             or (user_id and user_id != subject and not legacy_account_label(row)
-                and not login_owned_by(row, subject))
+                and not login_owned_by(row, subject) and user_id not in native_stamps)
             or row.get('profile_name') not in (None, '', db._own_profile_name() or 'default')):
         raise RuntimeStoreError('not_found')
 
 
-def bind_legacy_target(db, conn, receipt):
+def bind_legacy_target(db, conn, receipt, *, native_stamps=()):
     target = receipt['legacy_session_id']
     if target != receipt['session_id']:
         raise RuntimeStoreError('storage_unavailable')
     row = conn.execute('SELECT * FROM sessions WHERE id=?', (target,)).fetchone()
     if row is None:
         raise RuntimeStoreError('not_found')
-    validate_legacy_row(db, dict(row), subject=receipt['principal_id'])
+    validate_legacy_row(db, dict(row), subject=receipt['principal_id'], native_stamps=native_stamps)
     from hermes_state_mutation_binding import BINDING_PREFIX
     imported = conn.execute('SELECT value FROM state_meta WHERE key=?', (BINDING_PREFIX + target,)).fetchone()
     if imported and json.loads(imported[0]) != [receipt['profile_id'], receipt['principal_id']]:

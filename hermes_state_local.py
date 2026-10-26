@@ -9,7 +9,7 @@ API_BINDING_PREFIX = 'gateway.api.binding.v1.'
 API_DECLARED_PREFIX = 'gateway.api.conversation.v1.'
 
 
-def commit_local_session(db, *, epoch, receipt):
+def commit_local_session(db, *, epoch, receipt, native_stamps=()):
     """Reserve the row, route and immutable policy together, before publication. A staged receipt's
     ``on_create`` (owner memory, never stored) is published by the transaction that creates the row
     and withdrawn if that transaction fails: an exact retry, a refused or a losing attempt adds none."""
@@ -52,7 +52,7 @@ def commit_local_session(db, *, epoch, receipt):
             raise RuntimeStoreError('admission_conflict')
         if 'legacy_session_id' in receipt:
             from hermes_state_local_migration import bind_legacy_target
-            bind_legacy_target(db, conn, receipt)
+            bind_legacy_target(db, conn, receipt, native_stamps=native_stamps)
         policy, entry = receipt['policy'], receipt['entry']
         from datetime import datetime
         started = datetime.fromisoformat(entry['created_at']).timestamp()
