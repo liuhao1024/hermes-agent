@@ -249,6 +249,27 @@ def _install_names(names: list[str], target: str | None = None, *, verify: bool 
                     entry = stage_only(name, target)
                     print(f"✓ {name} (staged for {target}: {entry.name})")
                 else:
+                    try:
+                        get_package(name)
+                    except KeyError:
+                        # A positional is a STORE package (node, python, uv, …),
+                        # not a pyproject extra — the two namespaces do not
+                        # overlap. Naming an extra here used to die on the raw
+                        # KeyError; give the one remedy the hint prints.
+                        from pm.features import declared_extras
+
+                        if name in declared_extras(repo_root()):
+                            raise InstallError(
+                                name,
+                                f"{name!r} is a dependency extra, not a store package",
+                                remedy=f"enable it with `hermes pm install --extra {name}`",
+                            ) from None
+                        raise InstallError(
+                            name,
+                            f"unknown store package {name!r} — positionals are store tools "
+                            f"(node, python, uv, …)",
+                            remedy="run `hermes pm doctor` to list the closure",
+                        ) from None
                     ensure(name, explicit=True, verify=verify, progress=progress, _operation=operation)
                     if name == "python":
                         from hermes_cli.venv_sync import publish_launchers
