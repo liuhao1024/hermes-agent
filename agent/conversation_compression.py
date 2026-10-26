@@ -32,6 +32,11 @@ from agent.auxiliary_client import AuxiliaryExplicitCancellation
 from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
 from agent.conversation_compression_codex import _compress_context_via_codex_app_server
+from agent.conversation_compression_context_engine import (
+    _PENDING_CONTEXT_ENGINE_NOTIFICATION, _hand_off_metrics_segment,
+    _notify_context_engine_compression_complete, _queue_context_engine_compression_notification,
+    finalize_context_engine_compression_notification,
+)
 from agent.conversation_compression_deadline import resolve_context_compression_timeouts
 from agent.conversation_compression_telemetry import (
     _emit_aborted_attempt_telemetry, _emit_blocked_attempt_telemetry, _emit_bypassed_attempt_telemetry,
@@ -2460,63 +2465,6 @@ def _stamp_scoped_twins(targets: list, source: dict, *, exact_counts_stamped: bo
             target[_DB_PERSISTED_MARKER] = True
 
 
-_PENDING_CONTEXT_ENGINE_NOTIFICATION = "_pending_context_engine_compression_notification"
-
-
-def _hand_off_metrics_segment(old_session_id: str, new_session_id: str) -> None:
-    """Shared metrics count one conversation across the rotation (a no-op when collection is off)."""
-    with _swallow('shared-metrics segment hand-off failed', exc_info=True):
-        from hermes_cli.observability.relay_shared_metrics import rotate_segment
-        rotate_segment(old_session_id, new_session_id)
-
-
-def _notify_context_engine_compression_complete(agent: Any, *, new_session_id: str, old_session_id: str) -> bool:
-    """Notify the active context engine after a durable compression commit."""
-    # Opt-in relay session-span segmentation. Observer semantics — failure must
-    # never undo or delay the committed compression.
-    with _swallow('relay segment rotation notification failed', exc_info=True):
-        from agent import relay_runtime
-        relay_runtime.SESSION_COORDINATOR.notify_session_compacted(
-            profile_key=relay_runtime.current_profile_key(), session_id=new_session_id, old_session_id=old_session_id
-        )
-    _hand_off_metrics_segment(old_session_id, new_session_id)
-    callback = getattr(agent.context_compressor, "on_session_start", None)
-    if not callable(callback):
-        return False
-    try:
-        callback(
-            new_session_id, boundary_reason="compression", old_session_id=old_session_id,
-            platform=getattr(agent, "platform", None) or "cli",
-            conversation_id=getattr(agent, "_gateway_session_key", None),
-        )
-        return True
-    except Exception:
-        # Context-engine hooks are observers. A callback failure must not undo
-        # history that the core or an outer host transaction already committed.
-        logger.debug("context engine on_session_start (compression) failed", exc_info=True)
-        return False
-
-
-def _queue_context_engine_compression_notification(agent: Any, *, new_session_id: str, old_session_id: str) -> None:
-    """Stage exactly one existing hook call for an outer host transaction."""
-    if callable(getattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None)):
-        raise RuntimeError("a compression notification is already pending")
-
-    def _notify() -> bool:
-        return _notify_context_engine_compression_complete(
-            agent, new_session_id=new_session_id, old_session_id=old_session_id
-        )
-
-    setattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, _notify)
-
-
-def finalize_context_engine_compression_notification(agent: Any, *, committed: bool) -> bool:
-    """Emit or discard a deferred notification; repeated calls are no-ops."""
-    pending = getattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None)
-    setattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None)
-    if not committed or not callable(pending):
-        return False
-    return bool(pending())
 
 
 class _CompactionLifecycle:
