@@ -430,7 +430,15 @@ def _marker_only_restart_obsolete() -> bool:
             [row for row in fleet if not row_is_external(row)]) or set()) - owed:
         # An unmapped stopped gateway has no identity to match, so only a local gateway that no
         # mapped owed one explains can be its successor; another checkout's gateway never is.
-        return False
+        # One recorded exception: when THIS obligation's own restart phase completed onto the code
+        # the fleet now serves, that restart is the unmapped row's successor — the updater stopped
+        # the old process and raised the current fleet in the same run, so no stranger has to
+        # exist. Without it, an inventory that names one gateway both as a mapped row and as
+        # stopped_unmapped (observed on a launchd-wrapped host, #144754) can never discharge on a
+        # single-profile host, where no unrelated local gateway can ever exist.
+        from hermes_cli.update_host_obligation import host_restart_already_completed
+        if not host_restart_already_completed(target_sha):
+            return False
     _clear_fleet_restart_pending_marker()
     logger.debug(
         "Fleet-restart-pending marker discharged: %d gateway(s) already serve %s",

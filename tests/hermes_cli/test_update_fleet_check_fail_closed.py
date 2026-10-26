@@ -238,3 +238,52 @@ def test_same_sha_retry_adds_newly_stopped_unmapped_debt_to_an_existing_inventor
     assert fleet._fleet_restart_obligation_armed()
     fleet_rows.append({"profile": "work", "state": "current", "code_sha": "head", "pid": 9})
     assert fleet._marker_only_restart_obsolete() is True
+
+
+def test_updaters_completed_restart_settles_the_unmapped_debt_it_recorded(monkeypatch, tmp_path):
+    # #144754: a launchd-wrapped host recorded its ONE gateway twice — as the mapped `default` row
+    # and as stopped_unmapped. On a single-profile host no unrelated local gateway can ever exist
+    # to be the unmapped row's successor, so the obligation never discharged and every CLI start
+    # carried the false "did not restart running gateways" warning across releases. When THIS
+    # obligation's own restart phase completed onto the code the fleet now serves, that restart is
+    # the successor: the updater stopped the old process and raised the current one in one run.
+    from hermes_cli import update_cmd_fleet as fleet, update_host_obligation as host, update_receipt
+
+    monkeypatch.setattr(host, "host_obligation_path", lambda: tmp_path / "host-update-restart.json")
+    monkeypatch.setattr(fleet, "_current_checkout_sha", lambda: "head")
+    fleet._write_fleet_restart_pending_marker(expected_sha="head", runtimes=[
+        {"kind": "gateway", "profile": "default", "pid": 7},
+        {"kind": "gateway", "profile": None, "pid": 7, "stopped_unmapped": True},  # the same PID twice
+    ])
+    fleet_rows = [{"profile": "default", "state": "current", "code_sha": "head", "pid": 8}]
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda **kw: list(fleet_rows))
+
+    # Without the restart stamp this is the stuck shape exactly: the debt can never settle.
+    assert fleet._marker_only_restart_obsolete() is False
+    assert fleet._fleet_restart_obligation_armed()
+
+    host.mark_host_restart_completed("head")
+    assert fleet._marker_only_restart_obsolete() is True
+    assert not fleet._fleet_restart_obligation_armed()
+
+
+def test_restarted_stamp_tied_to_the_served_sha_does_not_settle_a_moved_head(monkeypatch, tmp_path):
+    # The proof must stay exact: a stamp for the code the obligation pulled says nothing once HEAD
+    # has moved past it — an unmapped row recorded under the old pull stays owed on the new code
+    # unless the fleet that serves the new code explains it (a successor row or a fresh restart).
+    from hermes_cli import update_cmd_fleet as fleet, update_cmd_fleet_checkout as checkout
+    from hermes_cli import update_host_obligation as host, update_receipt
+
+    monkeypatch.setattr(host, "host_obligation_path", lambda: tmp_path / "host-update-restart.json")
+    monkeypatch.setattr(fleet, "_current_checkout_sha", lambda: "head")
+    monkeypatch.setattr(checkout, "checkout_contains", lambda expected: True)  # HEAD carries the old pull
+    fleet._write_fleet_restart_pending_marker(expected_sha="old", runtimes=[
+        {"kind": "gateway", "profile": "default", "pid": 7},
+        {"kind": "gateway", "profile": None, "pid": 7, "stopped_unmapped": True},
+    ])
+    host.mark_host_restart_completed("old")  # the restart phase stamped the sha it restarted onto
+    fleet_rows = [{"profile": "default", "state": "current", "code_sha": "head", "pid": 8}]
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda **kw: list(fleet_rows))
+
+    assert fleet._marker_only_restart_obsolete() is False
+    assert fleet._fleet_restart_obligation_armed()
