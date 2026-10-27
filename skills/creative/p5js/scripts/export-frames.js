@@ -81,8 +81,8 @@ function parseArgs() {
   return opts;
 }
 
-// Keep the host policy aligned with tools/browser_tool_session.py::
-// _needs_chromium_sandbox_bypass / CHROMIUM_SANDBOX_BYPASS_ARGS; do not import the core.
+// Keep the host policy aligned with tools/browser_launcher.py::
+// needs_chromium_sandbox_bypass / build_chromium_argv; do not import the core.
 function sandboxBypassReason() {
   if (process.geteuid && process.geteuid() === 0) return 'running as root';
   if (fs.existsSync('/.dockerenv')) return 'running in Docker';
