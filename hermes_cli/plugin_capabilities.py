@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone, UTC
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Last logged verdict per (plugin, capability): the audit line re-logs only on a flip (#145702).
+_audit_last_decision: dict[tuple[str, str], str] = {}
+_audit_log_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -148,9 +153,21 @@ def plugin_capability_granted(plugin_id: str, capability: str, config: Optional[
         allowed, evidence = True, f"legacy key plugins.entries.{plugin_id}.{'.'.join(spec.legacy_path)} (deprecated)"
     else:
         allowed, evidence = False, "not granted"
-    logger.info(  # audit trail for capability gate decisions
+    # Audit trail for capability gate decisions: the check runs on every turn and every tool
+    # dispatch, so an unconditional INFO line per check floods agent.log (#145702). A decision
+    # is worth an INFO line when it happens — first verdict, or a flip — and repeats stay at DEBUG.
+    decision = "allow" if allowed else "deny"
+    with _audit_log_lock:
+        changed = _audit_last_decision.get((plugin_id, capability)) != decision
+        _audit_last_decision[(plugin_id, capability)] = decision
+    log = logger.info if changed else logger.debug
+    log(
         "capability_check plugin=%s capability=%s decision=%s checked_by=plugin_capability_granted evidence=%s",
-        plugin_id, capability, "allow" if allowed else "deny", evidence)
+        plugin_id,
+        capability,
+        decision,
+        evidence,
+    )
     return allowed
 
 

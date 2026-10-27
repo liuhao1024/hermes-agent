@@ -7,6 +7,7 @@ and backward compatibility with the legacy ``allow_*`` gates.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -433,3 +434,52 @@ class TestConsentFlow:
         )
         assert granted is True
         console.input.assert_not_called()
+
+
+# ── Audit log volume (#145702) ───────────────────────────────────────────────
+
+
+class TestAuditLogVolume:
+    """The gate-decision audit line logs once per decision CHANGE, not once per
+    check: capability probes run on every turn and every tool dispatch, so an
+    unconditional INFO line per check flooded agent.log (#145702)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_audit_state(self, monkeypatch):
+        import hermes_cli.plugin_capabilities as pc
+
+        monkeypatch.setattr(pc, "_audit_last_decision", {})
+
+    def _info_checks(self, caplog):
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "capability_check" in r.getMessage()
+        ]
+
+    def test_repeated_same_decision_logs_info_once(self, hermes_home, caplog):
+        with caplog.at_level(logging.INFO, logger="hermes_cli.plugin_capabilities"):
+            for _ in range(3):
+                assert plugin_capability_granted("spamplug", "tools.override") is False
+        assert len(self._info_checks(caplog)) == 1
+
+    def test_repeat_decision_is_still_visible_at_debug(self, hermes_home, caplog):
+        with caplog.at_level(logging.DEBUG, logger="hermes_cli.plugin_capabilities"):
+            plugin_capability_granted("spamplug", "tools.override")
+            plugin_capability_granted("spamplug", "tools.override")
+        debug_checks = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and "capability_check" in r.getMessage()
+        ]
+        assert len(debug_checks) == 1
+
+    def test_decision_change_logs_again(self, hermes_home, caplog):
+        with caplog.at_level(logging.INFO, logger="hermes_cli.plugin_capabilities"):
+            assert plugin_capability_granted("flipplug", "tools.override") is False
+            record_consent("flipplug", ["tools.override"], ["tools.override"])
+            assert plugin_capability_granted("flipplug", "tools.override") is True
+        infos = self._info_checks(caplog)
+        assert len(infos) == 2
+        assert "decision=deny" in infos[0].getMessage()
+        assert "decision=allow" in infos[1].getMessage()
