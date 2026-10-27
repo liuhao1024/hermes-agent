@@ -37,8 +37,9 @@ def refusal_text(error: BaseException | str) -> str:
     """The refusal as the client shows it: the reason code, plus the check that fired when the owner
     named one (``invalid_params (toolsets: unknown or invalid toolset name: 'mcp-codegraph')``).
 
-    The gateway sends ``field``/``detail`` in the JSON-RPC error's ``data``
-    (``gateway/session_controls.py``), and ``hermes_cli.gateway_client.rpc_error`` carries the
+    The gateway sends the named check in the JSON-RPC error's ``data`` — a handler refusal as
+    ``field``/``detail``, the canonical dispatcher as an aggregate ``fields`` list of key paths
+    (``gateway/session_controls.py``) — and ``hermes_cli.gateway_client.rpc_error`` carries the
     bounded scalars onto ``GatewayRPCError.data``. A refusal from anywhere else has no ``data`` and
     reads exactly as before."""
     if str(error) == "launch_credentials_unavailable":
@@ -48,7 +49,15 @@ def refusal_text(error: BaseException | str) -> str:
         return launch_credentials_copy(error)
     data = getattr(error, "data", None)
     data = data if isinstance(data, dict) else {}
-    field, detail = str(data.get("field") or "").strip(), str(data.get("detail") or "").strip()
+    # Two refusal spellings reach this panel: a handler names one ``field``/``detail``, while the
+    # canonical dispatcher aggregates its closed-key-set problems as ``fields``, a list of key
+    # paths (``gateway/session_controls.py``) — read both, never drop the name (#145286).
+    raw_fields = data.get("fields")
+    fields = [str(f).strip() for f in raw_fields if str(f).strip()] if isinstance(raw_fields, list) else []
+    field = str(data.get("field") or (fields[0] if fields else "")).strip()
+    detail = str(data.get("detail") or "").strip()
+    if len(fields) > 1 and not detail:
+        detail = "unknown or refused keys: " + ", ".join(fields)
     if not field and not detail:
         return str(error)
     return f"{error} ({field or 'unnamed field'}{': ' + detail if detail else ''})"

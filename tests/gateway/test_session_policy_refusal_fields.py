@@ -204,6 +204,37 @@ def test_a_refusal_without_a_named_field_reads_exactly_as_before():
     assert message.count('storage_unavailable') == 1 and '(' not in message
 
 
+def test_the_cli_copy_names_the_canonical_fields_list():
+    """The canonical dispatcher aggregates its closed-key-set problems as ``data.fields`` (a list,
+    ``gateway/session_controls.py``), not the singular ``field`` a handler refusal carries — the
+    panel dropped the name entirely (#145286)."""
+    from hermes_cli.cli_chat_error_copy import agent_init_failure_message
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    exc = GatewayRPCError('invalid_params', 4001, {'reason': 'invalid_params', 'fields': ['source']})
+    message = agent_init_failure_message(exc)
+    assert 'invalid_params' in message and 'source' in message, message
+
+
+def test_the_cli_copy_aggregates_a_multi_field_canonical_refusal():
+    from hermes_cli.cli_chat_error_copy import refusal_text
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    exc = GatewayRPCError('invalid_params', 4001,
+                          {'reason': 'invalid_params', 'fields': ['params.foo', 'params.bar']})
+    text = refusal_text(exc)
+    assert 'params.foo' in text and 'params.bar' in text, text
+
+
+def test_a_singular_field_wins_over_the_fields_list():
+    from hermes_cli.cli_chat_error_copy import refusal_text
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    exc = GatewayRPCError('invalid_params', 4001, {
+        'reason': 'invalid_params', 'field': 'toolsets', 'detail': 'nope', 'fields': ['toolsets']})
+    assert refusal_text(exc) == "invalid_params (toolsets: nope)"
+
+
 def test_a_bypass_launch_without_a_model_names_the_model():
     """`--ignore-user-config` has no profile to inherit a model from: the refusal says so."""
     from gateway.session_local import _bypass_policy
