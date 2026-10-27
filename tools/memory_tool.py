@@ -176,6 +176,41 @@ def destructive_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [op for op in ops if (op or {}).get("action") in _BG_DELETE_ACTIONS]
 
 
+def _pending_entry_keys(payload: dict[str, Any]) -> set[tuple[str, str]]:
+    """(target, pinned entry) pairs of the staged destructive ops in *payload*."""
+    target = payload.get("target", "memory")
+    return {(target, op["matched_entry"].strip()) for op in destructive_ops(payload)
+            if isinstance(op.get("matched_entry"), str) and op["matched_entry"].strip()}
+
+
+def _pending_ids_covering_all_entries(payload: dict[str, Any]) -> list[str]:
+    """Ids of pending proposals that already pin every entry *payload* targets (#145377).
+    The fork cannot see the pending queue, so each session re-evaluates the same stale
+    entry against the original store and re-stages the consolidation with slightly newer
+    facts — churn no exact-duplicate filter catches. Returns [] unless EVERY targeted
+    entry is already covered: a partially-covered payload still stages whole (batch
+    atomicity), and a read failure fails open to staging."""
+    wanted = _pending_entry_keys(payload)
+    if not wanted:
+        return []
+    covered: set[tuple[str, str]] = set()
+    ids: list[str] = []
+    try:
+        from tools import write_approval as wa
+        for record in wa.list_pending(wa.MEMORY):
+            new = _pending_entry_keys(record.get("payload") or {}) & (wanted - covered)
+            if not new:
+                continue
+            ids.append(str(record.get("id") or ""))
+            covered |= new
+            if wanted <= covered:
+                return ids
+    except Exception:
+        logger.debug("Pending-proposal overlap check failed; staging anyway", exc_info=True)
+        return []
+    return []
+
+
 def _background_delete_gate(store, action, operations, target="memory", content=None,
                             old_text=None) -> Optional[str]:
     """Fail-closed operation gate for unattended background-review forks (#105921): ``add``
@@ -199,6 +234,15 @@ def _background_delete_gate(store, action, operations, target="memory", content=
         if (unmatched := _pin_matched_entries(store, payload)) is not None:
             return unmatched
         from tools import write_approval as wa
+        if duplicate_of := _pending_ids_covering_all_entries(payload):
+            return json.dumps({
+                "success": True, "staged": False, "suppressed": True, "duplicate_of": duplicate_of,
+                "message": ("A pending proposal already covers every entry this "
+                            f"{'batch' if operations is not None else action} targets "
+                            f"(id: {', '.join(duplicate_of)}). Nothing was re-staged — the existing "
+                            "proposal is awaiting approval; re-issue only if it is wrong (review with "
+                            "/memory pending: approve to apply, discard to drop)."),
+            }, ensure_ascii=False)
         FAILURE_CLASS.set("staged")
         record = wa.stage_write(
             wa.MEMORY, payload,

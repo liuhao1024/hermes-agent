@@ -1050,3 +1050,94 @@ class TestBackgroundReviewDeleteGate:
             reset_current_write_origin(token)
         assert result["success"] is True
         assert "rewritten by refine" in store._entries_for("memory")
+
+    def test_restage_of_already_pending_entry_suppressed(self, store, tmp_path, monkeypatch):
+        # #145377: the fork cannot see the pending queue, so it re-stages the same entry's
+        # consolidation every session with slightly newer facts. A payload whose entries are
+        # all already pinned by a pending proposal is suppressed, not staged again.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store.add("memory", "k3s gpu inference state")
+        token = set_current_write_origin("background_review")
+        try:
+            first = json.loads(memory_tool(action="remove", old_text="k3s gpu inference", store=store))
+            second = json.loads(memory_tool(action="patch", old_text="k3s gpu inference",
+                                            content="k3s gpu inference state, day 2", store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert first["staged"] is True and first["pending_id"]
+        assert second["success"] is True
+        assert second["staged"] is False and second["suppressed"] is True
+        assert first["pending_id"] in second["duplicate_of"]
+        # The queue did not grow: no duplicate proposal landed.
+        from tools.write_approval import MEMORY, list_pending
+        assert [r["id"] for r in list_pending(MEMORY)] == [first["pending_id"]]
+
+    def test_fully_covered_batch_suppressed(self, store, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store.add("memory", "k3s gpu inference state")
+        store.add("memory", "stale retention note")
+        store.add("memory", "entry the batches leave alone")
+        token = set_current_write_origin("background_review")
+        try:
+            first = json.loads(memory_tool(operations=[
+                {"action": "remove", "old_text": "k3s gpu inference"},
+                {"action": "remove", "old_text": "stale retention note"},
+            ], store=store))
+            second = json.loads(memory_tool(operations=[
+                {"action": "remove", "old_text": "k3s gpu inference"},
+                {"action": "remove", "old_text": "stale retention note"},
+            ], store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert first["staged"] is True
+        assert second["suppressed"] is True and second["staged"] is False
+        assert first["pending_id"] in second["duplicate_of"]
+        from tools.write_approval import MEMORY, list_pending
+        assert len(list_pending(MEMORY)) == 1
+
+    def test_distinct_entry_from_pending_still_staged(self, store, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store.add("memory", "k3s gpu inference state")
+        store.add("memory", "unrelated stale note")
+        token = set_current_write_origin("background_review")
+        try:
+            first = json.loads(memory_tool(action="remove", old_text="k3s gpu inference", store=store))
+            second = json.loads(memory_tool(action="remove", old_text="unrelated stale note", store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert first["staged"] is True
+        assert second["staged"] is True and second["pending_id"] != first["pending_id"]
+
+    def test_partially_covered_batch_stages_whole(self, store, tmp_path, monkeypatch):
+        # One covered entry plus one new one: the batch is atomic, so it stages whole —
+        # suppression only fires when EVERY targeted entry is already pinned pending.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store.add("memory", "k3s gpu inference state")
+        store.add("memory", "unrelated stale note")
+        store.add("memory", "entry the batches leave alone")
+        token = set_current_write_origin("background_review")
+        try:
+            first = json.loads(memory_tool(action="remove", old_text="k3s gpu inference", store=store))
+            batch = json.loads(memory_tool(operations=[
+                {"action": "remove", "old_text": "k3s gpu inference"},
+                {"action": "remove", "old_text": "unrelated stale note"},
+            ], store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert first["staged"] is True
+        assert batch["staged"] is True and "suppressed" not in batch
+
+    def test_restage_after_entry_changed_stages_fresh(self, store, tmp_path, monkeypatch):
+        # The duplicate check pins on the FULL entry, not old_text: once the entry itself
+        # changed, a new proposal is not a duplicate of the stale pending one.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store.add("memory", "k3s gpu inference state")
+        token = set_current_write_origin("background_review")
+        try:
+            first = json.loads(memory_tool(action="remove", old_text="k3s gpu inference", store=store))
+            store.replace("memory", "k3s gpu inference state", "k3s gpu inference state, updated")
+            second = json.loads(memory_tool(action="remove", old_text="k3s gpu inference", store=store))
+        finally:
+            reset_current_write_origin(token)
+        assert first["staged"] is True
+        assert second["staged"] is True and "suppressed" not in second
