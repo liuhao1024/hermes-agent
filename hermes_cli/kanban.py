@@ -743,7 +743,12 @@ def _cmd_claim(args: argparse.Namespace) -> int:
                         f"lock={existing.claim_lock or '(none)'}")
         workspace = kbw.resolve_workspace(task)
         kbw.set_workspace_path(conn, task.id, str(workspace))
-    print(f"Claimed {task.id}\nWorkspace: {workspace}")
+    print(f"Claimed {task.id}")
+    # The lock is the ownership proof a later `complete` / `request-review`
+    # from this session must present (#145739) — print it or it is unprovable.
+    print(f"Claim lock: {task.claim_lock}")
+    print("Present it later with --claim-lock (or export HERMES_KANBAN_CLAIM_LOCK).")
+    print(f"Workspace: {workspace}")
     return 0
 
 
@@ -907,6 +912,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(raw_meta)
     if rc:
         return rc
+    # A CLI completion is a distinct principal from whoever claimed the card,
+    # so an unexpired claim lease must be proven (the lock `kanban claim`
+    # printed) instead of passing silently (#145739).
+    claim_lock = getattr(args, "claim_lock", None) or os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
@@ -921,11 +930,18 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
-                                        force=bool(getattr(args, "force", False)))
+                                        force=bool(getattr(args, "force", False)),
+                                        claim_lock=claim_lock, enforce_claim_ownership=True)
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
                                  f"--force to close its run and complete anyway.")
+                return False
+            except kb.ClaimLeaseError:
+                fail_msg[tid] = (f"cannot complete {tid}: an unexpired claim lease holds it (taken by "
+                                 f"`hermes kanban claim`). Present the lock it printed with --claim-lock "
+                                 f"(or $HERMES_KANBAN_CLAIM_LOCK), `hermes kanban reclaim {tid}` to "
+                                 f"release it, wait for the lease to lapse, or re-run with --force.")
                 return False
             except kb.EmptyCompletionError as empty_err:
                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
@@ -1047,7 +1063,9 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
             return _err(gate_err)
         ok, reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=getattr(args, "reviewer", None),
-            expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True)
+            expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)),
+            claim_lock=getattr(args, "claim_lock", None) or os.environ.get("HERMES_KANBAN_CLAIM_LOCK"),
+            enforce_claim_ownership=True, with_reason=True)
         if not ok:
             return _err(f"cannot request review for {tid}: {reason or 'not running/ready?'}")
         persisted_run = kb.latest_run(conn, tid)

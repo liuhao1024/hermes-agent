@@ -303,6 +303,12 @@ _SPECS = [
         _arg("--force", action="store_true",
              help="Override the live-claim guard: complete a running, claimed task "
                   "even without owning its run (closes the worker's run)."),
+        _arg("--claim-lock",
+             help="Prove ownership of the card's unexpired claim lease (the lock "
+                  "`kanban claim` printed). Defaults to $HERMES_KANBAN_CLAIM_LOCK. "
+                  "Required to complete a card another session claimed — a lease "
+                  "is not satisfied by status alone — and applied per task in "
+                  "bulk completions."),
     ], help="Mark one or more tasks done"),
     _cmd("edit", [
         _TASK_ID,
@@ -340,6 +346,9 @@ _SPECS = [
         _arg("--force", action="store_true",
              help="Override the live-claim guard: move a running, claimed "
                   "task to review even without owning its run (clears the worker's claim)."),
+        _arg("--claim-lock",
+             help="Prove ownership of the card's unexpired claim lease (the lock "
+                  "`kanban claim` printed). Defaults to $HERMES_KANBAN_CLAIM_LOCK."),
     ], help="Move a task to 'review' (implementation done, awaiting review) — NOT a block"),
     _cmd("request-changes", [_TASK_ID, _arg("reason", nargs="+", help="Concrete changes required before re-review")],
          help="Reviewer verdict: return the active review run to its implementer"),

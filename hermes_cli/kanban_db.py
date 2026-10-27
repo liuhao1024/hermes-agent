@@ -2623,6 +2623,24 @@ class LiveClaimError(ValueError):
         )
 
 
+class ClaimLeaseError(ValueError):
+    """``complete_task`` refused with ``enforce_claim_ownership``: the task is
+    ``running`` under an *unexpired* claim lease the caller did not prove — the
+    lock printed by ``kanban claim`` (``claim_lock``), its run
+    (``expected_run_id``), or ``force``. Raised only where the caller opted in
+    (the CLI): a claim whose worker never spawned protects no run, but its
+    lease still names an owner the lease-holder can present. A ``ValueError``
+    so tool error handlers treat it as recoverable."""
+
+    def __init__(self, task_id: str):
+        super().__init__(
+            f"{task_id} is held by an unexpired claim lease; present the lock "
+            "`kanban claim` printed (claim_lock), pass expected_run_id, or use "
+            "force=True (explicit operator override) instead of completing "
+            "someone else's claim"
+        )
+
+
 def _claim_is_live(trow) -> bool:
     """True when a ``running`` task's claim still protects a run: the worker process
     it spawned exists (PID + start-time fingerprint). A claim whose worker is gone,
@@ -2637,11 +2655,24 @@ def _claim_is_live(trow) -> bool:
     )
 
 
+def _claim_is_held(trow, now: int) -> bool:
+    """True when a ``running`` task's claim lease still names a live owner: either
+    the spawned worker is alive (:func:`_claim_is_live`) or the lease taken by
+    :func:`claim_task` has not lapsed yet. A claim with no worker and a lapsed (or
+    missing) ``claim_expires`` protects nothing — it is reclaimable, not held."""
+    if trow["status"] != "running" or trow["claim_lock"] is None:
+        return False
+    if trow["worker_pid"] and _worker_alive(trow["worker_pid"], trow["worker_started_at"]):
+        return True
+    return trow["claim_expires"] is not None and trow["claim_expires"] > now
+
+
 def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True, force: bool = False,
+    claim_lock: Optional[str] = None, enforce_claim_ownership: bool = False,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2649,7 +2680,13 @@ def complete_task(
     approval. A ``running`` task under a live claim is only completed with
     proof of ownership (``expected_run_id``) or ``force=True`` (explicit
     operator override) — otherwise :class:`LiveClaimError`, the same fence
-    :func:`request_review` applies. With no active run the handoff fields survive via
+    :func:`request_review` applies. Callers that are a distinct principal from
+    whoever took the claim (the CLI) additionally pass
+    ``enforce_claim_ownership=True`` with the ``claim_lock`` they were given:
+    an *unexpired* lease then needs the same proof (:class:`ClaimLeaseError`
+    otherwise), even when no worker ever spawned. Library callers that claim
+    and complete on one connection keep the default off. With no active run the
+    handoff fields survive via
     :func:`_synthesize_ended_run`. ``summary`` (defaults to ``result``) and
     ``metadata`` land on the closing run for :func:`build_worker_context`.
     ``created_cards`` are verified first — a phantom id raises
@@ -2682,7 +2719,8 @@ def complete_task(
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
         trow = conn.execute(
-            "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?",
+            "SELECT status, claim_lock, claim_expires, worker_pid, worker_started_at "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         prior_status = trow["status"] if trow else None
@@ -2691,6 +2729,13 @@ def complete_task(
         # _claim_is_live for what "live" means.
         if expected_run_id is None and not force and trow and _claim_is_live(trow):
             raise LiveClaimError(task_id)
+        # Opt-in lease fence: an unexpired claim someone else took is an
+        # ownership boundary for this caller even with no live worker; see
+        # _claim_is_held for what "held" means.
+        if (enforce_claim_ownership and expected_run_id is None and not force
+                and trow and claim_lock != trow["claim_lock"]
+                and _claim_is_held(trow, now)):
+            raise ClaimLeaseError(task_id)
         sql = """
                 UPDATE tasks
                    SET status       = 'done',
@@ -3264,6 +3309,7 @@ def request_review(
     conn: sqlite3.Connection, task_id: str, *, summary: Optional[str] = None,
     metadata: Optional[dict] = None, reviewer: Optional[str] = None,
     expected_run_id: Optional[int] = None, force: bool = False, with_reason: bool = False,
+    claim_lock: Optional[str] = None, enforce_claim_ownership: bool = False,
 ):
     """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
 
@@ -3271,7 +3317,11 @@ def request_review(
     route back to the right profile; ``reviewer`` reassigns the task, and on
     re-review defaults to the latest ``changes_requested`` provenance. A live
     claim is only cleared with proof of ownership (``expected_run_id``) or
-    ``force=True``. Returns ``bool``, or ``(ok, reason)`` with ``with_reason``.
+    ``force=True``. A caller that is a distinct principal from whoever took
+    the claim (the CLI) additionally passes ``enforce_claim_ownership=True``
+    with the ``claim_lock`` it was given; an *unexpired* lease then needs that
+    proof even when no worker ever spawned. Returns ``bool``, or
+    ``(ok, reason)`` with ``with_reason``.
 
     ``metadata["artifacts"]`` names the handoff's deliverable
     files; a review handoff is the last implementer transition, and the
@@ -3301,8 +3351,8 @@ def request_review(
             if not _parents_satisfied(conn, task_id):
                 return _ret(False, "parent dependencies are not satisfied")
             trow = conn.execute(
-                "SELECT assignee, status, claim_lock, current_run_id, worker_pid, "
-                "worker_started_at FROM tasks WHERE id = ?", (task_id,),
+                "SELECT assignee, status, claim_lock, claim_expires, current_run_id, "
+                "worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
             ).fetchone()
             if trow is None:
                 return _ret(False, "task not found")
@@ -3314,6 +3364,16 @@ def request_review(
                     False, "task is running under a live claim; pass expected_run_id "
                     "(worker ownership) or force=True (explicit operator "
                     "override) instead of clearing the live run's claim",
+                )
+            # Opt-in lease fence, the same one complete_task applies: an
+            # unexpired claim someone else took is an ownership boundary for
+            # this caller even with no live worker (_claim_is_held).
+            if (enforce_claim_ownership and expected_run_id is None and not force
+                    and claim_lock != trow["claim_lock"] and _claim_is_held(trow, now)):
+                return _ret(
+                    False, "task is held by an unexpired claim lease; pass the "
+                    "claim_lock `kanban claim` printed, expected_run_id, or "
+                    "force=True instead of clearing someone else's lease",
                 )
             if reviewer is None:
                 reviewer = _prior_reviewer(conn, task_id)
@@ -3636,101 +3696,6 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id, "review_reopened", payload if payload != {"status": "ready"} else None,
         )
         return True
-
-
-def invalidate_descendants_for_parent_reopen(
-    conn: sqlite3.Connection, task_id: str, *, author: str,
-) -> dict[str, Any]:
-    """THE done-reopen invalidation: every ``ready``/``review``/``running``/``done``
-    descendant of a reopened ancestor is demoted to ``todo`` and re-gated.
-    Every surface that reopens a done task (dashboard PATCH/drag) routes here.
-
-    Composes under the caller's txn (``allow_nested=True``) so the flip and the
-    retractions commit atomically. Each descendant gets a
-    ``descendant_invalidated`` event, the legacy ``status`` event the live feed
-    renders, and a comment naming the ancestor. Running descendants are closed
-    ``reclaimed`` and their workers killed strictly post-commit (audit trail
-    before death) — when composed, the CALLER must drain ``terminations``
-    after its own commit. ``consecutive_failures`` resets (deliberate operator
-    action), the opposite of :func:`reopen_review_task`.
-
-    Returns ``{"invalidated": [{id, prior_status, new_status, resume_status}],
-    "terminations": [(worker_pid, claim_lock, worker_started_at)]}``.
-    """
-    caller_owns_txn = bool(conn.in_transaction)
-    now = int(time.time())
-    invalidated: list[dict[str, Any]] = []
-    terminations: list[tuple[Optional[int], Optional[str], Optional[int]]] = []
-    with write_txn(conn, allow_nested=True):
-        rows = conn.execute(
-            """
-            WITH RECURSIVE descendants(id) AS (
-                SELECT child_id FROM task_links WHERE parent_id = ?
-                UNION
-                SELECT l.child_id
-                FROM task_links l
-                JOIN descendants d ON d.id = l.parent_id
-            )
-            SELECT t.id, t.status, t.current_run_id, t.worker_pid, t.claim_lock, t.worker_started_at
-            FROM descendants d
-            JOIN tasks t ON t.id = d.id
-            ORDER BY t.id
-            """,
-            (task_id,),
-        ).fetchall()
-        for row in rows:
-            previous_status = row["status"]
-            if previous_status not in {"ready", "review", "running", "done"}:
-                continue
-            resume_status = "ready"
-            run_id = None
-            if previous_status == "review":
-                resume_status = "review"
-            elif previous_status == "running":
-                resume_status = _retry_status_for_run(conn, row["id"], row["current_run_id"])
-                terminations.append((row["worker_pid"], row["claim_lock"], row["worker_started_at"]))
-                run_id = _end_run(
-                    conn, row["id"], outcome="reclaimed", status="todo",
-                    summary=f"ancestor {task_id} reopened",
-                )
-            # consecutive_failures = 0: deliberate operator reset — see
-            # docstring for why this diverges from reopen_review_task.
-            conn.execute(
-                "UPDATE tasks SET status = 'todo', completed_at = NULL, "
-                "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-                "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?", (row["id"],),
-            )
-            entry = {
-                "id": row["id"], "prior_status": previous_status,
-                "new_status": "todo", "resume_status": resume_status,
-            }
-            _append_event(
-                conn, row["id"], "descendant_invalidated",
-                {"ancestor": task_id, **{k: v for k, v in entry.items() if k != "id"}},
-                run_id=run_id,
-            )
-            # Legacy 'status' event so existing live-feed consumers still see
-            # the move without learning the new event kind.
-            _append_event(
-                conn, row["id"], "status",
-                {
-                    "status": "todo", "reason": "ancestor_reopened", "parent": task_id,
-                    "previous_status": previous_status, "resume_status": resume_status,
-                },
-                run_id=run_id,
-            )
-            _insert_comment(
-                conn, row["id"], author, f"Invalidated: ancestor {task_id} was reopened; "
-                f"retracted from '{previous_status}' to 'todo' "
-                f"(will resume via '{resume_status}').", now,
-            )
-            invalidated.append(entry)
-    if not caller_owns_txn:
-        # Standalone: committed above, audit trail durable, safe to kill now.
-        # Composed calls leave this to the caller post-commit.
-        for pid, claim_lock, started_at in terminations:
-            _terminate_reclaimed_worker(pid, claim_lock, started_at=started_at)
-    return {"invalidated": invalidated, "terminations": terminations}
 
 
 def specify_triage_task(
@@ -4233,3 +4198,4 @@ from hermes_cli.kanban_db_dispatch import (
     _worker_survived_termination,
     _worker_terminal_timeout_env,
 )
+from hermes_cli.kanban_db_graph import invalidate_descendants_for_parent_reopen
