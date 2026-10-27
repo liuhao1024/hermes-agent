@@ -25,6 +25,7 @@ Harness: same style as tests/tui_gateway/test_tui_entry_mcp_owner.py — import
 from __future__ import annotations
 
 import io
+import sys
 
 from tui_gateway import entry
 from hermes_cli import model_switch_providers
@@ -89,3 +90,21 @@ def test_main_marks_stdout_as_the_rpc_channel(monkeypatch):
     _run_main(monkeypatch, [])
 
     assert entry.server._stdio_is_rpc_channel is True
+
+
+def test_main_imports_openai_before_the_picker_prewarm_thread(monkeypatch):
+    """The first OpenAI SDK import must happen on the main thread, before any prewarm
+    daemon thread can race it (#145661). CPython 3.14 raises _DeadlockError on a
+    module-lock cycle instead of hanging, so two first-time importers of `openai`
+    surface as "Failed to initialize OpenAI client: deadlock detected by
+    _ModuleLock('openai.types.chat')" — a misleading provider-setup error that costs
+    the session its agent. The picker prewarm fires only while the cache is cold,
+    which is exactly when it can become the competing first-time importer."""
+    events: list[tuple] = []
+
+    def prewarm():
+        events.append(("prewarm", "openai_loaded=" + str("openai" in sys.modules)))
+
+    _run_main(monkeypatch, events, prewarm=prewarm)
+
+    assert ("prewarm", "openai_loaded=True") in events

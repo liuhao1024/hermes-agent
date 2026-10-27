@@ -324,6 +324,17 @@ def _serve():
     except Exception:
         logger.debug("truststore install skipped", exc_info=True)
 
+    # Exactly one thread imports the OpenAI SDK before the daemon threads that also pull it in
+    # (MCP discovery, the /model picker prewarm below) and before the first agent build does.
+    # CPython 3.14 turns a module-lock cycle into a raised error, so two threads importing
+    # `openai` for the first time at once can surface as "Failed to initialize OpenAI client:
+    # deadlock detected by _ModuleLock('openai.types.chat')" and cost the session its agent.
+    # This import is ~0.4-1s of work the session needs anyway; doing it here keeps it serial.
+    try:
+        import openai
+    except Exception:
+        logger.debug("openai pre-import skipped", exc_info=True)
+
     # The heartbeat row lets the orphan sweep tell "live but idle" from "truly orphaned",
     # so it must start BEFORE the sweep.
     for start, what in (
