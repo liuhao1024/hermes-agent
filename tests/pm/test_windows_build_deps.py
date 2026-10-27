@@ -206,6 +206,11 @@ if ($env:PATH -ne $expectedPath) { throw 'PATH lost or reordered' }
 if ($env:OPENSSL_DIR -ne $prefix -or $env:OPENSSL_STATIC -ne '1') { throw 'Wrong OpenSSL tree' }
 if ($env:INCLUDE -ne 'fixture SDK include' -or $env:LIB -ne 'fixture SDK lib') { throw 'SDK environment lost' }
 if ($env:CC_aarch64_pc_windows_msvc -ne (Join-Path $vs 'clang.exe')) { throw 'Compiler lost' }
+# CMake reads only the plain CC/CXX names; without them vcpkg's configure
+# searches PATH and can settle on a GNU clang.exe that cannot take its flags.
+$clangStub = Join-Path $vs 'clang.exe'
+if ($env:CC -ne $clangStub -or $env:CXX -ne $clangStub) { throw 'Plain CMake compiler exports missing' }
+if ($env:CXX_aarch64_pc_windows_msvc -ne $clangStub) { throw 'CXX rust export missing' }
 if ($env:CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER -notlike '*\MSVC\*link.exe') { throw 'MSVC linker not pinned' }
 # CI initializes once, desktop again, then its native staging child a third time.
 # Re-running VsDevCmd grows PATH until cmd.exe hits its 8191-character limit.
@@ -322,6 +327,75 @@ if ($executable -isnot [string] -or $executable.Contains(' ')) { throw "joined p
 Write-Output 'PASS'
 ''', encoding="utf-8")
     # Same as above: the shared helper's cold-runner budget, not a stale 30s copy.
+    result = _powershell(script, HELPER, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS" in result.stdout
+
+
+def test_arm64_compiler_resolution_prefers_clang_cl_and_retargets_caches(tmp_path):
+    """#145723: vcpkg's MSVC switches need the clang-cl driver, not GNU clang."""
+    script = tmp_path / "resolve.ps1"
+    script.write_text(r'''
+param([string]$Helper, [string]$Root)
+$ErrorActionPreference = 'Stop'
+. $Helper
+# Keep the runner's own LLVM installation (Program Files, PATH) out of the
+# candidate lists so the fixture order is the only thing under test.
+$env:ProgramFiles = Join-Path $Root 'Program Files'
+$vs = Join-Path $Root 'VS'
+$llvmArm64 = Join-Path $vs 'VC\Tools\Llvm\ARM64\bin'
+$llvmCommon = Join-Path $vs 'VC\Tools\Llvm\bin'
+New-Item -ItemType Directory -Force $llvmArm64, $llvmCommon | Out-Null
+foreach ($dir in @($llvmArm64, $llvmCommon)) {
+    foreach ($name in @('clang.exe', 'clang-cl.exe')) {
+        [IO.File]::WriteAllText((Join-Path $dir $name), 'fixture')
+    }
+}
+$msys = Join-Path $Root 'msys64 clangarm64 bin'
+New-Item -ItemType Directory -Force $msys | Out-Null
+[IO.File]::WriteAllText((Join-Path $msys 'clang.exe'), 'fixture')
+[IO.File]::WriteAllText((Join-Path $msys 'clang-cl.exe'), 'fixture')
+$savedPath = $env:PATH
+# PowerShell follows the platform PATH separator; hardcoding ';' breaks Unix drivers.
+$pathSep = [IO.Path]::PathSeparator
+$env:PATH = "$msys$pathSep$savedPath"
+# The Visual Studio component wins even though MSYS2 comes first on PATH: the
+# MSVC switches vcpkg writes (/nologo, /MD, /Fo) are only valid for clang-cl.
+if ((Get-HermesClang -VisualStudio $vs) -cne (Join-Path $llvmArm64 'clang-cl.exe')) {
+    throw "PATH clang.exe was selected: $(Get-HermesClang -VisualStudio $vs)"
+}
+if ((Get-HermesClang -VisualStudio $null) -cne (Join-Path $msys 'clang-cl.exe')) {
+    throw 'PATH clang-cl was not used without Visual Studio'
+}
+# A GNU-only install cannot drive vcpkg; report nothing so setup installs the
+# LLVM component instead of configuring a build that dies on /nologo.
+$gnuOnly = Join-Path $Root 'gnu only bin'
+New-Item -ItemType Directory -Force $gnuOnly | Out-Null
+[IO.File]::WriteAllText((Join-Path $gnuOnly 'clang.exe'), 'fixture')
+$env:PATH = $gnuOnly
+try {
+    if ($null -ne (Get-HermesClang -VisualStudio $null)) { throw 'GNU clang.exe was accepted' }
+} finally {
+    $env:PATH = "$msys$pathSep$savedPath"
+}
+# A failed configure leaves CMAKE_C_COMPILER behind and every later run reuses
+# that cache, so a retargeted compiler never takes effect. Drop build trees
+# naming a different compiler; keep the ones matching or without a record.
+$vcpkgRoot = Join-Path $Root 'vcpkg'
+$stale = Join-Path (Join-Path (Join-Path $vcpkgRoot 'buildtrees') 'openssl') 'arm64-windows-static-md'
+$fresh = Join-Path (Join-Path (Join-Path $vcpkgRoot 'buildtrees') 'openssl') 'arm64-windows-static-md-rel'
+$bare = Join-Path (Join-Path (Join-Path $vcpkgRoot 'buildtrees') 'detect_compiler') 'arm64-windows-static-md'
+New-Item -ItemType Directory -Force $stale, $fresh, $bare | Out-Null
+[IO.File]::WriteAllText((Join-Path $stale 'CMakeCache.txt'), "CMAKE_C_COMPILER:FILEPATH=C:/msys64/clangarm64/bin/clang.exe`n")
+$freshCompiler = ($llvmArm64 -replace '\\', '/') + '/clang-cl.exe'
+[IO.File]::WriteAllText((Join-Path $fresh 'CMakeCache.txt'), "CMAKE_C_COMPILER:FILEPATH=$freshCompiler`n")
+[IO.File]::WriteAllText((Join-Path $bare 'CMakeCache.txt'), "SOME_OTHER_VAR=1`n")
+Remove-HermesStaleCMakeCaches -VcpkgRoot $vcpkgRoot -Compiler (Join-Path $llvmArm64 'clang-cl.exe')
+if (Test-Path -LiteralPath (Join-Path $stale 'CMakeCache.txt')) { throw 'stale cache survived' }
+if (-not (Test-Path -LiteralPath (Join-Path $fresh 'CMakeCache.txt'))) { throw 'matching cache was deleted' }
+if (-not (Test-Path -LiteralPath (Join-Path $bare 'CMakeCache.txt'))) { throw 'cache without a compiler record was deleted' }
+Write-Output 'PASS'
+''', encoding="utf-8")
     result = _powershell(script, HELPER, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS" in result.stdout

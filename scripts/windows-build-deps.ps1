@@ -67,13 +67,14 @@ function Invoke-HermesBuildCommand {
 }
 
 function Install-HermesArm64OpenSSL {
-    param([string]$Vcpkg, [string]$Root)
+    param([string]$Vcpkg, [string]$Root, [string]$Compiler)
     $prefix = Join-Path $Root 'installed\arm64-windows-static-md'
     $required = @('include\openssl\ssl.h', 'lib\libcrypto.lib', 'lib\libssl.lib')
     $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $prefix $_) -PathType Leaf) })
     if ($missing.Count) {
         # vcpkg refuses a binary cache directory that does not exist yet.
         if ($env:VCPKG_DEFAULT_BINARY_CACHE) { New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null }
+        Remove-HermesStaleCMakeCaches -VcpkgRoot (Split-Path -Parent $Vcpkg) -Compiler $Compiler
         Invoke-HermesBuildCommand $Vcpkg @('install', 'openssl:arm64-windows-static-md', '--classic', '--disable-metrics', "--x-install-root=$(Join-Path $Root 'installed')") 'Building static ARM64 OpenSSL via vcpkg (several minutes)'
     } else {
         Write-HermesBuildNote "ARM64 OpenSSL development libraries found: $prefix"
@@ -86,6 +87,30 @@ function Install-HermesArm64OpenSSL {
     return $prefix
 }
 
+# A failed configure persists CMAKE_C_COMPILER in its CMakeCache.txt and every
+# later run reuses that cache, so a retargeted compiler never takes effect
+# (not even one the caller exports by hand). Drop OpenSSL and detect_compiler
+# build trees that were configured with a different compiler before rebuilding.
+function Remove-HermesStaleCMakeCaches {
+    param([string]$VcpkgRoot, [string]$Compiler)
+    $buildtrees = Join-Path $VcpkgRoot 'buildtrees'
+    if (-not (Test-Path -LiteralPath $buildtrees -PathType Container)) { return }
+    $leaf = (Split-Path -Leaf $Compiler).ToLowerInvariant()
+    foreach ($name in @('openssl', 'detect_compiler')) {
+        $dir = Join-Path $buildtrees $name
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        foreach ($cache in @(Get-ChildItem -LiteralPath $dir -Recurse -Filter 'CMakeCache.txt' -ErrorAction SilentlyContinue)) {
+            $recorded = Select-String -LiteralPath $cache.FullName -Pattern '^CMAKE_C_COMPILER:FILEPATH=(.+)$' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $recorded) { continue }
+            $cachedLeaf = [IO.Path]::GetFileName($recorded.Matches[0].Groups[1].Value.Trim()).ToLowerInvariant()
+            if ($cachedLeaf -ne $leaf) {
+                Write-HermesBuildNote "Discarding $($cache.DirectoryName): it was configured with $cachedLeaf, not $leaf"
+                Remove-Item -LiteralPath $cache.DirectoryName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Get-HermesArm64VisualStudio {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path -LiteralPath $vswhere)) { return $null }
@@ -96,15 +121,23 @@ function Get-HermesArm64VisualStudio {
 
 function Get-HermesClang {
     param([string]$VisualStudio)
-    $command = Get-Command clang.exe -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-    $candidates = @((Join-Path $env:ProgramFiles 'LLVM\bin\clang.exe'))
+    # vcpkg's Windows toolchain emits MSVC switches (/nologo, /MD, /Fo) that only
+    # the clang-cl driver accepts; a GNU clang.exe (MSYS2, or LLVM's own bin)
+    # treats every one of them as a missing source file and the configure dies.
+    # Resolve clang-cl.exe from the Visual Studio component first so a PATH
+    # entry (MSYS2) cannot shadow it, then the generic LLVM bin, then PATH.
+    # Returning nothing means the discovered tools cannot drive vcpkg, which
+    # sends the caller into the branch that installs Microsoft's LLVM component.
+    $candidates = @()
     if ($VisualStudio) {
         $candidates += @(
-            (Join-Path $VisualStudio 'VC\Tools\Llvm\ARM64\bin\clang.exe'),
-            (Join-Path $VisualStudio 'VC\Tools\Llvm\bin\clang.exe')
+            (Join-Path $VisualStudio 'VC\Tools\Llvm\ARM64\bin\clang-cl.exe'),
+            (Join-Path $VisualStudio 'VC\Tools\Llvm\bin\clang-cl.exe')
         )
     }
+    $candidates += @((Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'))
+    $command = Get-Command clang-cl.exe -ErrorAction SilentlyContinue
+    if ($command) { $candidates += @($command | ForEach-Object { $_.Source }) }
     return ($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
 }
 
@@ -225,8 +258,14 @@ function Initialize-HermesArm64BuildTools {
     }
     Write-HermesBuildNote 'ARM64 Rust toolchain ready'
 
+    # CMake never reads rustc's target-specific CC names; exporting the plain
+    # ones too lets vcpkg's toolchain configure this same clang-cl instead of
+    # searching PATH and settling on whichever GNU clang.exe it meets first.
+    $env:CC = $clangPath
+    $env:CXX = $clangPath
     $env:CC_aarch64_pc_windows_msvc = $clangPath
-    Write-HermesBuildNote "ARM64 Rust C compiler: $clangPath"
+    $env:CXX_aarch64_pc_windows_msvc = $clangPath
+    Write-HermesBuildNote "ARM64 C/C++ compiler (clang-cl): $clangPath"
 
     $vcpkgRoot = $null
     $vcpkgCommand = Get-Command vcpkg.exe -ErrorAction SilentlyContinue
@@ -261,6 +300,6 @@ function Initialize-HermesArm64BuildTools {
     if (-not $env:VCPKG_VISUAL_STUDIO_PATH) { $env:VCPKG_VISUAL_STUDIO_PATH = $vs }
     # The install tree can be cached independently of the discovered checkout.
     if (-not $OpenSSLRoot) { $OpenSSLRoot = $vcpkgRoot }
-    $env:OPENSSL_DIR = Install-HermesArm64OpenSSL -Vcpkg (Join-Path $vcpkgRoot 'vcpkg.exe') -Root $OpenSSLRoot
+    $env:OPENSSL_DIR = Install-HermesArm64OpenSSL -Vcpkg (Join-Path $vcpkgRoot 'vcpkg.exe') -Root $OpenSSLRoot -Compiler $clangPath
     $env:OPENSSL_STATIC = '1'
 }
