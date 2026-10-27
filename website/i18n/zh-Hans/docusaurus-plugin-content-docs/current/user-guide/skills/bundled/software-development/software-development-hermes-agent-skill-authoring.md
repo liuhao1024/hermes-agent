@@ -42,7 +42,7 @@ SKILL.md 可以存放在两个位置：
 
 - 用户要求你"在此分支 / 仓库 / 提交中"添加一个 skill
 - 你正在提交一个应随 hermes-agent 一起发布的可复用工作流
-- 你正在编辑 `/home/bb/hermes-agent/skills/` 下的现有 skill（小改动用 `patch`，重写用 `write_file`；`skill_manage` 对仓库内 skill 的 `patch` 仍有效，但 `create` 无效）
+- 你正在编辑仓库 `skills/` 或 `optional-skills/` 下的现有 skill（先用 `read_file` 读取具名仓库路径，小改动用 `patch`，重写用 `write_file`；同名安装副本不等于该源码）
 
 ## 必需的 Frontmatter
 
@@ -150,9 +150,9 @@ skills/<category>/<skill-name>/SKILL.md
 
 ## 编辑现有仓库内 Skill
 
-- **小改动（修正错别字、添加常见问题、收紧触发条件）：** `skill_manage(action='patch', name=..., old_string=..., new_string=...)` 对仓库内 skill 同样有效。
-- **大规模重写：** 使用 `write_file` 写入完整 SKILL.md。`skill_manage(action='edit')` 也可以，但需要提供完整的新内容。
-- **添加支持文件：** 使用 `write_file` 写入 `skills/<category>/<name>/references/<file>.md`、`templates/<file>` 或 `scripts/<file>`。`skill_manage(action='write_file')` 也可以，并会强制执行 references/templates/scripts/assets 子目录白名单。
+- **小改动（修正错别字、添加常见问题、收紧触发条件）：** 用 `read_file`、`patch` 操作已授权的具名仓库路径；`skill_manage` 按名修改解析到的副本，修改安装副本不会更新仓库源码。
+- **大规模重写：** 使用 `write_file` 向已授权的具名仓库路径写入完整 SKILL.md。
+- **添加支持文件：** 使用 `write_file` 写入具名仓库中的 `skills/<category>/<name>/references/<file>.md`、`templates/<file>` 或 `scripts/<file>`。
 - **始终提交**编辑——仓库内 skill 是源码，不是运行时状态。
 
 ## 常见问题
