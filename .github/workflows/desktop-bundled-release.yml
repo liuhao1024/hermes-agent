@@ -2084,6 +2084,15 @@ jobs:
             termux-build/payload/.work/build_set.txt
           key: termux-wheelhouse-${{ hashFiles('uv.lock', 'pyproject.toml', 'pm/lock.json', 'scripts/termux/runtime_libs.json', 'scripts/termux/build_config.sh', 'scripts/termux/build_wheels.py', 'scripts/termux/termux_build.sh', 'scripts/termux/retag_wheel.py', 'scripts/termux/python_linkage.py', 'scripts/termux/wheelhouse_cache.py', 'scripts/termux/build_environment.py', 'pm/environment.py', 'pm/build_operations.py', 'pm/operations.py', 'pm/pyproject.toml', 'pm/uv.lock', 'scripts/termux/termux-builder.Dockerfile') }}
 
+      # The deb assembly prepares the ui-tui dependencies on the runner HOST,
+      # where `node` is the runner default (22.x) -- not the payload's Node 26
+      # (that one is a bionic build and cannot run here). node-deps.mjs
+      # enforces the manifest engines, so the >=26 floor from 4d5c6cfb0c made
+      # every termux-deb run die before npm ci (#145354). Same pin as tests.yml.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
+        with:
+          node-version: 26
+
       - name: Assemble the .deb
         shell: bash
         env:
