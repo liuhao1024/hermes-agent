@@ -244,9 +244,16 @@ def _install_telegram_mock(monkeypatch, bot):
     # MessageEntity needed by #27865 mention-detection path; tests don't
     # inspect it but the import must succeed.
     _MessageEntity = lambda **_kw: SimpleNamespace(**_kw)
-    telegram_mod = SimpleNamespace(Bot=lambda token: bot, MessageEntity=_MessageEntity, constants=constants_mod)
+    # The standalone lane builds explicit HTTPXRequest timeouts on every path
+    # now (#145412), so even the no-proxy branch imports telegram.request and
+    # constructs Bot(token=..., request=..., get_updates_request=...).
+    request_mod = SimpleNamespace(HTTPXRequest=lambda **_kw: SimpleNamespace())
+    telegram_mod = SimpleNamespace(
+        Bot=lambda token, **_kw: bot, MessageEntity=_MessageEntity,
+        constants=constants_mod, request=request_mod)
     monkeypatch.setitem(sys.modules, "telegram", telegram_mod)
     monkeypatch.setitem(sys.modules, "telegram.constants", constants_mod)
+    monkeypatch.setitem(sys.modules, "telegram.request", request_mod)
 
 
 def _ensure_slack_mock(monkeypatch):

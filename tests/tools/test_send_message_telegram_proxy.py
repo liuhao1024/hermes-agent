@@ -99,22 +99,27 @@ class TestSendTelegramStandaloneProxy:
         )
 
         # HTTPXRequest must have been invoked twice, both times with the
-        # resolved proxy URL.
+        # resolved proxy URL and the adapter's timeout budget (#145412).
         assert httpx_request_factory.call_count == 2
         for call in httpx_request_factory.call_args_list:
             assert call.kwargs.get("proxy") == proxy_url, (
                 f"HTTPXRequest called without proxy={proxy_url!r}: {call.kwargs!r}"
             )
+            assert call.kwargs.get("connect_timeout") == 10.0
+            assert call.kwargs.get("read_timeout") == 20.0
+            assert call.kwargs.get("write_timeout") == 20.0
+            assert call.kwargs.get("pool_timeout") == 8.0
 
         # And the bot was actually used to send.
         bot.send_message.assert_awaited_once()
 
-    def test_no_proxy_env_uses_plain_bot(
+    def test_no_proxy_env_gets_adapter_timeout_requests(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Without TELEGRAM_PROXY (and no inherited HTTPS_PROXY/etc), Bot()
-        is constructed plainly — no ``request``/``get_updates_request``
-        kwargs, and HTTPXRequest is not invoked at all.
+        still gets explicit ``HTTPXRequest`` instances — no ``proxy=``, but
+        carrying the adapter's ``HERMES_TELEGRAM_HTTP_*`` timeout budget so
+        the standalone lane doesn't run on PTB's 5s/1s defaults (#145412).
         """
         from tools.send_message_tool import _send_telegram
 
@@ -130,6 +135,10 @@ class TestSendTelegramStandaloneProxy:
             "all_proxy",
             "NO_PROXY",
             "no_proxy",
+            "HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT",
+            "HERMES_TELEGRAM_HTTP_READ_TIMEOUT",
+            "HERMES_TELEGRAM_HTTP_WRITE_TIMEOUT",
+            "HERMES_TELEGRAM_HTTP_POOL_TIMEOUT",
         ):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: None)
@@ -156,7 +165,16 @@ class TestSendTelegramStandaloneProxy:
         call_args = bot_factory.call_args.args
         # token may be passed positionally or as a kwarg; either is fine.
         assert call_kwargs.get("token", call_args[0] if call_args else None) == "tok"
-        assert "request" not in call_kwargs
-        assert "get_updates_request" not in call_kwargs
-        httpx_request_factory.assert_not_called()
+        assert "request" in call_kwargs
+        assert "get_updates_request" in call_kwargs
+        # Both requests carry the adapter's default timeout budget, with no proxy.
+        assert httpx_request_factory.call_count == 2
+        for call in httpx_request_factory.call_args_list:
+            assert "proxy" not in call.kwargs, (
+                f"HTTPXRequest got a proxy without one configured: {call.kwargs!r}"
+            )
+            assert call.kwargs.get("connect_timeout") == 10.0
+            assert call.kwargs.get("read_timeout") == 20.0
+            assert call.kwargs.get("write_timeout") == 20.0
+            assert call.kwargs.get("pool_timeout") == 8.0
         bot.send_message.assert_awaited_once()

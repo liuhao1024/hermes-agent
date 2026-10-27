@@ -105,21 +105,56 @@ def _is_telegram_thread_not_found(error: Exception) -> bool:
     return "thread not found" in str(error).lower()
 
 
+def _telegram_http_timeouts():
+    """HTTPXRequest timeouts mirroring the live adapter's budget (issue #145412).
+
+    The live adapter (``plugins/platforms/telegram/adapter.py``) builds its requests from
+    ``HERMES_TELEGRAM_HTTP_CONNECT/READ/WRITE/POOL_TIMEOUT`` (defaults 10/20/20/8); the standalone
+    lane used to fall through to PTB's 5s/1s defaults, so operator-raised budgets never applied to
+    the degraded fallback route that needs them most. Keep names and defaults in sync with the
+    adapter.
+    """
+    from utils import env_float
+    return {
+        "connect_timeout": env_float("HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT", 10.0),
+        "read_timeout": env_float("HERMES_TELEGRAM_HTTP_READ_TIMEOUT", 20.0),
+        "write_timeout": env_float("HERMES_TELEGRAM_HTTP_WRITE_TIMEOUT", 20.0),
+        "pool_timeout": env_float("HERMES_TELEGRAM_HTTP_POOL_TIMEOUT", 8.0),
+    }
+
+
+def _proxy_for_log(proxy):
+    """Proxy URL with userinfo stripped (``scheme://host:port``) — the raw URL carries
+    ``user:password`` and lands in agent.log, which ``security.redact_secrets`` doesn't cover."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(proxy)
+        if parts.username is None and parts.password is None:
+            return proxy
+        return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[-1], parts.path, parts.query, parts.fragment))
+    except ValueError:  # malformed URL (e.g. bad IPv6 literal): never log the raw value
+        return "<proxy>"
+
+
 def _telegram_bot(token):
     """Bot honouring TELEGRAM_PROXY (standalone sends time out where api.telegram.org is
     blocked); falls back to a direct connection."""
     from telegram import Bot
+    from telegram.request import HTTPXRequest
     try:
         from gateway.platforms.base import resolve_proxy_url
         proxy = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=["api.telegram.org"])
+        timeouts = _telegram_http_timeouts()
         if not proxy:
-            return Bot(token=token)
-        from telegram.request import HTTPXRequest
-        logger.info("send_message: standalone Telegram send routed through proxy %s", proxy)
-        return Bot(token=token, request=HTTPXRequest(proxy=proxy), get_updates_request=HTTPXRequest(proxy=proxy))
+            return Bot(token=token, request=HTTPXRequest(**timeouts),
+                       get_updates_request=HTTPXRequest(**timeouts))
+        logger.info("send_message: standalone Telegram send routed through proxy %s", _proxy_for_log(proxy))
+        return Bot(token=token, request=HTTPXRequest(proxy=proxy, **timeouts),
+                   get_updates_request=HTTPXRequest(proxy=proxy, **timeouts))
     except Exception as proxy_err:
         logger.warning("send_message: failed to attach Telegram proxy (%s), falling back to direct connection", proxy_err)
-    return Bot(token=token)
+    return Bot(token=token, request=HTTPXRequest(**_telegram_http_timeouts()),
+               get_updates_request=HTTPXRequest(**_telegram_http_timeouts()))
 
 
 def _telegram_thread_kwargs(thread_id):
