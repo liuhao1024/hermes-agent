@@ -397,6 +397,31 @@ class TestFormatMessageBlockquote:
         assert "\\>" not in result
 
 
+    def test_expandable_blockquote_single_line(self, adapter):
+        """Single-line **> text|| keeps the closing || raw."""
+        result = adapter.format_message("**> only||")
+        assert result == "**> only||"
+
+
+    def test_expandable_blockquote_multiline_closing_on_last_line(self, adapter):
+        """Telegram places the closing || on the block's last line, not the opening line."""
+        result = adapter.format_message("**> First line\n> Second line\n> Last line||")
+        assert result == "**> First line\n> Second line\n> Last line||"
+
+
+    def test_pipes_mid_expandable_block_escaped(self, adapter):
+        """A || on a non-final line must be escaped so Telegram accepts the send."""
+        result = adapter.format_message("**> First line||\n> Second line")
+        assert "\\|\\|" in result
+        assert result.endswith("> Second line")
+
+
+    def test_expandable_multiline_escapes_content(self, adapter):
+        """Content inside a multi-line expandable block is still MarkdownV2-escaped."""
+        result = adapter.format_message("**> a_b\n> c_d||")
+        assert result == "**> a\\_b\n> c\\_d||"
+
+
 # =========================================================================
 # format_message - mixed/complex
 # =========================================================================

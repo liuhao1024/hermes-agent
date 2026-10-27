@@ -5712,14 +5712,24 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         text = re.sub(r'\*([^*\n]+)\*', _ph_wrap('_', '_'), text)
         text = re.sub(r'~~(.+?)~~', _ph_wrap('~', '~'), text)
         text = re.sub(r'\|\|(.+?)\|\|', _ph_wrap('||', '||'), text)
-        # 9) Blockquotes: protect leading > from escaping; expandable quotes (**> starts, trailing || ends).
+        # 9) Blockquotes: protect leading > from escaping. Expandable quotes open
+        #    with **> and close with a raw || on the *last* line of the quote
+        #    block (Telegram's MarkdownV2 placement), so contiguous quote lines
+        #    are converted as one block. A || on any other line is escaped — a
+        #    raw one mid-block reads as an unterminated spoiler and Telegram
+        #    rejects the whole send.
         def _convert_blockquote(m):
-            prefix, content = m.group(1), m.group(2)  # prefix: >, >>, >>>, **>, **>> …
-            if prefix.startswith('**') and content.endswith('||'):
-                return _ph(f'{prefix} {_escape_mdv2(content[:-2])}||')
-            return _ph(f'{prefix} {_escape_mdv2(content)}')
+            lines = m.group(0).rstrip('\n').split('\n')
+            prefixes = [re.match(r'^((?:\*\*)?>{1,3}) ', ln).group(1) for ln in lines]
+            contents = [ln[len(prefix) + 1:] for ln, prefix in zip(lines, prefixes)]
+            tail = ''
+            if prefixes[0].startswith('**') and contents[-1].endswith('||'):
+                contents[-1] = contents[-1][:-2]
+                tail = '||'
+            rendered = [f'{prefix} {_escape_mdv2(content)}' for prefix, content in zip(prefixes, contents)]
+            return _ph('\n'.join(rendered) + tail)
 
-        text = re.sub(r'^((?:\*\*)?>{1,3}) (.+)$', _convert_blockquote, text, flags=re.MULTILINE)
+        text = re.sub(r'(?m)^(?:(?:\*\*)?>{1,3} .+(?:\n|$))+', _convert_blockquote, text)
         # 10) Escape remaining special characters in plain text
         text = _escape_mdv2(text)
         # 11) Restore placeholders in reverse insertion order so nested placeholders resolve.
