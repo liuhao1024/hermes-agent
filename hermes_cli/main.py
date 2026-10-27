@@ -1377,11 +1377,25 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
     return None
 
 
-def _create_titled_session(title: str) -> Optional[str]:
+def _titled_create_launch(args) -> dict:
+    """The typed launch flags for ``-c <title> --create-if-missing``'s ``session.create`` (#145445):
+    the session this command mints must freeze this command's route, or the resume check refuses the
+    same command's own ``-m/--provider`` against the profile default it had silently created with.
+    Absent flags stay absent (argparse SUPPRESS), so a title that already exists is unaffected: the
+    owner's resolve-or-create ignores them and the resume check still refuses a changed route."""
+    from hermes_cli.gateway_session_store import _LAUNCH_POLICY
+    launch = {key: getattr(args, key, None) for key in _LAUNCH_POLICY}
+    launch["run_budget"] = getattr(args, "run_budget", None)
+    launch["verbose"] = getattr(args, "verbose", False) or None
+    return launch
+
+
+def _create_titled_session(title: str, launch: Optional[dict] = None) -> Optional[str]:
     """Create a fresh titled session (``chat -c <title> --create-if-missing``).
 
     The gateway is the single writer: it creates the session and records the title with user
     provenance, so auto-titling never overwrites it (gateway_session_store.create_titled_session).
+    ``launch`` carries the typed flags so the new session freezes this command's route (#145445).
 
     Used by ``chat -c <title> --create-if-missing`` (#86794): programmatic callers (plugins, scripts) that
     want "send to this named thread, making it if needed" get a deterministic outcome instead of a silent
@@ -1389,7 +1403,7 @@ def _create_titled_session(title: str) -> Optional[str]:
     """
     try:
         from hermes_cli.gateway_session_store import create_titled_session
-        return create_titled_session(title)
+        return create_titled_session(title, launch=launch)
     except Exception:
         # Programmatic callers rely on --create-if-missing being deterministic;
         # swallow the failure but log the cause so it lands in errors.log
@@ -1420,12 +1434,15 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
                 # a quiet send to a not-yet-existing session silently no-ops.
                 # --create-if-missing: no session matches the title — create a new session with that title
                 # and proceed. See #86794. The classic CLI's gateway writes it (the single writer);
-                # the TUI keeps main's local row.
+                # the TUI keeps main's local row. The typed flags ride along (#145445): the session
+                # this command mints freezes this command's route, so the resume check that follows
+                # sees its own flags instead of refusing them against a silent profile default.
+                titled_launch = _titled_create_launch(args)
                 if use_tui:
-                    new_sid = _create_titled_session(continue_val)
+                    new_sid = _create_titled_session(continue_val, titled_launch)
                 else:
                     from hermes_cli.gateway_session_store import create_titled_session
-                    new_sid = create_titled_session(continue_val)
+                    new_sid = create_titled_session(continue_val, launch=titled_launch)
                 if new_sid:
                     args.resume = new_sid
                 else:
