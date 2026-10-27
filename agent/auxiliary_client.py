@@ -5076,10 +5076,14 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
             # host base_url names is never intended. Explicit api_key or the placeholder only.
             custom_key = _normalize_api_key(req.explicit_api_key) or "no-key-required"
         else:
+            # SECURITY: the endpoint's own same-origin credential outranks the ambient
+            # OPENAI_API_KEY — a main route declared on a third-party base_url must send its
+            # key_env secret, not whatever OpenAI key the environment happens to carry (#145452).
+            # For the legacy OPENAI_BASE_URL flow this is a no-op: same origin, same key.
             custom_key = (
                 _normalize_api_key(req.explicit_api_key)
-                or _scoped_key_env("OPENAI_API_KEY")
                 or _read_main_api_key_if_same_origin(custom_base)
+                or _scoped_key_env("OPENAI_API_KEY")
                 or "no-key-required"  # local servers don't need auth
             )
         if not custom_base:
