@@ -128,7 +128,10 @@ def test_selection_is_scoped_and_preserves_worker_and_deny_boundaries(legacy, tm
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
     worker = _names(["file"])
     assert "kanban_complete" in worker
-    assert "kanban_list" not in worker
+    # #145741: workers need board discovery to avoid duplicate follow-up cards;
+    # kanban_unblock stays orchestrator-only.
+    assert "kanban_list" in worker
+    assert "kanban_unblock" not in worker
     with delegated_child_context():
         assert not _names(["kanban"])
     assert "kanban_complete" in _names(["file"])

@@ -98,7 +98,7 @@ def _check_kanban_mode() -> bool:
 
 @no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
+    """Board-routing tools (kanban_unblock): hidden from task workers."""
     return _visible(to_env_worker=False)
 
 
@@ -694,8 +694,14 @@ def _handle_show(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_list")
 def _handle_list(args: dict, **kw) -> str:
-    """Task summaries with the same core filters as the CLI."""
-    _require_orchestrator_tool("kanban_list")
+    """Task summaries with the same core filters as the CLI.
+
+    #145741: dispatcher-spawned workers may call this — they are instructed to
+    spawn follow-up cards and flag collision hotspots, which is impossible
+    without board discovery. Worker calls stay strictly read-only: the
+    dependency promotion in ``recompute_ready`` is the dispatcher's side of
+    the list contract, so an env worker's read never mutates board state.
+    """
     include_archived = _parse_bool_arg(args, "include_archived")
     limit = args.get("limit")
     try:
@@ -706,8 +712,11 @@ def _handle_list(args: dict, **kw) -> str:
     _check(limit <= KANBAN_LIST_MAX_LIMIT, f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
     with _board(args.get("board")) as (kb, conn):
         # Match CLI list: dependencies cleared since the last dispatcher tick
-        # should be visible to orchestrators immediately.
-        promoted = kb.recompute_ready(conn)
+        # should be visible to orchestrators immediately. An env worker's call
+        # stays read-only: promotion is the dispatcher's side of the contract.
+        promoted = (
+            False if os.environ.get("HERMES_KANBAN_TASK") else kb.recompute_ready(conn)
+        )
         # One extra row lets the output report truncation without dumping the board.
         rows = kb.list_tasks(
             conn, assignee=args.get("assignee"), status=args.get("status"),
@@ -1290,8 +1299,10 @@ def _handle_link(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
-# kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+# kanban_unblock routes the board and is hidden from task workers. kanban_list
+# deliberately is not (#145741): workers are told to check the board before
+# spawning follow-up cards, and their list calls are read-only by contract.
+_ORCHESTRATOR_TOOLS = frozenset({"kanban_unblock"})
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),

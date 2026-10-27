@@ -1032,6 +1032,91 @@ def test_worker_unblock_rejects_foreign_task_id(worker_env):
         conn.close()
 
 
+def test_worker_kanban_list_is_readonly_board_discovery(monkeypatch, worker_env):
+    """#145741: KANBAN_GUIDANCE tells workers to create follow-up cards and flag
+    collision hotspots, but kanban_list was orchestrator-only — a worker could
+    not check whether a follow-up card already existed (or a sibling card was
+    already running on its workspace) before spawning a duplicate. Workers now
+    get board discovery as a strictly read-only call: no recompute_ready, so a
+    worker listing can never mutate dependency promotion state."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    recompute_calls = []
+    real_recompute = kb.recompute_ready
+
+    def spy_recompute(conn):
+        recompute_calls.append(conn)
+        return real_recompute(conn)
+
+    monkeypatch.setattr(kb, "recompute_ready", spy_recompute)
+    out = json.loads(kt._handle_list({}))
+    assert "error" not in out, out
+    assert worker_env in [t["id"] for t in out["tasks"]]
+    assert out["promoted"] is False
+    assert recompute_calls == [], (
+        "worker kanban_list must stay read-only: recompute_ready is the "
+        "dispatcher's promotion side-effect"
+    )
+
+
+def test_worker_schema_exposes_kanban_list_not_unblock(monkeypatch, worker_env):
+    """#145741 registration surface: kanban_list joins the dispatcher-worker
+    toolset (read-only duplicate-card avoidance); kanban_unblock stays
+    orchestrator-only."""
+    from tools.registry import invalidate_check_fn_cache, registry
+    from toolsets import resolve_toolset
+
+    invalidate_check_fn_cache()
+    schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
+    names = {s["function"].get("name") for s in schema if "function" in s}
+    assert "kanban_list" in names
+    assert "kanban_unblock" not in names
+
+
+def test_worker_list_readonly_does_not_promote_ready_able_child(
+    monkeypatch, worker_env
+):
+    """#145741 end to end: a todo card whose parent is done must stay todo after
+    a worker calls kanban_list — promotion stays on the dispatcher's side of the
+    list contract. The orchestrator half of the same test proves the dispatcher
+    listing still promotes (complete_task's own tail recompute is bypassed with
+    a raw status UPDATE so the only promoter under test is kanban_list)."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    conn = kbc.connect()
+    try:
+        dep = kb.create_task(conn, title="dependency", assignee="peer")
+        child = kb.create_task(conn, title="ready-able child", assignee="peer")
+        assert kb.link_tasks(conn, dep, child)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (dep,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = json.loads(kt._handle_list({}))
+    assert "error" not in out, out
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "todo", (
+            "worker kanban_list must not promote ready-able cards"
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    out = json.loads(kt._handle_list({}))
+    assert "error" not in out, out
+    assert out["promoted"] >= 1
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, child).status == "ready"
+    finally:
+        conn.close()
+
+
 def test_orchestrator_complete_any_task_allowed(monkeypatch, tmp_path):
     """Orchestrator profiles (no HERMES_KANBAN_TASK) can still complete
     any task via explicit task_id. The check only applies to workers."""

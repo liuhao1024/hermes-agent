@@ -64,13 +64,13 @@ KANBAN_SHOW_SCHEMA = _schema(
 KANBAN_LIST_SCHEMA = _schema(
     "kanban_list",
     (
-        "List Kanban task summaries so an orchestrator can discover work to route. Supports the same core filters as the CLI: assignee, "
+        "List Kanban task summaries so you can discover work and check the board before acting. Supports the same core filters as the CLI: assignee, "
         "status, tenant, include_archived, and limit. Returns compact rows "
         "with ids, title, status, assignee, priority, parent/child ids, and "
         "counts. Bounded to 50 rows by default, 200 max, with truncation "
-        "metadata. Also recomputes ready tasks before listing, matching the "
-        "CLI. Orchestrator-only — dispatcher-spawned task workers never see "
-        "this tool."
+        "metadata. Orchestrator/dispatcher listings also recompute ready "
+        "tasks first, matching the CLI; a dispatcher-spawned task worker's "
+        "listing is strictly read-only."
     ),
     {
         "assignee": _prop("string", "Optional assignee/profile filter."),
