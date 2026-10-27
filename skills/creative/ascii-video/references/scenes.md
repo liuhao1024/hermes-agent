@@ -496,31 +496,33 @@ def render_clip(seg, features, clip_path):
            "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "pipe:0",
            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
            "-pix_fmt", "yuv420p", clip_path]
-    stderr_fh = open(clip_path.replace(".mp4", ".log"), "w")
-    pipe = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=stderr_fh)
+    log_path = clip_path + ".log"  # e.g. seg_00.mp4.log: a different name from clip_path
+    with open(log_path, "w") as stderr_fh:
+        with subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, stderr=stderr_fh) as pipe:
+            for fi in range(seg["frame_start"], seg["frame_end"]):
+                t = fi / FPS
+                feat = {k: float(features[k][fi]) for k in features}
 
-    for fi in range(seg["frame_start"], seg["frame_end"]):
-        t = fi / FPS
-        feat = {k: float(features[k][fi]) for k in features}
+                # 1. Scene renders canvas
+                canvas = fx_fn(r, feat, t, S)
 
-        # 1. Scene renders canvas
-        canvas = fx_fn(r, feat, t, S)
+                # 2. Tonemap normalizes brightness
+                canvas = tonemap(canvas, gamma=seg.get("gamma", 0.75))
 
-        # 2. Tonemap normalizes brightness
-        canvas = tonemap(canvas, gamma=seg.get("gamma", 0.75))
+                # 3. Feedback adds temporal recursion
+                if fb and fb_cfg:
+                    canvas = fb.apply(canvas, **{k: fb_cfg[k] for k in fb_cfg})
 
-        # 3. Feedback adds temporal recursion
-        if fb and fb_cfg:
-            canvas = fb.apply(canvas, **{k: fb_cfg[k] for k in fb_cfg})
+                # 4. Shader chain adds post-processing
+                canvas = chain.apply(canvas, f=feat, t=t)
 
-        # 4. Shader chain adds post-processing
-        canvas = chain.apply(canvas, f=feat, t=t)
-
-        pipe.stdin.write(canvas.tobytes())
-
-    pipe.stdin.close(); pipe.wait(); stderr_fh.close()
+                pipe.stdin.write(canvas.tobytes())
+    if pipe.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed for {seg['id']} (exit {pipe.returncode}); see {log_path}")
 ```
+
+Leaving the `with` blocks, normally or because a scene or shader raised, closes ffmpeg's stdin, waits for ffmpeg and then closes the log; as in `render_batch` (architecture.md), if closing stdin itself fails, that error is raised with the original only as its `__context__`. A nonzero ffmpeg exit raises, so a failed clip surfaces through `fut.result()` (see Parallel Rendering) instead of passing as finished. `wait()` has no time limit, so a hung encoder blocks its worker, and on `KeyboardInterrupt` `Popen` waits only briefly, so ffmpeg may still be running and is not reaped here: confirm it has exited before deleting the clip directory.
 
 ### Building Segments from Scene Table
 

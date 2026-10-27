@@ -690,30 +690,31 @@ Split frames across N workers. Each pipes raw RGB to its own ffmpeg subprocess:
 ```python
 def render_batch(batch_id, frame_start, frame_end, features, seg_path):
     r = Renderer()
+    S = r.S  # this worker's own state dict (Renderer.S, see scenes.md)
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-s", f"{VW}x{VH}", "-r", str(FPS), "-i", "pipe:0",
            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
            "-pix_fmt", "yuv420p", seg_path]
 
     # CRITICAL: stderr to file, not pipe
-    stderr_fh = open(os.path.join(workdir, f"err_{batch_id:02d}.log"), "w")
-    pipe = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=stderr_fh)
-
-    for fi in range(frame_start, frame_end):
-        t = fi / FPS
-        sec = get_section(t)
-        f = {k: float(features[k][fi]) for k in features}
-        ch, co = FX_DISPATCH[sec](r, f, t)
-        canvas = r.render(ch, co)
-        canvas = apply_mirror(canvas, sec, f)
-        canvas = apply_shaders(canvas, sec, f, t)
-        pipe.stdin.write(canvas.tobytes())
-
-    pipe.stdin.close()
-    pipe.wait()
-    stderr_fh.close()
+    err_path = os.path.join(workdir, f"err_{batch_id:02d}.log")
+    with open(err_path, "w") as stderr_fh:
+        with subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, stderr=stderr_fh) as pipe:
+            for fi in range(frame_start, frame_end):
+                t = fi / FPS
+                sec = get_section(t)
+                f = {k: float(features[k][fi]) for k in features}
+                canvas = FX_DISPATCH[sec](r, f, t, S)  # v2: scene returns canvas
+                canvas = apply_mirror(canvas, sec, f)
+                canvas = apply_shaders(canvas, sec, f, t)
+                pipe.stdin.write(canvas.tobytes())
+    if pipe.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed for batch {batch_id} "
+                           f"(exit {pipe.returncode}); see {err_path}")
 ```
+
+Leaving the `with` blocks, normally or because a scene, shader or pipe write raised, closes ffmpeg's stdin, waits for ffmpeg and then closes the log. If closing stdin itself fails (e.g. ffmpeg died with frames still buffered), that error is raised instead, with the original attached only as its `__context__`. A nonzero ffmpeg exit raises: never treat that batch's segment as finished. `wait()` has no time limit, so a hung encoder blocks the worker. On `KeyboardInterrupt`, `Popen` waits only briefly before re-raising, so ffmpeg may still be running and is not reaped here: confirm it has exited before deleting its output directory.
 
 Concatenate segments + mux audio:
 

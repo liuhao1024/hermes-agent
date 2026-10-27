@@ -103,13 +103,23 @@ for k in features:
 # Method 1: ffmpeg pipe (memory efficient)
 cmd = ["ffmpeg", "-i", input_video, "-f", "rawvideo", "-pix_fmt", "rgb24",
        "-s", f"{target_w}x{target_h}", "-r", str(fps), "-"]
-pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 frame_size = target_w * target_h * 3
-for fi in range(n_frames):
-    raw = pipe.stdout.read(frame_size)
-    if len(raw) < frame_size: break
-    frame = np.frombuffer(raw, dtype=np.uint8).reshape(target_h, target_w, 3)
-    # process frame...
+reached_eof = False
+with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as pipe:
+    for fi in range(n_frames):
+        raw = pipe.stdout.read(frame_size)
+        if len(raw) < frame_size:
+            reached_eof = True
+            break
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape(target_h, target_w, 3)
+        # process frame...
+# Leaving the with block, normally or because the loop raised, closes the pipe and
+# waits for ffmpeg. On KeyboardInterrupt, Popen waits only briefly, so ffmpeg may
+# still be running and is not reaped here. If you stop before the end of the video,
+# ffmpeg may exit with an error on the closed pipe; that is expected.
+if reached_eof and pipe.returncode != 0:
+    # ffmpeg ended the stream itself and failed: decoding failed, not an early stop
+    raise RuntimeError(f"ffmpeg could not decode {input_video} (exit {pipe.returncode})")
 
 # Method 2: OpenCV (if available)
 cap = cv2.VideoCapture(input_video)
