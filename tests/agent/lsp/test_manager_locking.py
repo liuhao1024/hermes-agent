@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from agent.lsp import manager
 from agent.lsp.manager import LSPService
@@ -93,7 +94,10 @@ def test_delta_baseline_is_capped_by_write_recency(monkeypatch):
     assert service._apply_delta("/repo/f0.py", [{"message": "rewritten"}], None) == [{"message": "rewritten"}]
     server_diags.clear()
     service.snapshot_baseline("/repo/new.py")
+    # Baseline keys are os.path.abspath forms, not the bare literals passed in — on Windows
+    # abspath prefixes the current drive, so only abspath-shaped keys can be read back here.
+    f0, f1, new = (os.path.abspath(f"/repo/{name}.py") for name in ("f0", "f1", "new"))
     assert len(service._delta_baseline) == cap
-    assert "/repo/f1.py" not in service._delta_baseline
-    assert service._delta_baseline["/repo/f0.py"] == [{"message": "rewritten"}]
-    assert "/repo/new.py" in service._delta_baseline
+    assert f1 not in service._delta_baseline
+    assert service._delta_baseline[f0] == [{"message": "rewritten"}]
+    assert new in service._delta_baseline
