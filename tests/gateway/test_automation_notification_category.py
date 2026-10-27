@@ -249,3 +249,37 @@ async def test_refused_watch_wake_logs_the_refusal_code(tmp_path, monkeypatch, c
             'Watch notification not admitted for discord chat=42: admission_conflict']
     finally:
         authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_forum_topic_completion_wake_survives_the_key_fallback(tmp_path, monkeypatch):
+    """A delegate completion on a Telegram forum-topic session carries only session_key. With
+    the routing entry out of the in-memory store scope, the wake's source is rebuilt from the
+    parsed key — which used to drop the topic slot, key differently from the route and refuse
+    the completion once per drain tick until the 48h replay cap dropped it (#145611)."""
+    from gateway.session_ingress_context import native_callback, register_transport_home
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+    runner, authority = await _authority(tmp_path, monkeypatch)
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token='***'))
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._wire_adapter_handlers(adapter)
+    register_transport_home(runner, None, tmp_path)
+    monkeypatch.setenv('TELEGRAM_ALLOWED_USERS', '42')
+    try:
+        human = MessageEvent(text='run the batch', message_id='m1',
+                             source=adapter.build_source(chat_id='-1003725555555', chat_type='forum',
+                                                         thread_id='2608', user_id='42',
+                                                         user_name='human'))
+        with native_callback(runner, human, tmp_path):
+            await authority.admit_native(human)
+        route = runner.session_store._generate_session_key(human.source)
+        session_id = runner.session_store.peek_session_id(route)
+        # The routing entry survives but its origin is unusable (old/undecodable origin row):
+        # the rebuild falls back to the parsed key while _owner still resolves the entry.
+        runner.session_store._entries[route].origin = None
+        evt = {'type': 'async_delegation', 'delegation_id': 'deleg_f1dee9de',
+               'session_key': route, 'parent_session_id': session_id,
+               'goal': 'x', 'status': 'completed', 'summary': 'done'}
+        assert await runner._inject_watch_notification('[IMPORTANT: batch finished]', evt) is True
+    finally:
+        authority.db.close()

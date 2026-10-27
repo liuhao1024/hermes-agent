@@ -702,6 +702,11 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         def _opt(field: str) -> Optional[str]:
             return str(evt.get(field) or "").strip() or None
 
+        # The parsed key fills fields the queued event omits: async-delegation completions carry
+        # only session_key, so the thread/topic slot must come from the parsed key or the rebuilt
+        # source keys differently from the route and admission refuses forever (#145611).
+        thread_id = _opt("thread_id") or str(derived.get("thread_id") or "").strip() or None
+
         scope_id = _opt("scope_id")
         if scope_id is None and chat_type not in ("dm", "thread"):
             # Reconstructed scoped-chat source without scope_id: a relay connector's tenant guard may
@@ -712,7 +717,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 "the connector's tenant guard (user_id fallback only).", platform_name, chat_id, chat_type,
             )
         return SessionSource(
-            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt("thread_id"),
+            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
             user_id=_opt("user_id"), user_name=_opt("user_name"), scope_id=scope_id, profile=profile,
         )
 

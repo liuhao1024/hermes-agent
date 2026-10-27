@@ -2962,7 +2962,11 @@ def _parse_session_key(session_key: str) -> dict | None:
         result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
         if parts[1] != "main":
             result["profile"] = profile_from_session_key_namespace(parts[1])
-        if len(parts) > 5 and parts[3] in {"dm", "thread"}:
+        # Telegram forum topics key as ``...:forum:<chat_id>:<topic>`` — the topic slot is a
+        # thread_id there, same as a ``thread`` key. Dropping it made the fallback source
+        # rebuild in _build_process_event_source generate a different key, so synthetic
+        # wakes were refused forever (#145611).
+        if len(parts) > 5 and parts[3] in {"dm", "thread", "forum"}:
             result["thread_id"] = parts[5]
         return result
     return None

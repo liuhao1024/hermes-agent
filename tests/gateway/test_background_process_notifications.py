@@ -660,6 +660,38 @@ def test_build_process_event_source_named_profile_key(monkeypatch, tmp_path):
     assert source.profile == "work"
 
 
+def test_parse_session_key_forum_topic_thread_id():
+    """A Telegram forum-topic key's 6th part is the topic id — a thread_id, not a user."""
+    result = _parse_session_key("agent:main:telegram:forum:-1003725555555:2608")
+    assert result == {
+        "platform": "telegram",
+        "chat_type": "forum",
+        "chat_id": "-1003725555555",
+        "thread_id": "2608",
+    }
+
+
+def test_build_process_event_source_topic_slot_survives_the_key_fallback(monkeypatch, tmp_path):
+    """An async-delegation completion carries only session_key — no routing fields — so the
+    fallback rebuild must take the thread/topic slot from the parsed key. Dropping it made
+    the rebuilt source generate a different key and admission refused the wake forever,
+    on Telegram forum topics and Discord threads alike (#145611)."""
+    from gateway.session import build_session_key
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    for key, expected_thread in (("agent:main:telegram:forum:-1003725555555:2608", "2608"),
+                                 ("agent:main:discord:thread:444:222", "222")):
+        source = runner._build_process_event_source({
+            "session_id": "proc_watch",
+            "session_key": key,
+            "type": "async_delegation",  # real completion shape: no platform/chat/thread fields
+        })
+        assert source is not None, key
+        assert source.thread_id == expected_thread, key
+        # The rebuilt source must key identically to the route, or _owner refuses the wake.
+        assert build_session_key(source) == key, key
+
+
 # ---------------------------------------------------------------------------
 # api_server (stateless) wake routing — gateway/wake.py self-post path
 # ---------------------------------------------------------------------------
