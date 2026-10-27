@@ -150,6 +150,35 @@ def _connect_inputs(server_name: str, config: dict) -> tuple[list, set]:
     return list(_stdio_launch(config)), set()
 
 
+_TEARDOWN_EXIT_TIMEOUT_S = 30.0
+
+
+class _BoundedExit:
+    """Run a context manager's ``__aexit__`` under a time bound so a teardown that hangs cannot
+    hold the server's run loop forever: past the window the close is abandoned with a warning and
+    the body's result (``"reconnect"``) carries on into the rebuild path it already has (#145292).
+    The cancellation lands inside the wrapped ``__aexit__`` — the same task — so a transport's
+    TaskGroup is torn down, not orphaned."""
+
+    def __init__(self, cm, label: str, server_name: str):
+        self._cm = cm
+        self._label = label
+        self._server_name = server_name
+
+    async def __aenter__(self):
+        return await self._cm.__aenter__()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            async with asyncio.timeout(_TEARDOWN_EXIT_TIMEOUT_S):
+                return await self._cm.__aexit__(exc_type, exc, tb)
+        except TimeoutError:
+            logger.warning(
+                "MCP server '%s': %s teardown did not finish within %ss; abandoned so the server can reconnect",
+                self._server_name, self._label, _TEARDOWN_EXIT_TIMEOUT_S)
+            return False
+
+
 class MCPServerTransportMixin:
     """Methods of :class:`tools.mcp_tool.MCPServerTask` (mixed in; relies on its attributes)."""
 
@@ -292,10 +321,15 @@ class MCPServerTransportMixin:
 
     async def _serve_transport(self, transport_cm, label: str, connect_timeout: float) -> str:
         """Open *transport_cm*, wrap its streams in a ClientSession and serve it. Streams are indexed,
-        not unpacked (mcp 1.x yields a 3-tuple, 2.x a pair); a TaskGroup drop maps to ``"reconnect"``."""
+        not unpacked (mcp 1.x yields a 3-tuple, 2.x a pair); a TaskGroup drop maps to ``"reconnect"``.
+        Both teardowns are time-bounded: an exit that never finishes (an HTTP session close stuck on a
+        dead socket) used to hold this run loop forever — no reconnect, no park, and the deregistered
+        tools never came back until a process restart (#145292)."""
         try:
-            async with transport_cm as _streams:
-                async with _core.ClientSession(_streams[0], _streams[1], **self._session_kwargs()) as session:
+            async with _BoundedExit(transport_cm, label, self.name) as _streams:
+                async with _BoundedExit(
+                    _core.ClientSession(_streams[0], _streams[1], **self._session_kwargs()), label, self.name,
+                ) as session:
                     return await self._serve_session(session, connect_timeout, label)
         except BaseExceptionGroup as _eg:
             return self._reconnect_or_reraise_group(_eg)
