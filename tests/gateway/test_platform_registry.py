@@ -113,6 +113,44 @@ class TestPlatformEnumDynamic:
             gc._Platform__bundled_plugin_names = None
             gc._Platform__bundled_plugin_aliases = None
 
+    def test_bundled_scan_consumers_share_the_process_cached_scan(self):
+        """The other direct scan consumers — config_env._bundled_env_fallbacks and
+        platform_env.bundled_sibling — also share the process-cached scan, so warm calls never
+        rescan/reparse the bundled plugin manifests (#142152)."""
+        from types import SimpleNamespace
+
+        import gateway.config as gc
+        from gateway.config_env import _bundled_env_fallbacks
+        from gateway.platform_env import bundled_sibling
+
+        gc._Platform__bundled_plugin_names = None
+        gc._Platform__bundled_plugin_aliases = None
+        original = gc.Platform.__dict__["_scan_bundled_plugin_platforms"]
+        scan = original.__func__
+        calls = []
+
+        def counting_scan(cls):
+            calls.append(1)
+            return scan(cls)
+
+        gc.Platform._scan_bundled_plugin_platforms = classmethod(counting_scan)
+        bundled_sibling.cache_clear()
+        try:
+            config = SimpleNamespace(platforms=[])
+            _bundled_env_fallbacks(config, [])  # cold: populates the shared cache
+            assert len(calls) == 1
+            _bundled_env_fallbacks(config, [])  # warm: never rescans
+            assert len(calls) == 1
+            assert bundled_sibling("definitely-not-bundled") is None  # warm consumer
+            assert len(calls) == 1
+            bundled_sibling("a2a")  # a real bundled directory, still warm
+            assert len(calls) == 1
+        finally:
+            gc.Platform._scan_bundled_plugin_platforms = original
+            gc._Platform__bundled_plugin_names = None
+            gc._Platform__bundled_plugin_aliases = None
+            bundled_sibling.cache_clear()
+
 
 # ── PlatformRegistry ──────────────────────────────────────────────────────
 

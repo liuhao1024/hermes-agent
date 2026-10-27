@@ -267,8 +267,9 @@ class Platform(Enum):
     @classmethod
     def _bundled_plugin_scan(cls) -> tuple[set, dict]:
         """Process-cached ``(names, aliases)`` from the bundled-plugin scan: bundled plugins are
-        fixed for the life of the process, so callers (``_missing_``, ``core_ships_platform``)
-        share one scan instead of reparsing unchanged plugin YAML on every lookup."""
+        fixed for the life of the process, so callers (``_missing_``, ``core_ships_platform``,
+        ``_bundled_env_fallbacks``, ``bundled_sibling``) share one scan instead of reparsing
+        unchanged plugin YAML on every lookup."""
         global _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases
         if _Platform__bundled_plugin_names is None:
             _Platform__bundled_plugin_names, _Platform__bundled_plugin_aliases = cls._scan_bundled_plugin_platforms()
