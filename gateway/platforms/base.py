@@ -434,7 +434,7 @@ from gateway.platforms.base_streaming_tts import (
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.warning_notifications import diagnostic_wake_muted
 from hermes_cli.observability.shared_metrics_gateway import records_delivery, stop_reply_clock
-from gateway.session import SessionSource, build_session_key
+from gateway.session import SessionSource, _canonical_participant, build_session_key
 from gateway.session_transcript import TranscriptReadError
 from hermes_constants import CONNECTOR_DOWNLOADS_SUBDIR, get_default_hermes_root, get_hermes_dir, get_hermes_home
 from agent.provider_media import GENERATED_SUBDIR, MEDIA_CACHE_MAX_AGE_HOURS
@@ -2475,8 +2475,16 @@ class BasePlatformAdapter(ABC):
             profile=self._session_key_profile(source))
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        """Session-scoped key for text batching (subclasses may override)."""
-        return self._event_session_key(event)
+        """Session-scoped key for text batching (subclasses may override).
+
+        The sender is part of the key: in shared sessions (``group_sessions_per_user: false``,
+        or a shared thread) the session key alone merges chunks from different senders into
+        one event that keeps only the first sender's source (#145434). Chunks of one sender's
+        split message still share the key, so continuation batching is unaffected. The
+        participant is canonicalized the same way ``build_session_key`` isolates it."""
+        key = self._event_session_key(event)
+        participant = _canonical_participant(event.source)
+        return f"{key}:{participant}" if participant else key
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:
         """Buffer a text event (merging into a pending one) and restart the flush timer."""
