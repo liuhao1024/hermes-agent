@@ -140,16 +140,20 @@ Use edge detection for more detail in contour regions:
 
 ```python
 def frame_to_ascii_edges(frame_rgb, grid, pal=PAL_DEFAULT, edge_pal=PAL_BOX):
-    gray = np.mean(frame_rgb, axis=2)
-    small_gray = resize(gray, (grid.rows, grid.cols))
-    lum = small_gray / 255.0
+    """Map uint8 RGB input to (rows, cols) chars and uint8 RGB colors (0-255)."""
+    # Share the RGB sampling and luminance semantics of frame_to_ascii.
+    small = np.array(Image.fromarray(frame_rgb).resize((grid.cols, grid.rows), Image.LANCZOS))
+    lum = (0.299 * small[:,:,0] + 0.587 * small[:,:,1] + 0.114 * small[:,:,2]) / 255.0
+    small_gray = lum * 255.0
 
     # Sobel edge detection
     gx = np.abs(small_gray[:, 2:] - small_gray[:, :-2])
     gy = np.abs(small_gray[2:, :] - small_gray[:-2, :])
     edge = np.zeros_like(small_gray)
     edge[:, 1:-1] += gx; edge[1:-1, :] += gy
-    edge = np.clip(edge / edge.max(), 0, 1)
+    max_edge = edge.max()
+    if max_edge > 0:  # Constant frames have no edges; avoid division by zero.
+        edge = np.clip(edge / max_edge, 0, 1)
 
     # Edge regions get box drawing chars, flat regions get brightness chars
     is_edge = edge > 0.15
@@ -157,6 +161,8 @@ def frame_to_ascii_edges(frame_rgb, grid, pal=PAL_DEFAULT, edge_pal=PAL_BOX):
     edge_chars = val2char(edge, is_edge, edge_pal)
     chars[is_edge] = edge_chars[is_edge]
 
+    # Source RGB colors, with the same visibility scaling as frame_to_ascii.
+    colors = np.clip(small * np.clip(lum[:,:,None] * 1.5 + 0.3, 0.3, 1), 0, 255).astype(np.uint8)
     return chars, colors
 ```
 
