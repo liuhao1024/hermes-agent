@@ -754,6 +754,7 @@ def detect_stale_running(
     *,
     stale_timeout_seconds: int = 0,
     signal_fn=None,
+    failure_limit: int | None = None,
 ) -> list[str]:
     """Reclaim ``running`` tasks with no heartbeat progress; returns their ids.
 
@@ -761,9 +762,12 @@ def detect_stale_running(
     ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at`` NULL or
     older than ``_STALE_HEARTBEAT_GAP_SECONDS``. Task returns to its source
     phase, run closes ``outcome='stale'``, a live host-local worker is killed.
-    ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
-    counted via ``_record_task_failure``: an absent heartbeat is not a worker
-    failure, and counting it would let long-running tasks trip the breaker.
+    ``0`` disables the check; ``signal_fn`` is a test hook. A run that NEVER
+    heartbeated died before its first progress — the deterministic
+    spawn → stale → requeue loop shape (#145676) — so it feeds the unified
+    breaker via ``_record_task_failure``; a heartbeating-then-stalled run keeps
+    the benign reclaim semantics (an absent heartbeat is not a worker fault,
+    and counting it would trip the breaker on healthy long runners).
     """
     if stale_timeout_seconds <= 0:
         return []
@@ -848,6 +852,22 @@ def detect_stale_running(
             )
             _kb._append_event(conn, tid, "stale", payload, run_id=run_id)
             reclaimed.append(tid)
+
+        # Outside the write_txn above because ``_record_task_failure`` opens its
+        # own. If the breaker trips this flips the task to ``blocked`` and emits
+        # ``gave_up`` (reason ``stale-loop``) on top of the ``stale`` already
+        # emitted; the counter survives restarts (DB-resident) and only a
+        # meaningful success clears it, so a bare requeue cannot loop forever.
+        if cur.rowcount == 1 and hb_age is None:
+            _record_task_failure(
+                conn, tid,
+                error=f"stale-loop: no heartbeat ever after {int(elapsed)}s running",
+                outcome="stale",
+                failure_limit=failure_limit,
+                release_claim=False,
+                end_run=False,
+                event_payload_extra={"retry_status": retry_status},
+            )
 
     return reclaimed
 
@@ -2223,7 +2243,8 @@ def _run_reclaim_phase(
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
-    result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+    result.stale = detect_stale_running(
+        conn, stale_timeout_seconds=stale_timeout_seconds, failure_limit=failure_limit)
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
     # went back to ``ready`` and the respawn guard defers them until quota clears.
