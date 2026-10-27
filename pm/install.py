@@ -209,13 +209,13 @@ def sealed() -> bool:
     return (paths.store_root().parent / "manifest.json").is_file()
 
 
-def _refuse_lazy(name: str, what: str) -> InstallError:
+def _refuse_lazy(name: str, what: str, *, remedy: str | None = None) -> InstallError:
     from pm import receipt
 
     error = InstallError(
         name,
         f"not installed and lazy installs are disabled: {what}",
-        "enable security.allow_lazy_installs or run `hermes pm install`",
+        remedy or "enable security.allow_lazy_installs or run `hermes pm install`",
     )
     receipt.record_refusal("lazy-install", str(error))
     return error

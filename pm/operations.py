@@ -210,9 +210,13 @@ def ensure_environment(
         return build_environment(source=generation, out=generation / "venv", python=base_python,
                                  frozen=False, explicit=explicit, timeout=timeout)
 
+    preparation = "pm.ensure_environment" if executable is None else "pm.ensure_python_tool"
+    parameters = "name, requirements, root" if executable is None else "name, requirements, root and executable"
     return _ensure_generation(name, root, {"requirements": requirements}, build,
                               record={"requirements": requirements}, explicit=explicit,
-                              executable=executable)
+                              executable=executable,
+                              remedy=f"explicitly call {preparation} with explicit=True and the same "
+                                     f"{parameters}; this does not sync the application environment")
 
 
 def ensure_project_environment(
@@ -242,12 +246,15 @@ def ensure_project_environment(
                                  frozen=True, explicit=explicit, timeout=timeout)
 
     return _ensure_generation(name, root, {"manifests": manifests, "extras": extras, "groups": groups},
-                              build, record={"extras": extras, "groups": groups}, explicit=explicit)
+                              build, record={"extras": extras, "groups": groups}, explicit=explicit,
+                              remedy="explicitly call pm.ensure_project_environment with explicit=True and the same "
+                                     "name, project, root, extras and groups; this does not sync the application environment")
 
 
 def _ensure_generation(
     name: str, root: Path, inputs: dict, build: Callable[[Path, Path], Path], *, record: dict, explicit: bool,
     executable: str | None = None,
+    remedy: str | None = None,
 ) -> Path:
     """Select the generation whose inputs match, building one only when none does.
 
@@ -291,7 +298,7 @@ def _ensure_generation(
     if existing is not None:
         return existing
     if not explicit and not lazy_installs_allowed():
-        raise _refuse_lazy(name, "isolated Python environment is missing or outdated")
+        raise _refuse_lazy(name, "isolated Python environment is missing or outdated", remedy=remedy)
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".install.lock").open("a+b") as mutex:
         lock_fd(mutex.fileno(), wait=True)
