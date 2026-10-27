@@ -95,16 +95,36 @@ def _archive_answer(archive: str) -> str | None:
     delivery lane itself suppresses) — so the caller falls through to an older
     archive instead of injecting prompt noise the job already has.
     """
-    # New writers stamp the prompt length outside user-owned text. Jump past
-    # that prompt instead of searching its quoted markers for a response frame.
+    # The prompt stamp is only a boundary hint: writer/reader versions can
+    # disagree about the prompt bytes and separator. An exact-position response
+    # frame is authoritative. Otherwise accept a drifted frame only when it is
+    # the sole complete candidate and no overclaimed (possibly truncated) frame
+    # exists. Multiple valid candidates are ambiguous: returning None is safer
+    # than promoting a quoted frame from either half.
     prompt_frame = _PROMPT_FRAME_RE.search(archive)
     if (prompt_frame is not None
             and archive.find(_PROMPT_HEADING) == prompt_frame.end() - len(_PROMPT_HEADING)):
-        response_start = prompt_frame.end() + int(prompt_frame.group(1)) + len(_PROMPT_SEPARATOR)
-        frame = _RESPONSE_FRAME_RE.match(archive, response_start)
+        expected_start = (prompt_frame.end() + int(prompt_frame.group(1))
+                          + len(_PROMPT_SEPARATOR))
+        candidates = list(_RESPONSE_FRAME_RE.finditer(archive, prompt_frame.end()))
+        frame = next((candidate for candidate in candidates
+                      if candidate.start() == expected_start), None)
         tail = archive[frame.end():] if frame is not None else ""
-        # A missing or truncated writer-owned boundary is unusable.
-        if (frame is None or len(tail) != int(frame.group(1)) + len(_RESPONSE_TERMINATOR)
+        if frame is None:
+            valid = []
+            for candidate in candidates:
+                candidate_tail = archive[candidate.end():]
+                candidate_declared = int(candidate.group(1)) + len(_RESPONSE_TERMINATOR)
+                if len(candidate_tail) < candidate_declared:
+                    return None
+                if (len(candidate_tail) == candidate_declared
+                        and candidate_tail.endswith(_RESPONSE_TERMINATOR)):
+                    valid.append((candidate, candidate_tail))
+            if len(valid) != 1:
+                return None
+            frame, tail = valid[0]
+        declared_tail_len = int(frame.group(1)) + len(_RESPONSE_TERMINATOR)
+        if (len(tail) != declared_tail_len
                 or not tail.endswith(_RESPONSE_TERMINATOR)):
             return None
         answer = tail[:-len(_RESPONSE_TERMINATOR)].strip()

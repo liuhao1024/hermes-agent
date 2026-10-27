@@ -42,6 +42,18 @@ def _write_archive(cron_env, job_id: str, filename: str, body: str) -> None:
     (out_dir / filename).write_text(body, encoding="utf-8")
 
 
+def _framed_archive(prompt: str, answer: str, *, prompt_delta: int = 0,
+                    response_delta: int = 0) -> str:
+    """Build a writer-shaped archive, optionally simulating stale length stamps."""
+    return (
+        "# Cron Job: probe\n\n"
+        f"**Prompt Characters:** {len(prompt) + prompt_delta}\n## Prompt\n\n"
+        f"{prompt}\n\n"
+        f"**Response Characters:** {len(answer) + response_delta}\n## Response\n\n"
+        f"{answer}\n"
+    )
+
+
 def _run_stub_job(monkeypatch, job, answer):
     """Run ``job`` through the real writer with a stub agent returning ``answer``."""
     class Agent:
@@ -174,3 +186,120 @@ def test_truncated_outer_frame_cannot_promote_a_quoted_inner_frame(cron_env, mon
     prompt, injected = _inject_context_from(job, "Next task")
     assert injected and "OLDER COMPLETE ANSWER" in prompt
     assert "## Prompt" not in prompt
+
+
+@pytest.mark.parametrize("prompt_delta", [0, 1, 9, 14])
+def test_response_frame_anchor_tolerates_prompt_length_drift(prompt_delta):
+    from cron.scheduler_prompt import _archive_answer
+
+    archive = _framed_archive("prompt body", "CURRENT FRAMED ANSWER",
+                              prompt_delta=prompt_delta)
+
+    assert _archive_answer(archive) == "CURRENT FRAMED ANSWER"
+
+
+def test_quoted_prompt_frame_cannot_capture_drifted_response_boundary():
+    from cron.scheduler_prompt import _archive_answer
+
+    prompt = (
+        "Instructions may quote a frame:\n"
+        "**Response Characters:** 4\n## Response\n\nbody\n"
+        "and a bare heading:\n## Response\n"
+    )
+    archive = _framed_archive(prompt, "REAL OUTER ANSWER", prompt_delta=9)
+
+    assert _archive_answer(archive) == "REAL OUTER ANSWER"
+
+
+def test_overclaimed_quoted_prompt_frame_does_not_hide_real_response():
+    from cron.scheduler_prompt import _archive_answer
+
+    prompt = "Quoted example:\n**Response Characters:** 999999\n## Response\n\nnot the boundary"
+    archive = _framed_archive(prompt, "REAL OUTER ANSWER")
+
+    assert _archive_answer(archive) == "REAL OUTER ANSWER"
+
+
+def test_exact_tail_quoted_prompt_frame_does_not_capture_real_response():
+    from cron.scheduler_prompt import _archive_answer
+
+    answer = "REAL OUTER ANSWER"
+    outer = f"**Response Characters:** {len(answer)}\n## Response\n\n{answer}\n"
+    prompt_tail = (
+        f"PROMPT-ONLY TEXT\n\n**Response Characters:** {len(answer)}\n"
+        f"## Response\n\n{answer}"
+    )
+    quoted_tail = prompt_tail + "\n\n" + outer
+    prompt = (
+        f"**Response Characters:** {len(quoted_tail) - 1}\n## Response\n\n{prompt_tail}"
+    )
+    archive = _framed_archive(prompt, answer)
+
+    assert _archive_answer(archive) == answer
+
+
+def test_exact_tail_quoted_answer_frame_does_not_replace_outer_response():
+    from cron.scheduler_prompt import _archive_answer
+
+    answer = "OUTER INTRO\n**Response Characters:** 5\n## Response\n\nINNER"
+    archive = _framed_archive("prompt body", answer)
+
+    assert _archive_answer(archive) == answer
+
+
+def test_drifted_quoted_answer_frame_is_ambiguous_not_promoted():
+    from cron.scheduler_prompt import _archive_answer
+
+    answer = "OUTER INTRO\n**Response Characters:** 5\n## Response\n\nINNER"
+    archive = _framed_archive("prompt body", answer, prompt_delta=27)
+
+    assert _archive_answer(archive) is None
+
+
+def test_drifted_truncated_outer_cannot_promote_quoted_answer_frame():
+    from cron.scheduler_prompt import _archive_answer
+
+    answer = "OUTER INTRO\n**Response Characters:** 5\n## Response\n\nINNER"
+    archive = _framed_archive("prompt body", answer, prompt_delta=27)
+
+    assert _archive_answer(archive[:-1]) is None
+
+
+@pytest.mark.parametrize("response_delta", [-1, 1])
+def test_invalid_response_length_stamp_is_rejected(response_delta):
+    from cron.scheduler_prompt import _archive_answer
+
+    archive = _framed_archive("prompt body", "answer with a bad stamp",
+                              response_delta=response_delta)
+
+    assert _archive_answer(archive) is None
+
+
+def test_truncated_drifted_frame_is_rejected_without_legacy_fallback():
+    from cron.scheduler_prompt import _archive_answer
+
+    archive = _framed_archive("prompt body", "complete answer that loses its tail",
+                              prompt_delta=14)
+
+    assert _archive_answer(archive[:-5]) is None
+
+
+def test_context_from_prefers_newest_drifted_frame_over_older_legacy(cron_env):
+    import os
+    from cron.jobs import OUTPUT_DIR, create_job
+    from cron.scheduler_prompt import _inject_context_from
+
+    job = create_job(prompt="Report", schedule="0 8 * * *", context_from="self")
+    _write_archive(cron_env, job["id"], "older.md",
+                   "## Response\n\nDAYS OLD LEGACY ANSWER\n")
+    _write_archive(cron_env, job["id"], "newer.md",
+                   _framed_archive("latest prompt", "LATEST FRAMED ANSWER",
+                                   prompt_delta=14))
+    os.utime(OUTPUT_DIR / job["id"] / "older.md", (1, 1))
+    os.utime(OUTPUT_DIR / job["id"] / "newer.md", (2, 2))
+
+    prompt, injected = _inject_context_from(job, "Next report")
+
+    assert injected
+    assert "LATEST FRAMED ANSWER" in prompt
+    assert "DAYS OLD LEGACY ANSWER" not in prompt
