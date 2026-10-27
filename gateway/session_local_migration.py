@@ -8,12 +8,15 @@ Compression and reset may later advance the physical target, never FIFO identity
 from dataclasses import asdict, replace
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 
 from gateway.config import Platform
 from gateway.session import SessionEntry, SessionSource
 from gateway.session_contract import SessionRef
 from hermes_state_runtime import RuntimeStoreError
+
+logger = logging.getLogger(__name__)
 
 
 def bind_native_transport(authority, actor, identity):
@@ -282,6 +285,23 @@ def adopt_legacy_session(authority, actor, row):
             config['model'] = {k: v for k, v in model_cfg.items() if k not in dropped}
             if saved['base_url']:
                 params['provider'] = _endpoint_owner(saved, config)
+    # A legacy row's stored cwd (a git worktree a later ``git worktree remove`` deleted) can be
+    # gone; build_policy refuses any cwd that is not an existing absolute directory, and that
+    # refusal wedges every later resume of an otherwise intact transcript (#145471). Adopt on
+    # the nearest ancestor that still exists, else the process's own directory, and say so.
+    stored_cwd = params.get('cwd')
+    if 'cwd' in params and not (isinstance(stored_cwd, str) and Path(stored_cwd).is_absolute()
+                                and Path(stored_cwd).is_dir()):
+        ancestor = Path(stored_cwd) if isinstance(stored_cwd, str) and Path(stored_cwd).is_absolute() else None
+        while ancestor is not None and ancestor != ancestor.parent and not ancestor.is_dir():
+            ancestor = ancestor.parent
+        if ancestor is not None and ancestor != ancestor.parent and ancestor.is_dir():
+            params['cwd'] = str(ancestor)
+        else:
+            from agent.runtime_cwd import resolve_agent_cwd
+            params['cwd'] = str(resolve_agent_cwd())
+        logger.warning('Session %s adopts in %s: its recorded working directory %s is unusable',
+                       sid, params['cwd'], stored_cwd)
     policy = build_policy(params, config, private_secrets=private)
     if api_mode:
         config = json.loads(policy.config_json)
