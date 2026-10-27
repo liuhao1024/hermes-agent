@@ -115,6 +115,63 @@ def test_good_backup_is_written_only_for_the_active_home(homes, tmp_path):
     assert list((home / "backups" / "config").glob("config.yaml.good.*"))
 
 
+def test_warm_hit_returns_before_the_config_lock(homes, monkeypatch):
+    """A complete published cache tuple is served without waiting on ``_CONFIG_LOCK`` — the same
+    lock-free fast path ``_read_raw_config_impl`` already uses — so one path's cold rebuild
+    cannot stall another warm read (#142145). The locked slow path stays as the fallback, and
+    the returned dict is still a deepcopy the caller cannot mutate the cache through."""
+    import threading
+
+    import hermes_cli.config as cfg
+    from hermes_cli.config_effective import load_user_config_effective
+
+    home, _ = homes
+    config_path = home / "config.yaml"
+    _write(config_path, USER_YAML)
+
+    warm = load_user_config_effective(config_path)
+    assert warm  # populated _EFFECTIVE_CACHE for this path
+
+    held = threading.Lock()
+    held.acquire()
+    observed = threading.Event()
+    completed = threading.Event()
+
+    class BlockedLock:
+        def __enter__(self):
+            observed.set()  # the locked slow path starts here
+            held.acquire()
+
+        def __exit__(self, *exc):
+            held.release()
+
+    monkeypatch.setattr(cfg, "_CONFIG_LOCK", BlockedLock())
+    result = []
+
+    def read():
+        try:
+            result.append(load_user_config_effective(config_path))
+            completed.set()
+        finally:
+            observed.set()  # a fast return also unblocks the sampler
+
+    thread = threading.Thread(target=read)
+    thread.start()
+    try:
+        assert observed.wait(5), "No lock-attempt or return signal"
+        returned_while_held = completed.is_set()
+    finally:
+        held.release()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert returned_while_held, "valid warm hit waited on the global config lock"
+    assert result == [warm]
+    result[0]["model"]["default"] = "caller-mutated"
+    # Held is released, so the patched lock now behaves like an ordinary one; the point of this
+    # last read is that the caller's mutation went into their deepcopy, not the cache.
+    assert load_user_config_effective(config_path) == warm  # cache untouched by caller mutation
+
+
 def _reset_caches_keep_last_good():
     import hermes_cli.config as cfg
     from hermes_cli import config_effective

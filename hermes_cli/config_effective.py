@@ -70,6 +70,21 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     if config_path is None:
         config_path = _config.get_config_path()
     path_key = str(config_path)
+    # Lock-free fast path for a complete published cache tuple — same shape as
+    # `_read_raw_config_impl`: `_EFFECTIVE_CACHE` entries are replaced wholesale, so a warm hit
+    # need not wait behind another path's cold rebuild inside `_CONFIG_LOCK`. Any probe failure
+    # or lost race falls through to the locked slow path and its second check; a concurrent
+    # rewrite may still linearize after this read's complete old snapshot.
+    try:
+        cached = _EFFECTIVE_CACHE.get(path_key)
+        if cached is not None:
+            _, cache_sig = _config._load_config_cache_sig(config_path)
+            n = len(cache_sig) if cache_sig is not None else 0
+            if cache_sig is not None and cached[:n] == cache_sig:
+                if all(_config._env_ref_lookup(k) == v for k, v in cached[n + 1].items()):
+                    return copy.deepcopy(cached[n])
+    except Exception:
+        pass
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
