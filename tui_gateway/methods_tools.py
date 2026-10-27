@@ -1582,8 +1582,14 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed,
                          "oauth_tokens_present": tokens_present})
     try:
-        tools = mc._probe_single_server(name, cfg, details=details)
-        token_present = mc._oauth_tokens_present(name) if needs_oauth_token else True
+        # The TUI gateway's servers page calls this from a backend with a console stdin, so
+        # without suppression a rejected refresh token falls through to the authorization-code
+        # flow and opens a consent tab on the backend host (#142406, same class as #109906).
+        from tools.mcp_oauth import suppress_interactive_oauth
+
+        with suppress_interactive_oauth():
+            tools = mc._probe_single_server(name, cfg, details=details)
+            token_present = mc._oauth_tokens_present(name) if needs_oauth_token else True
     except Exception as exc:
         return failure(str(exc), needs_oauth_token, mc._oauth_tokens_present(name) if needs_oauth_token else None)
     if not token_present:

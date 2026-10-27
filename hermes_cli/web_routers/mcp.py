@@ -222,8 +222,15 @@ async def test_mcp_server(name: str, profile: Optional[str] = None):
     needs_oauth_token = servers[name].get("auth") == "oauth"
 
     def _probe():
-        tools = _probe_single_server(name, servers[name], details=details)
-        return tools, (_oauth_tokens_present(name) if needs_oauth_token else True)
+        # Background health sweep (Desktop, every 30 min and on gateway connect) calls this
+        # endpoint unattended: a rejected refresh token must surface as needs-auth (the toast
+        # with a "Sign in" action), never fall through to the authorization-code flow and
+        # open a consent tab on the backend host (#142406, same class as #109906).
+        from tools.mcp_oauth import suppress_interactive_oauth
+
+        with suppress_interactive_oauth():
+            tools = _probe_single_server(name, servers[name], details=details)
+            return tools, (_oauth_tokens_present(name) if needs_oauth_token else True)
 
     try:  # probe blocks on a dedicated MCP event loop — keep it off the FastAPI loop
         tools, token_present = await asyncio.to_thread(_secret_scoped(profile, _probe))
