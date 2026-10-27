@@ -29,6 +29,9 @@ from gateway.restart import (
 )
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
+from gateway.run_shutdown_restart_watcher import (
+    _WINDOWS_RESTART_WATCHER, restart_watcher_env,
+)
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
 
@@ -68,53 +71,8 @@ def _resolve_gateway_exit_verdict(runner, signal_initiated_shutdown: bool) -> bo
     return True
 
 # Windows has no bash/setsid chain: a tiny detached Python watcher waits for the gateway PID to
-# exit (bounded), then spawns ``hermes gateway restart``.
-_WINDOWS_RESTART_WATCHER = """
-import os, subprocess, sys, time
-from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway
-pid = int(sys.argv[1])
-restart_after_s = float(sys.argv[2])
-cmd = sys.argv[3:]
-deadline = time.monotonic() + restart_after_s
-
-def _alive(p):
-    # On Windows, os.kill(pid, 0) is NOT a no-op — it maps to
-    # GenerateConsoleCtrlEvent(0, pid) (bpo-14484). Use the
-    # Win32 handle-based existence check instead.
-    if os.name == 'nt':
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        k32.OpenProcess.restype = ctypes.c_void_p
-        k32.WaitForSingleObject.restype = ctypes.c_uint
-        k32.GetLastError.restype = ctypes.c_uint
-        h = k32.OpenProcess(0x1000 | 0x100000, False, int(p))
-        if not h:
-            return k32.GetLastError() != 87
-        try:
-            return k32.WaitForSingleObject(h, 0) == 0x102
-        finally:
-            k32.CloseHandle(h)
-    try:
-        os.kill(int(p), 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-
-while time.monotonic() < deadline:
-    if not _alive(pid):
-        break
-    time.sleep(0.2)
-subprocess.Popen(
-    cmd,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    creationflags=windows_detach_flags_without_breakaway(),
-)
-""".strip()
+# exit (bounded), then spawns ``hermes gateway restart``. Source lives in
+# gateway.run_shutdown_restart_watcher alongside the watcher env.
 
 
 @contextmanager
@@ -1354,55 +1312,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     # Restart orchestration
     @staticmethod
     def _restart_watcher_env() -> dict:
-        """Watcher env minus ``_HERMES_GATEWAY`` (else the CLI's self-restart guard refuses; gateway stays down).
-
-        The host multiplexer is respawned with ``host_gateway_child_env`` (default-root
-        secrets via ``served_profile_child_env``, not ``os.environ.copy()``). A standalone
-        named-profile gateway keeps that profile's home — only a multiplexer, or a process
-        already on the default root, is the host.
-        """
-        from gateway.config_loader import drop_bridged_env
-        from hermes_constants import get_default_hermes_root, get_hermes_home
-        from tools.environments.local import host_gateway_child_env, served_profile_child_env
-
-        home = get_hermes_home()
-        try:
-            on_default = home.resolve() == get_default_hermes_root().resolve()
-        except Exception:
-            on_default = False
-        # ``resolve_multiplex_mode`` settles the default-on/unset decision before
-        # restart. Carry that runtime identity instead of re-reading raw config:
-        # ``None`` is the normal pre-resolution value for a named launcher.
-        from agent.secret_scope import is_multiplex_active
-        settled_multiplex = is_multiplex_active()
-        multiplex = False
-        if not on_default and not settled_multiplex:
-            # Second settled source: the live host gateway's OWN published record
-            # (its settled served set). Only when NO settled identity exists may the
-            # raw config re-read stand — it reads the UNSET flag as False, which is
-            # wrong exactly when this process IS the default-on host (#120305).
-            try:
-                from gateway import host_rendezvous as hr
-                record = hr.read_record(hr.ROLE_GATEWAY)
-                if record is not None and hr.record_names_live_owner(record) and len(record.profiles) > 1:
-                    multiplex = True
-            except Exception:
-                multiplex = False
-        if not on_default and not settled_multiplex and not multiplex:
-            try:
-                from gateway.config import load_gateway_config
-                multiplex = bool(load_gateway_config().multiplex_profiles)
-            except Exception:
-                multiplex = False
-        if on_default or settled_multiplex or multiplex:
-            watcher_env = host_gateway_child_env()
-        else:
-            watcher_env = served_profile_child_env(
-                target_home=home, inherit_credentials=True,
-            )
-        watcher_env = drop_bridged_env(watcher_env)
-        watcher_env.pop("_HERMES_GATEWAY", None)
-        return watcher_env
+        """Watcher env minus ``_HERMES_GATEWAY``; body in gateway.run_shutdown_restart_watcher."""
+        return restart_watcher_env()
 
     @staticmethod
     def _spawn_windows_restart_watcher(hermes_cmd: list, current_pid: int, restart_after_s: float) -> None:
@@ -1544,15 +1455,33 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             and (idle := _idle_seconds(agent)) is not None and idle >= timeout
         )
 
+    def _clarify_blocked_chat_agent_count(self) -> int:
+        """Chat agents blocked in a pending clarify wait. The agent thread cannot finish the
+        turn on its own — it is waiting for a human answer the restart is about to cancel
+        (the turn interrupt clears the entry as ``cancelled``), so holding the after-turn wait
+        for it only burns the cap while refusing new turns (#145308)."""
+        try:
+            from tools.clarify_gateway import has_pending
+        except ImportError:
+            return 0
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        return sum(
+            1
+            for key, agent in list((getattr(self, "_running_agents", None) or {}).items())
+            if agent is not None and agent is not _AGENT_PENDING_SENTINEL and has_pending(key)
+        )
+
     def _awaitable_work_count(self) -> int:
         """Active work minus the units the restart wait must not hold for.
 
-        Two disjoint exclusions: wedged turns (idle past ``agent.gateway_timeout`` / past the cron
-        in-flight allowance — restart is their remedy, #115469) and cron runs executing in a
-        restart-safe external worker (``_restart_safe_cron_count``), which outlives this process
-        either way. Cron runs are counted per profile-scoped run by the scheduler, not by
-        subtracting from the bare-ID active count: two profiles can run the same job ID, and one
-        excluded run must not hide the other.
+        Three disjoint exclusions: wedged turns (idle past ``agent.gateway_timeout`` / past the
+        cron in-flight allowance — restart is their remedy, #115469), turns blocked in a pending
+        clarify (the agent thread waits for a human answer the restart resolves as cancelled,
+        #145308) and cron runs executing in a restart-safe external worker
+        (``_restart_safe_cron_count``), which outlives this process either way. Cron runs are
+        counted per profile-scoped run by the scheduler, not by subtracting from the bare-ID
+        active count: two profiles can run the same job ID, and one excluded run must not hide
+        the other.
         """
         non_cron = (
             self._running_agent_count()
@@ -1561,7 +1490,12 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._active_deferred_agent_worker_count()
         )
         return (
-            max(0, non_cron - self._wedged_chat_agent_count())
+            max(
+                0,
+                non_cron
+                - self._wedged_chat_agent_count()
+                - self._clarify_blocked_chat_agent_count(),
+            )
             + self._restart_wait_cron_counts()["awaitable"]
         )
 
@@ -1591,6 +1525,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
                         summary = summary_fn()
                         unit["current_tool"] = summary.get("current_tool")
                         unit["idle_s"] = summary.get("seconds_since_activity")
+                with suppress(Exception):
+                    from tools.clarify_gateway import has_pending
+                    if has_pending(key):
+                        unit["blocked_on"] = "clarify"
             units.append(unit)
         with suppress(Exception):
             from cron.scheduler import get_running_job_details, get_wedged_job_ids
@@ -1608,8 +1546,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def _await_active_work_before_restart(self) -> bool:
         """Wait for in-flight work before ``stop()`` so the requesting turn isn't force-interrupted.
 
-        Wedged turns are excluded (restart is their remedy). True when drained to zero, False when the
-        cap elapsed or only wedged work remains (caller proceeds to ``stop()``).
+        Wedged turns are excluded (restart is their remedy); so are turns blocked in a pending
+        clarify, whose answer the restart resolves as cancelled (#145308). True when drained to
+        zero, False when the cap elapsed or only excluded work remains (caller proceeds to
+        ``stop()``).
         """
         active = self._active_work_count()
         if active <= 0:
@@ -1617,10 +1557,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         if self._awaitable_work_count() <= 0:
             logger.warning(
                 "Restart requested with %d active work unit(s), none awaitable "
-                "(%d wedged past the inactivity timeout, %d in restart-safe external cron "
-                "workers that outlive this process); skipping the after-turn wait and "
-                "proceeding to stop()/drain", active,
-                self._wedged_agent_count(), self._restart_safe_cron_count(),
+                "(%d wedged past the inactivity timeout, %d blocked in a pending clarify, "
+                "%d in restart-safe external cron workers that outlive this process); "
+                "skipping the after-turn wait and proceeding to stop()/drain", active,
+                self._wedged_agent_count(), self._clarify_blocked_chat_agent_count(),
+                self._restart_safe_cron_count(),
             )
             return False
         timeout = float(getattr(self, "_restart_after_turn_timeout", 0.0) or 0.0)
@@ -1651,9 +1592,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             if (now - last_status_at) >= 30.0:
                 logger.info(
                     "Restart deferred: waiting on %d active work unit(s) "
-                    "(%d wedged and excluded, %d restart-safe and excluded; "
-                    "%.0fs remaining before force drain): %s",
+                    "(%d wedged and excluded, %d blocked on clarify, %d restart-safe and "
+                    "excluded; %.0fs remaining before force drain): %s",
                     self._awaitable_work_count(), self._wedged_agent_count(),
+                    self._clarify_blocked_chat_agent_count(),
                     self._restart_safe_cron_count(), deadline - now,
                     self._describe_active_work(),
                 )
@@ -1663,8 +1605,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         if self._active_work_count() > 0:
             logger.warning(
                 "Restart deferred wait: %d excluded work unit(s) remain "
-                "(%d wedged, %d restart-safe external cron); proceeding to stop()/drain",
+                "(%d wedged, %d blocked on clarify, %d restart-safe external cron); "
+                "proceeding to stop()/drain",
                 self._active_work_count(), self._wedged_agent_count(),
+                self._clarify_blocked_chat_agent_count(),
                 self._restart_safe_cron_count(),
             )
             return False
