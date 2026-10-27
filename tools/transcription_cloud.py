@@ -14,7 +14,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from utils import is_truthy_value
 from tools.transcription_audio import _transcode_audio_for_stt
@@ -142,8 +142,11 @@ def _transcribe_openai(
     language = language or _resolve_stt_language(provider_label)
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
-    # Auto-correct a Groq-only model on the native OpenAI path only (third-party endpoints may serve it).
-    if provider_label == "openai" and model_name in GROQ_MODELS | RETIRED_GROQ_MODELS:
+    # Auto-correct a Groq-only model on the native OpenAI path only (third-party endpoints may
+    # serve it under the same name; only the api.openai.com host gets the rewrite) (#145703).
+    base_host = urlparse(base_url).hostname if base_url else None
+    if (provider_label == "openai" and base_host in (None, "api.openai.com")
+            and model_name in GROQ_MODELS | RETIRED_GROQ_MODELS):
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
 

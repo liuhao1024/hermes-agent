@@ -1761,3 +1761,61 @@ class TestTranscribeOpenaiFiveXxRetry:
         assert result["success"] is False
         assert "503" in result["error"] and "ffmpeg" not in result["error"]
         assert mock_client.audio.transcriptions.create.call_count == 1
+
+
+# ============================================================================
+# _transcribe_openai — Groq-name rewrite is scoped to the native endpoint (#145703)
+# ============================================================================
+
+
+class TestTranscribeOpenaiGroqRewriteScope:
+    """The Groq-catalog -> whisper-1 rewrite must only fire on the native OpenAI
+    endpoint: a custom ``base_url`` (self-hosted OpenAI-compatible server) may serve
+    the same model name, and rewriting it breaks the request with a 404."""
+
+    def test_custom_base_url_keeps_groq_catalog_name(self, sample_wav):
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "local transcript"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_openai
+            result = _transcribe_openai(
+                sample_wav, "whisper-large-v3-turbo",
+                api_key="sk-test", base_url="http://127.0.0.1:8000/v1",
+            )
+
+        assert result["success"] is True
+        assert result["transcript"] == "local transcript"
+        assert mock_client.audio.transcriptions.create.call_args.kwargs["model"] == \
+            "whisper-large-v3-turbo"
+
+    def test_native_host_still_rewrites(self, sample_wav):
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "cloud transcript"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_openai
+            result = _transcribe_openai(
+                sample_wav, "whisper-large-v3-turbo",
+                api_key="sk-test", base_url="https://api.openai.com/v1",
+            )
+
+        assert result["success"] is True
+        assert mock_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
+
+    def test_no_base_url_still_rewrites(self, sample_wav):
+        """An explicit key without a base_url rides the SDK default (native) endpoint."""
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "cloud transcript"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_openai
+            result = _transcribe_openai(
+                sample_wav, "whisper-large-v3-turbo", api_key="sk-test",
+            )
+
+        assert result["success"] is True
+        assert mock_client.audio.transcriptions.create.call_args.kwargs["model"] == "whisper-1"
