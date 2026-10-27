@@ -130,6 +130,41 @@ def test_reopen_if_finalized_leaves_live_rows_untouched(tmp_path):
     db.close()
 
 
+def test_reopen_if_finalized_never_clears_a_reset_boundary(tmp_path):
+    """#145372: a submit naming a reset parent must not clear the parent's boundary stamp.
+
+    A local reset stamps the parent row ``session_reset`` and the receipt's lineage names the
+    pair; ``validate_local_lineage`` accepts the fork only while that stamp survives. The TUI's
+    ``session_key`` still names the owner row after a reset, so the submit-path reopen ran on
+    the parent, cleared the stamp, and every later delivery on the fork refused
+    (``storage_unavailable``). The conversation has advanced past that row: leave it ended."""
+    from hermes_state_keys import local_identity
+    from hermes_state_local_lineage import validate_local_lineage
+    from tui_gateway import methods_prompt
+
+    owner = local_identity("profile", "principal", "request")
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(owner, source="tui")
+    db.append_message(owner, "user", "before reset", timestamp=100.0)
+    db.end_session(owner, "session_reset")
+    db.create_session("reset-child", source="tui", parent_session_id=owner,
+                      model_config={"_reset_from": owner})
+    receipt = {"session_id": owner, "profile_id": "profile", "principal_id": "principal",
+               "request_id": "request", "entry": {"session_id": "reset-child"},
+               "lineage": [owner, "reset-child"], "policy": {}}
+    with db._read_ctx() as conn:
+        validate_local_lineage(conn, receipt)  # the fork delivers before the submit
+
+    methods_prompt._reopen_if_finalized(db, owner)
+
+    row = db.get_session(owner)
+    assert row["end_reason"] == "session_reset", (
+        "the submit-path reopen must not clear a reset parent's boundary stamp (#145372)")
+    with db._read_ctx() as conn:
+        validate_local_lineage(conn, receipt)  # the fork still delivers after the submit
+    db.close()
+
+
 def test_isolated_dispatch_reopens_a_finalized_row(tmp_path, monkeypatch):
     """The compute-host seam: prompt.submit returns BEFORE its persist on an isolated turn
     (the child process runs the turn), so the reopen must live on the dispatch path every

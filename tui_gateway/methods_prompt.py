@@ -608,7 +608,12 @@ def _reopen_if_finalized(db, session_id: str) -> None:
     ``ended_at``/``end_reason`` — opening a finished session must not re-light DB-derived
     liveness with no new activity. This runs on the submit path (the user actually sent
     something) before the turn's first transcript write, so the row the turn writes is
-    live again. Best-effort: a failed read must not block the send."""
+    live again. Best-effort: a failed read must not block the send.
+
+    A session_key can also name a reset parent (the client keeps the owner id across a
+    ``/reset``): that row's ``session_reset`` stamp is lineage state the receipt validator
+    reads back (#145372), not liveness, so the conversation having moved on means this
+    helper must leave the row alone — the gateway route resolves the live tip itself."""
     if not session_id:
         return
     try:
@@ -617,6 +622,12 @@ def _reopen_if_finalized(db, session_id: str) -> None:
         logger.debug("finalized-session reopen check failed for %s", session_id, exc_info=True)
         return
     if row is not None and row.get("ended_at") is not None:
+        try:
+            if db.has_reset_children(session_id):
+                return
+        except Exception:
+            logger.debug("reset-fork check failed for %s", session_id, exc_info=True)
+            return
         db.reopen_session(session_id)
 
 

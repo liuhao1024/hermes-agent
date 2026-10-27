@@ -541,6 +541,23 @@ class SessionSessionsMixin:
             self._unarchive_auto_archived_lineage(conn, session_id)
         self._execute_write(_do)
 
+    def has_reset_children(self, session_id: str) -> bool:
+        """True when a reset fork names *session_id* as its origin — by the stable ``_reset_from``
+        marker or the pre-marker same-key heuristic (``_RESET_CHILD_SQL``).
+
+        A deliberate reset boundary is lineage state, not liveness: the local receipt validator
+        (``validate_local_lineage``) accepts the fork only while the parent row's
+        ``end_reason='session_reset'`` survives, so a client still holding the parent id must not
+        reopen it (#145372) — every later delivery on the fork would refuse
+        (``storage_unavailable``). Compression parents are untouched by this predicate and stay
+        reopenable; only reset forks make the row lineage-owned."""
+        with self._read_ctx() as conn:
+            return conn.execute(
+                "SELECT 1 FROM sessions child WHERE child.parent_session_id = ? "
+                f"AND {_RESET_CHILD_SQL.format(a='child')} LIMIT 1",
+                (session_id,),
+            ).fetchone() is not None
+
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
         """Durably mark an intentional reset boundary on live rows or rows with a *recoverable* accidental
         end_reason (explicit boundaries are preserved): an ``agent_close`` row left recoverable would be
