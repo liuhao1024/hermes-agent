@@ -173,6 +173,36 @@ class TestCodexVocabulary:
         assert clamp_effort("max", supported) == "max"
         assert clamp_effort("ultra", supported) == "max"
 
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-6.1-terra", "openai/gpt-6.1-terra", "gpt-6.1-terra-2026-10-20"],
+    )
+    def test_terra_6_1_takes_full_gpt56_ladder(self, model):
+        """gpt-6.1-terra shipped after the prefix table was written (#145360): its
+        documented ladder is none..max (OpenAI model docs), so it must take the full
+        GPT-5.6 set instead of falling through to the legacy no-max ceiling."""
+        from agent.reasoning_effort import (
+            CODEX_GPT56_EFFORTS,
+            codex_supported_efforts,
+        )
+
+        assert codex_supported_efforts(model) is CODEX_GPT56_EFFORTS
+        assert clamp_effort("max", CODEX_GPT56_EFFORTS) == "max"
+        assert clamp_effort("none", CODEX_GPT56_EFFORTS) == "none"
+
+    def test_terra_6_1_does_not_inherit_sol_no_none_ladder(self):
+        """Sibling 6.1 slugs differ: gpt-6.1-sol's wire rejects ``none`` (live
+        2026-09-29) and keeps Astra's low..max ladder, while Terra documents
+        ``none`` as supported — the two must not share a branch by accident."""
+        from agent.reasoning_effort import (
+            CODEX_ASTRA_EFFORTS,
+            codex_supported_efforts,
+        )
+
+        assert codex_supported_efforts("gpt-6.1-sol") is CODEX_ASTRA_EFFORTS
+        assert clamp_effort("none", CODEX_ASTRA_EFFORTS) == "low"
+        assert codex_supported_efforts("gpt-6.1-terra") is not CODEX_ASTRA_EFFORTS
+
 
 class TestRequestedEffort:
     def test_extracts_effort(self):

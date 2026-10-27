@@ -82,6 +82,35 @@ class TestCodexBuildKwargs:
 
         assert kw["reasoning"]["effort"] == effort
 
+    def test_terra_6_1_max_effort_reaches_the_wire(self, transport):
+        """#145360: gpt-6.1-terra shipped into the Codex catalog after the effort table
+        was written; falling through to the legacy ceiling clamped a `max` ask to
+        `xhigh` before the request ever left the process."""
+        kw = transport.build_kwargs(
+            model="gpt-6.1-terra",
+            messages=[{"role": "user", "content": "Route check"}],
+            tools=[],
+            base_url="https://chatgpt.com/backend-api/codex",
+            is_codex_backend=True,
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+
+        assert kw["reasoning"]["effort"] == "max"
+
+    def test_terra_6_1_explicit_none_is_sent_verbatim(self, transport):
+        """Terra's documented ladder includes `none` (#145360), so a disable reaches the
+        wire instead of being clamped to the Astra-style floor."""
+        kw = transport.build_kwargs(
+            model="gpt-6.1-terra",
+            messages=[{"role": "user", "content": "Route check"}],
+            tools=[],
+            base_url="https://chatgpt.com/backend-api/codex",
+            is_codex_backend=True,
+            reasoning_config={"enabled": False, "effort": "none"},
+        )
+
+        assert kw["reasoning"]["effort"] == "none"
+
     @pytest.mark.parametrize("base_url", ["https://responses.example.com/v1", "https://evil.api.openai.com/v1"])
     def test_astra_contract_is_exact_host_only(self, transport, base_url):
         """Proxies and lookalike subdomains keep the generic Responses contract (effort passes through)."""
