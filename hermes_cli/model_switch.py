@@ -1484,6 +1484,11 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
                 # A local-runtime alias has no credential to add: the seam's own message ("server
                 # isn't running" / "turned off") is the actionable one, the auth hint below is noise.
                 return st.fail_on_target(str(e))
+            from hermes_cli.auth import is_rate_limited_auth_error
+            if is_rate_limited_auth_error(e):
+                # Upstream quota exhaustion (429) leaves the credentials valid; relaying it as
+                # "not connected" sends the operator to `hermes auth add` for nothing (#145351).
+                return st.fail_on_target(str(e))
             return st.fail_on_target(
                 f"{st.provider_label} is not connected: no API key or login was found for it. Add one with "
                 f"`hermes auth add {st.target_provider}`, or pick a connected provider in /model.\n"
