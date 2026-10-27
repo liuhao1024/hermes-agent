@@ -7,14 +7,22 @@
 ### Loading
 
 ```python
-tmp = tempfile.mktemp(suffix=".wav")
-subprocess.run(["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", "22050",
-                "-sample_fmt", "s16", tmp], capture_output=True, check=True)
-with wave.open(tmp) as wf:
-    sr = wf.getframerate()
-    raw = wf.readframes(wf.getnframes())
+import os, subprocess, tempfile, wave
+import numpy as np
+
+# Private dir created atomically under $TMPDIR (mkdtemp, mode 0700); the `with`
+# removes it and the WAV on success, ffmpeg failure or read failure alike.
+with tempfile.TemporaryDirectory(prefix="ascii_audio_") as tmp_dir:
+    wav_path = os.path.join(tmp_dir, "audio.wav")
+    subprocess.run(["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", "22050",
+                    "-sample_fmt", "s16", wav_path], capture_output=True, check=True)
+    with wave.open(wav_path) as wf:
+        sr = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
 samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 ```
+
+Do not use `tempfile.mktemp()` here: it only returns a name, so another process can create that path before ffmpeg writes to it, and nothing removes the WAV afterwards. If the WAV must outlive this block (e.g. as the mux audio track), create it inside the run's private work directory described in optimization.md § Temp File Cleanup instead; finish all users of that WAV before cleaning up the directory.
 
 ### Per-Frame FFT
 

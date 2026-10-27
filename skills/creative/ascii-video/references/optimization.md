@@ -612,77 +612,83 @@ Heavier effects (many particles, dense grids, extra shader passes) add ~20-50%.
 
 ## Temp File Cleanup
 
-Rendering generates intermediate files that accumulate across runs. Clean up after the final concat/mux step.
+Rendering generates intermediate files. Give each run its own private work directory and a staging directory beside its output. Remove only these directories in `finally`, on success or failure, unless `KEEP_INTERMEDIATES=1`.
 
 ### Files to Clean
 
 | File type | Source | Location |
 |-----------|--------|----------|
-| WAV extracts | `ffmpeg -i input.mp3 ... tmp.wav` | `tempfile.mktemp()` or project dir |
-| Segment clips | `render_clip()` output | `segments/seg_00.mp4` etc. |
-| Concat list | ffmpeg concat demuxer input | `segments/concat.txt` |
-| ffmpeg stderr logs | piped to file for debugging | `*.log` in project dir |
-| Feature cache | pickled numpy arrays | `*.pkl` or `*.npz` |
+| WAV extracts | `ffmpeg -y -i input.mp3 ... <wav>` | `<work>/audio.wav` |
+| Segment clips | `render_clip()` output | `<work>/seg_00.mp4` etc. |
+| Concat list | ffmpeg concat demuxer input | `<work>/concat.txt` |
+| ffmpeg stderr logs | worker-owned log handles | `<work>/ffmpeg_*.log` |
+| Unpublished final | concat/mux output | `<stage>/final.mp4`, beside the output |
+| Feature cache | pickled numpy arrays | `*.pkl` or `*.npz` outside `<work>` (kept) |
 
-### Cleanup Function
+### Cleanup in the Render Pipeline
+
+`tempfile.mkdtemp()` creates each directory atomically and privately (0700 on POSIX). Work lives under `$TMPDIR` (or the OS default); staging beside the output allows same-filesystem `os.replace`. The encoder creates the staged file itself, so a **new output follows the normal file-creation umask**. For an **existing regular output**, copy its ordinary permission bits to the staged file before replacement (for example, preserve 0600, 0640 or 0644 rather than forcing a fixed mode).
+
+An existing output must also pass this process's `os.access(output_path, os.W_OK)` before rendering, retaining the direct `O_TRUNC` write-protection gate (privileged/root callers may still be permitted).
+
+This example assumes an authorized, exclusively used output path and run directories: do not reuse or transfer their ownership or allow foreign writers. It rejects an existing final-path symlink (including a dangling one), directory, special file or special permission bits before rendering. Replacing an inode does **not** preserve UID/GID, ACLs, extended attributes, hard-link identity or other metadata; if these matter, use the application's publication policy instead. Parent directories are trusted, and concurrent writers to the **same** output are not supported. The ordinary POSIX permission behavior shown here is not a Windows ACL contract or an adversarial filesystem sandbox.
+
+`render_segments` and `concat_and_mux` stand for your real pipeline steps (see Parallel Rendering and Concatenation above). They must propagate failures, and return or raise **only after all worker/reader/encoder borrowers have closed their handles, drained their pipes and waited for their subprocesses**. In particular, each worker closes its encoder's stdin, waits, then closes its log. Directory cleanup cannot do that work or hard-interrupt a reader. The size check below is only a minimum sanity check for an assumed pipeline, **not proof that media is playable**; perform the pipeline's actual output verification before publication.
 
 ```python
-import glob
-import tempfile
+import os
 import shutil
+import stat
+import tempfile
 
-def cleanup_render_artifacts(segments_dir="segments", keep_final=True):
-    """Remove intermediate files after successful render.
-    
-    Call this AFTER verifying the final output exists and plays correctly.
-    
-    Args:
-        segments_dir: directory containing segment clips and concat list
-        keep_final: if True, only delete intermediates (not the final output)
-    """
-    removed = []
-    
-    # 1. Segment clips
-    if os.path.isdir(segments_dir):
-        shutil.rmtree(segments_dir)
-        removed.append(f"directory: {segments_dir}")
-    
-    # 2. Temporary WAV files
-    for wav in glob.glob("*.wav"):
-        if wav.startswith("tmp") or wav.startswith("extracted_"):
-            os.remove(wav)
-            removed.append(wav)
-    
-    # 3. ffmpeg stderr logs
-    for log in glob.glob("ffmpeg_*.log"):
-        os.remove(log)
-        removed.append(log)
-    
-    # 4. Feature cache (optional — useful to keep for re-renders)
-    # for cache in glob.glob("features_*.npz"):
-    #     os.remove(cache)
-    #     removed.append(cache)
-    
-    print(f"Cleaned {len(removed)} artifacts: {removed}")
-    return removed
-```
 
-### Integration with Render Pipeline
+def main(output_path):
+    output_path = os.path.abspath(output_path)
+    out_dir = os.path.dirname(output_path)
+    ext = os.path.splitext(output_path)[1] or ".mp4"
+    try:
+        previous = os.lstat(output_path)  # do not follow a final-path symlink
+    except FileNotFoundError:
+        previous = None
+    if previous is not None:
+        if not stat.S_ISREG(previous.st_mode) or previous.st_mode & 0o7000:
+            raise ValueError("output must be a regular file with ordinary permissions")
+        if not os.access(output_path, os.W_OK):
+            raise PermissionError("existing output is not writable")
+        previous_mode = stat.S_IMODE(previous.st_mode)
+    else:
+        previous_mode = None
 
-Call cleanup at the end of the main render script, after the final output is verified:
-
-```python
-# At end of main()
-if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-    cleanup_render_artifacts(segments_dir="segments")
-    print(f"Done. Output: {output_path}")
-else:
-    print("WARNING: final output missing or empty — skipping cleanup")
+    directories = []  # only these newly created, exclusive directories are cleaned
+    try:
+        # Fail on an invalid output directory before expensive rendering or work allocation.
+        stage = tempfile.mkdtemp(prefix="ascii_render_", dir=out_dir)
+        directories.append(stage)
+        work = tempfile.mkdtemp(prefix="ascii_render_")
+        directories.append(work)
+        wav = os.path.join(work, "audio.wav")
+        render_segments(work, wav)  # clips, concat list and logs also stay inside work
+        tmp_final = os.path.join(stage, "final" + ext)  # not precreated with mode 0600
+        concat_and_mux(work, wav, tmp_final)
+        if os.path.getsize(tmp_final) <= 1000:
+            raise RuntimeError("final output missing or empty")  # minimum sanity only
+        # Any real media verification must also finish here, before os.replace.
+        if previous_mode is not None:
+            os.chmod(tmp_final, previous_mode)
+        os.replace(tmp_final, output_path)  # failures above leave old bytes/mode untouched
+        print(f"Done. Output: {output_path}")
+    finally:
+        if os.environ.get("KEEP_INTERMEDIATES") == "1":
+            print(f"KEEP_INTERMEDIATES=1, kept: {directories}")
+        else:
+            for directory in reversed(directories):
+                shutil.rmtree(directory)
 ```
 
 ### Temp File Best Practices
 
-- Use `tempfile.mkdtemp()` for segment directories — avoids polluting the project dir
-- Name WAV extracts with `tempfile.mktemp(suffix=".wav")` so they're in the OS temp dir
-- For debugging, set `KEEP_INTERMEDIATES=1` env var to skip cleanup
-- Feature caches (`.npz`) are cheap to store and expensive to recompute — default to keeping them
+- Create intermediates only inside the run's own `tempfile.mkdtemp()` work directory; never allocate a name with `tempfile.mktemp()` and create it later.
+- Remove only the run's two exclusive directories, never glob the working directory: `tmp*.wav`, `extracted_*.wav`, `ffmpeg_*.log`, `segments/` and caches may belong to someone else.
+- Finish all borrowers before cleanup, including on failed pipeline steps. `finally` handles normal and catchable exceptional exits, not SIGKILL or a host crash.
+- `KEEP_INTERMEDIATES=1` deliberately keeps the work/stage directories for debugging; their lifetime and later cleanup remain the run owner's responsibility.
+- Keep reusable feature caches outside the work directory. The published final is outside both directories and is never a cleanup target.
