@@ -768,6 +768,19 @@ class TestSkillTextDescription:
         assert overrides["description"].startswith(bu_cli._HEADER_BASE)
         assert overrides["description"].endswith(bu_cli._HELPERS_DIGEST)
 
+    def test_digest_points_first_navigation_at_goto_url_and_documents_close_tab(self):
+        # #145386: new_tab() only reuses a blank page, so telling the model to use it for
+        # "the FIRST navigation" of every call piled up tabs on persisted sessions. The
+        # digest must steer the first navigation to goto_url() and surface close_tab().
+        digest = bu_cli._HELPERS_DIGEST
+        assert "goto_url(url) navigates the current tab" in digest
+        assert "use new_tab(url) only when you actually need a second tab" in digest
+        assert "close_tab(target=None)" in digest
+        assert "use for the FIRST navigation" not in digest
+        # The Lightpanda header keeps its own one-page-per-session guidance, where
+        # "new_tab exactly once, then goto_url" is correct.
+        assert "new_tab(url) exactly once" in bu_cli._HEADER_LIGHTPANDA
+
 
 
 
