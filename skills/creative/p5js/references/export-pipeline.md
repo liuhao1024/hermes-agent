@@ -274,15 +274,52 @@ For automated, server-side, or CI rendering. Uses a headless Chrome browser to r
 
 ### export-frames.js (Node.js Script)
 
-See `scripts/export-frames.js` for the full implementation. Basic pattern:
+Use `scripts/export-frames.js` for the full implementation. It serves the sketch directory (resolved with realpath) at
+`http://p5-sketch.localhost` using Puppeteer's native request interception,
+without opening an HTTP listener. Local images, fonts, JSON and p5.js may live
+in that directory or its non-hidden subdirectories; no separate asset server
+is needed. `../shared`, absolute outside resources, outside symlinks and hidden
+paths are not served. Move needed assets under the sketch directory. The input
+basename is URL-encoded, including spaces and non-ASCII characters.
+
+Browser web security remains enabled. Sandbox launch policy follows the core
+browser launcher: for Puppeteer-managed Chrome only, root, Docker or AppArmor
+restrictions on unprivileged user namespaces automatically add `--no-sandbox`
+and (unless already provided by Puppeteer) `--disable-dev-shm-usage`, with a
+reason on stderr. A user executable selected through `PUPPETEER_EXECUTABLE_PATH`
+or Puppeteer's configuration file is never automatically unsandboxed. This is
+host-policy alignment, not an OS isolation guarantee or a safe way to run
+arbitrary malicious JavaScript. Use trusted sketches and an appropriate outer
+isolation boundary; do not concurrently modify the sketch tree during export.
+
+Other sandbox startup failures are nonzero; there is no retry that disables
+security. First try a verified sandbox-capable Chrome via
+`PUPPETEER_EXECUTABLE_PATH`, or ask an administrator to follow the
+[official sandbox setup instructions](https://pptr.dev/troubleshooting#setting-up-chrome-linux-sandbox).
+Only with independently verified external isolation may an operator explicitly
+set Puppeteer's native `PUPPETEER_DANGEROUS_NO_SANDBOX=true` (supported since
+Puppeteer 24.40.0). The script does not implement this flag for older versions;
+it warns when native default arguments actually disable the sandbox. Native
+configuration/environment precedence is left to Puppeteer. Normal CORS and
+local-network rules apply to other origins; interception is not a network
+firewall and has no measured performance guarantee.
+
+Simplified standalone pattern for a self-contained HTML sketch (no local
+fetch-based assets); create `outputDir` first. Use the bundled script above
+for local assets and the host-policy/remedy behavior described above:
 
 ```javascript
 const puppeteer = require('puppeteer');
+const path = require('path');
 
 async function captureFrames(htmlPath, outputDir, options) {
+  // defaultArgs() returns a Promise on Puppeteer 25.x; `await` also accepts
+  // the synchronous array of Puppeteer 24.
+  if ((await puppeteer.defaultArgs({ headless: true })).includes('--no-sandbox')) {
+    console.error('Warning: Chrome sandbox disabled; external isolation must be independently verified.');
+  }
   const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    headless: true
   });
   const page = await browser.newPage();
 
@@ -298,7 +335,7 @@ async function captureFrames(htmlPath, outputDir, options) {
 
   // Wait for sketch to initialize
   await page.waitForSelector('canvas');
-  await page.waitForTimeout(1000);
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
   for (let i = 0; i < options.frames; i++) {
     const canvas = await page.$('canvas');
@@ -308,7 +345,7 @@ async function captureFrames(htmlPath, outputDir, options) {
 
     // Advance one frame
     await page.evaluate(() => { redraw(); });
-    await page.waitForTimeout(1000 / options.fps);
+    await new Promise(resolve => setTimeout(resolve, 1000 / options.fps));
   }
 
   await browser.close();
