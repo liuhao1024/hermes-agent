@@ -513,12 +513,18 @@ def _format_interrupted_output(stdout_text: str) -> str:
 
 
 def _clean_output(stdout_text: str) -> tuple[str, dict[str, Any]]:
-    """Shared output pipeline: byte-cap (with spill), ANSI strip, secret redaction. code_file=True:
-    output often echoes source/config — skip ENV/JSON/f-string false positives, still mask credentials."""
+    """Shared output pipeline: ANSI strip, secret redaction, byte-cap (with spill).
+
+    code_file=True keeps source echoes intact; redact_env_shaped_lines adds the
+    ENV-assignment pass for .env-shaped dumps printed by script logic (#95509).
+    Redaction runs BEFORE truncation so the spill file written for truncated
+    output carries redacted text — read_file implies code_file=True and would
+    skip the ENV pass on spilled plaintext otherwise."""
     from tools.ansi_strip import strip_ansi
-    from agent.redact import redact_sensitive_text
+    from agent.redact import redact_sensitive_text, redact_env_shaped_lines
+    stdout_text = redact_env_shaped_lines(redact_sensitive_text(strip_ansi(stdout_text), code_file=True))
     stdout_text, metadata = _truncate_stdout_text(stdout_text)
-    return redact_sensitive_text(strip_ansi(stdout_text), code_file=True), metadata
+    return stdout_text, metadata
 
 
 def _with_timeout_notice(stdout_text: str, timeout_msg: str) -> str:

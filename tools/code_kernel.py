@@ -783,10 +783,12 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
                  state_reset: bool, exec_start: float) -> dict[str, Any]:
     """Assemble the tool result for one settled cell (disposing the kernel where the contract says so)."""
     from tools.code_execution_tool import _sandbox_failure_hint, _truncate_stdout_text
-    from agent.redact import redact_sensitive_text
+    from agent.redact import redact_sensitive_text, redact_env_shaped_lines
     from tools.ansi_strip import strip_ansi
     def clean(text: str) -> str:
-        return redact_sensitive_text(strip_ansi(text), code_file=True)
+        # ENV-assignment pass stays on for cell output (#95509): it can carry
+        # .env-shaped dumps printed by script logic, same as the per-call path.
+        return redact_env_shaped_lines(redact_sensitive_text(strip_ansi(text), code_file=True))
     if status in ("timeout", "interrupted"):
         # No safe way to interrupt one cell in place: kill the kernel, report the loss, respawn next call.
         _REGISTRY.discard(key, kernel)
@@ -807,15 +809,30 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
     tool_errors = tool_errors_since(kernel.tool_call_log, kernel.cell_log_start)
     if tool_errors:
         result["tool_errors"] = tool_errors
-    # Cell-side spill (runner clipped before replying): same read_file recipe as the host-side spill.
+    # Cell-side spill (runner clipped before replying): same read_file recipe as the host-side
+    # spill. The runner writes raw stdout, so scrub the spill file in place before surfacing the
+    # path — read_file implies code_file=True and would skip the ENV-assignment pass on the
+    # spilled plaintext (#95509).
     cell_spill = str(payload.get("stdout_spill_path", "") or "")
     if cell_spill and payload.get("stdout_clipped"):
-        result["stdout_spill_path"] = cell_spill
-        result["warning"] = (
-            f"Cell stdout exceeded the inline cap; head shown. FULL output saved to {cell_spill} "
-            f'— page it with read_file(path="{cell_spill}", offset=...) instead of re-running. '
-            "(Kernel state persists: printing a narrower slice next call is often cheaper.)"
-        )
+        try:
+            with open(cell_spill, "r", encoding="utf-8", errors="replace") as f:
+                redacted_spill = clean(f.read())
+            tmp_spill = cell_spill + ".redacted"
+            with open(tmp_spill, "w", encoding="utf-8") as f:
+                f.write(redacted_spill)
+            os.replace(tmp_spill, cell_spill)
+        except OSError:
+            # Best-effort like the runner's own spill write: surface the path
+            # only when it exists and is readable.
+            cell_spill = ""
+        if cell_spill:
+            result["stdout_spill_path"] = cell_spill
+            result["warning"] = (
+                f"Cell stdout exceeded the inline cap; head shown. FULL output saved to {cell_spill} "
+                f'— page it with read_file(path="{cell_spill}", offset=...) instead of re-running. '
+                "(Kernel state persists: printing a narrower slice next call is often cheaper.)"
+            )
     if status == "timeout":
         message = (f"Cell timed out after {timeout}s; the session kernel was killed and its "
                    "state was lost. The next execute_code call starts a fresh kernel.")

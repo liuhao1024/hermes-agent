@@ -882,6 +882,72 @@ def _redact_assignments(text: str, *, mask_nonreusable: bool = False) -> str:
     return text
 
 
+# Values that are unambiguously code, not credential material, for the
+# execute_code-scoped ENV pass below (#95509 review data): sandbox output
+# routinely echoes the source being run, so assignment-shaped lines are mostly
+# parameter defaults and constants. Every exclusion must be certain enough that
+# a real credential cannot plausibly take the shape — when in doubt, mask.
+_CODE_LITERAL_VALUES = frozenset({"None", "True", "False"})
+# Dotted attribute path (``os.environ.X``, ``config.api_key``). The first
+# segment must start lowercase (module/variable naming) so credential shapes
+# with dots (``AQ.AbC123``) stay masked.
+_CODE_ATTR_PATH_RE = re.compile(r"[a-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)+")
+
+
+def _is_code_shaped_value(value: str) -> bool:
+    """True when an assignment value is certainly source code, not a secret."""
+    v = value.rstrip("),;:]}")  # trailing call/subscribe syntax: ``token=None),``
+    if v in _CODE_LITERAL_VALUES or v[:1] in {"=", "!", "<", ">"}:
+        return True  # literals, or comparison expressions (``if token == x`` → ``==x``)
+    if "(" in v:  # call syntax; real credentials (base64/hex/JWT) contain no parens
+        return True
+    if _CODE_ATTR_PATH_RE.fullmatch(v):
+        return True
+    if len(v) >= 2 and re.fullmatch(r"[A-Z_]+", v):
+        return True  # ALL_CAPS constant reference; digits (AKIA…) stay masked
+    return False
+
+
+def redact_env_shaped_lines(text: str) -> str:
+    """ENV-assignment pass scoped to sandbox/exec output (#95509).
+
+    ``redact_sensitive_text(code_file=True)`` keeps source echoes intact but
+    also skips the ENV-assignment pass, so ``.env``-shaped ``KEY=value`` lines
+    printed by script logic (reading a credential store, not dumped by shell
+    command shape) leak opaque values verbatim from ``execute_code``. Callers
+    route exec output through this supplement: the ENV-assignment rules
+    (``_ENV_ASSIGN_RE``/``_ENV_ASSIGN_LOWER_RE`` + ``_should_redact_assignment``)
+    run on top of the code_file pass, with code-shape values excluded so
+    parameter defaults and constants stay readable (measured on real source:
+    the unconditional code_file=False flip altered 13/101 secret-keyword lines;
+    this narrower gate alters 2, both doc examples).
+
+    Line-by-line so output line count always matches input, and the ``\\S+``
+    value group can never cross a newline (an unbounded quote branch would
+    silently delete text). URL-bearing lines keep the web-URL passthrough:
+    query params like ``token=`` are intentionally preserved there.
+    """
+    if not text or "=" not in text or not _redact_enabled():
+        return text
+
+    def _sub(m, _render=lambda g: f"{g[0]}={g[1]}{_mask_token(g[2])}{g[1]}"):
+        groups = m.groups()
+        if not _should_redact_assignment(groups[0], groups[-1], check_keyword=True):
+            return m.group(0)
+        if _is_code_shaped_value(groups[-1]):
+            return m.group(0)
+        return _render(groups)
+
+    out = []
+    for line in text.split("\n"):
+        if "=" in line:
+            line = _ENV_ASSIGN_RE.sub(_sub, line)
+            if "://" not in line:  # lowercase names would match URL params (#77484)
+                line = _ENV_ASSIGN_LOWER_RE.sub(_sub, line)
+        out.append(line)
+    return "\n".join(out)
+
+
 def _redact_url_credentials(text: str, code_file: bool) -> str:
     """DB connection-string passwords and bare-token URL userinfo (``://`` text only)."""
     def _redact_db(m):
