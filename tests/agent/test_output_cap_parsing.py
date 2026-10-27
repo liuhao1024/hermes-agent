@@ -68,6 +68,28 @@ class TestParseDashScopeOutputCap:
         assert parse_available_output_tokens_from_error(msg) == 32768
 
 
+class TestParseAnthropicShortenedOutputCeiling:
+    """Anthropic shortened the invalid_params wording: "…which is the maximum
+    allowed" dropped the "number of output tokens" suffix (#145281). The old
+    regex and signal groups no longer match, so the 400 falls through
+    parse/is_output_cap_error into the compression path (input already fits)
+    instead of retrying with the provider-reported cap."""
+
+    def test_shortened_ceiling_format(self):
+        msg = "invalid_params: max_tokens: 131072 > 128000, which is the maximum allowed"
+        assert parse_available_output_tokens_from_error(msg) == 128000
+
+    def test_shortened_ceiling_with_model_suffix(self):
+        msg = ("max_tokens: 100000 > 64000, which is the maximum allowed "
+               "for claude-sonnet-4-5")
+        assert parse_available_output_tokens_from_error(msg) == 64000
+
+    def test_shortened_ceiling_is_output_cap(self):
+        assert is_output_cap_error(
+            "invalid_params: max_tokens: 131072 > 128000, which is the maximum allowed"
+        ) is True
+
+
 class TestParseMaximumOutputTokensCap:
     """Some OpenAI-compatible relays report the model's separate output cap."""
 
