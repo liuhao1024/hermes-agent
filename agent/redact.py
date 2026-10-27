@@ -336,6 +336,8 @@ _STRONG_KEY_KEYWORD_RE = re.compile(
 # ``/usr/...`` or ``~/...`` references a variable or a path, not a credential, even under a strong key
 # (``SSH_AUTH_SOCK=$HOME/.ssh/agent.sock``, ``DOCKER_AUTH_CONFIG=/home/u/.docker``).
 _PASSWORD_KEY_RE = re.compile(r"passwd|password|pass|pw", re.IGNORECASE)
+# Boolean/empty literals are configuration state, never credential values (#142574).
+_BOOLEAN_LITERALS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none"})
 # Anchored on both ends: the whole value must be a ``$VAR``/``${VAR}`` reference, a ``~/``
 # path, or an absolute path — not merely a string whose FIRST character is one of those.
 # A 40-char AWS secret key starts with '/' ~1 in 64 times and argon2/bcrypt digests always
@@ -415,17 +417,30 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     # ``***``, ``«redacted:ghp_…»`` → ``«redacted-secret»``). Same guard _redact_python_repr_fields uses.
     if value == "***" or value.startswith("«redacted"):
         return False
+    # A boolean literal under a secret-named key is configuration state, not a
+    # credential: ``redact_secrets: true`` masked itself in tool output (#142574),
+    # and an agent copying that view back would corrupt the config. No credential
+    # is spelled ``true``/``false``/``yes``/``no``.
+    if value.lower() in _BOOLEAN_LITERALS:
+        return False
     if check_keyword and not _key_has_secret_keyword(key):
         return False
-    # A shell rc's ``SSH_AUTH_SOCK=$HOME/.ssh/agent.sock`` is configuration the agent must keep
-    # readable; only password-class keys mask a path/variable reference.
-    if _PATH_OR_VAR_VALUE_RE.match(value) and not _has_word_bounded_keyword(key, _PASSWORD_KEY_RE):
-        # ``$VAR`` is an unambiguous reference. A bare ``/...`` or ``~...`` is not:
-        # ``/home/u/.docker`` and ``/8f3kd9sKd0als...`` have the same shape, so every
-        # segment has to look like a path (see _OPAQUE_PATH_SEGMENT_RE) before the
-        # value is treated as configuration.
-        if value[0] == "$" or not any(_OPAQUE_PATH_SEGMENT_RE.fullmatch(seg) for seg in value.split("/")):
+    if _PATH_OR_VAR_VALUE_RE.match(value):
+        # A value that IS a ``$VAR``/``${VAR}`` reference is unambiguous under any key
+        # class, password-class included: ``PASS=$NPASS`` counts passing tests
+        # (#142574). A bcrypt/argon2 digest (``$2b$12$…``) never reaches this branch —
+        # ``$2`` is not a valid variable name, so the anchored match above excludes it.
+        if value[0] == "$":
             return False
+        # A shell rc's ``SSH_AUTH_SOCK=$HOME/.ssh/agent.sock`` is configuration the agent
+        # must keep readable; only password-class keys mask a path reference.
+        if not _has_word_bounded_keyword(key, _PASSWORD_KEY_RE):
+            # A bare ``/...`` or ``~...`` is not unambiguous: ``/home/u/.docker`` and
+            # ``/8f3kd9sKd0als...`` have the same shape, so every segment has to look
+            # like a path (see _OPAQUE_PATH_SEGMENT_RE) before the value is treated
+            # as configuration.
+            if not any(_OPAQUE_PATH_SEGMENT_RE.fullmatch(seg) for seg in value.split("/")):
+                return False
     return (_has_word_bounded_keyword(key, _STRONG_KEY_KEYWORD_RE)
             or _looks_like_opaque_credential(value))
 
@@ -507,8 +522,16 @@ _PYTHON_EXCEPTION_LINE_RE = re.compile(
 # Authorization / Proxy-Authorization, any scheme or bare credential; header
 # name and scheme word preserved. The credential class excludes quotes: pulling
 # a closing quote into the mask turns value corruption into SYNTAX corruption
-# (unterminated quote → shell EOF / SyntaxError).
-_AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
+# (unterminated quote → shell EOF / SyntaxError). The scheme-word list is exempt
+# from being masked AS the credential: the optional scheme group backtracks off
+# when no token follows, which otherwise masked a bare ``bearer ``/``bot ``
+# scheme word standing alone (#142574, near-miss false upstream filing).
+_AUTH_HEADER_RE = re.compile(
+    r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?"
+    r"(?!bearer\b|basic\b|digest\b|negotiate\b|ntlm\b|oauth\b|token\b|bot\b)"
+    r"([^\s\"']+)",
+    re.IGNORECASE,
+)
 
 # API-key style headers (single opaque value, no scheme word): non-vendor-prefix
 # values would otherwise leak when a curl command is echoed into tool output.
@@ -566,7 +589,12 @@ _WEBAPP_LINK_CREDENTIAL_RE = re.compile(
     r"((?<![A-Za-z0-9_-])hermes-session=|/webapp/launch#(?:[^\s#]*?&)?ticket=)[A-Za-z0-9_-]{20,}")
 
 # E.164 phone numbers, 7-15 digits; the lookahead rejects hex strings / identifiers.
-_SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
+# A PEP-440 local-version date segment (``python-3.14.7+20260901-linux-x64``) has the
+# phone shape; a build stamp is always followed by a version separator, which a phone
+# in prose never is, so that context opts the match out (#142574). ``+20260901``
+# standing alone still masks, and so does a longer digit run (``+20260901234-…``)
+# because the opt-out is anchored to exactly 8 digits.
+_SIGNAL_PHONE_RE = re.compile(r"(?!\+20\d{6}[-.])(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 
 # CDP-URL path: web URLs with a query string / with ``user:password@`` userinfo
 # (DB protocols are covered by _DB_CONNSTR_RE).

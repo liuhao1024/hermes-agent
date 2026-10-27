@@ -1694,3 +1694,40 @@ class TestWebappLaunchLinks:
     def test_code_that_builds_such_a_link_is_left_alone(self):
         source = "target.hash = `hermes-session=${token}`\nconst FRAGMENT_KEY = 'hermes-session'\n"
         assert redact_sensitive_text(source, code_file=True) == source
+
+
+class TestNonSecretShapesSurvive:
+    """Four false-positive families from #142574: the redactor rewrote content that
+    is not a credential, and the mask propagated into files agents wrote."""
+
+    def test_shell_var_reference_under_password_class_key_survives(self):
+        # ``PASS=$NPASS`` counts passing tests; the value is a reference, not a literal.
+        for text in ("PASS=$NPASS", "PASS=${NPASS}", "PASS=$NPASS/$NFAIL"):
+            assert redact_sensitive_text(text) == text, text
+
+    def test_boolean_literal_under_secret_named_key_survives(self):
+        # ``redact_secrets: true`` masked itself in tool output; an agent copying the
+        # view back would corrupt the config.
+        for text in ("redact_secrets: true", "redact_secrets: false", "store_secrets: no"):
+            assert redact_sensitive_text(text) == text, text
+
+    def test_pep440_build_stamp_survives_phone_rule(self):
+        # ``python-3.14.7+20260901-linux-x64`` displayed as ``+202****0901``; agents
+        # copying the path got a path that does not exist.
+        text = "python-3.14.7+20260901-linux-x64"
+        assert redact_sensitive_text(text) == text
+
+    def test_bare_authorization_scheme_word_survives(self):
+        # No token follows; the scheme word itself must not be masked.
+        for text in ('    "authorization: bearer ",', '    "authorization: bot ",'):
+            assert redact_sensitive_text(text) == text, text
+
+    def test_real_credential_shapes_still_masked(self):
+        # Positive controls: the four fixes must not open an under-masking hole.
+        assert redact_sensitive_text("PASS=hunter2password") != "PASS=hunter2password"
+        assert redact_sensitive_text("redact_secrets: hunter2password") != "redact_secrets: hunter2password"
+        assert redact_sensitive_text("call +15551234567 now") != "call +15551234567 now"
+        assert redact_sensitive_text("python-3.14.7+20260901 still-free") != "python-3.14.7+20260901 still-free"
+        out = redact_sensitive_text("Authorization: Bearer opaque0123456789abcdef")
+        assert "opaque0123456789abcdef" not in out
+
