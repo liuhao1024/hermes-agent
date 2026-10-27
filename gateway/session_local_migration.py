@@ -79,7 +79,14 @@ def legacy_launch_params(row):
     their workspace only there. ``api_mode`` is no create field, so it is
     returned apart.
     """
-    params = {key: row[key] for key in ('cwd', 'model') if row.get(key)}
+    params = {key: row[key] for key in ('model',) if row.get(key)}
+    # A saved cwd carries into the resumed launch only when it passes build_policy's own bar
+    # (an absolute path to an existing directory). Pre-authority desktop rows saved ``cwd='/'``,
+    # which a Windows Path reads as relative, so adopting the row refused as invalid_params on
+    # every open (#145332); a directory deleted since refuses the same way (#143547 RT-65).
+    # Dropping it resumes on the profile's terminal.cwd, exactly like a row without a cwd.
+    if row.get('cwd') and Path(row['cwd']).is_absolute() and Path(row['cwd']).is_dir():
+        params['cwd'] = row['cwd']
     from hermes_state_sessions import _parse_model_config
     saved = _parse_model_config(row.get('model_config'))
     from hermes_state_gateway import SessionGatewayMixin
