@@ -91,6 +91,37 @@ class TestSearchErrorGuard:
                       partial_error_tree, output_mode="count")
         assert res.error is None
         assert res.total_count >= 4
+        # A partial count must never present itself as full coverage (#145638).
+        assert res.warning is not None, "partial count silently looked complete"
+        assert "incomplete" in res.warning.lower()
+        assert "Permission denied" in res.warning
+
+
+    def test_content_mode_with_partial_error_warns(self, method, partial_error_tree):
+        res = _search(_ops(partial_error_tree), method, "needle",
+                      partial_error_tree, output_mode="content")
+        assert res.error is None
+        assert res.total_count >= 4
+        assert res.warning is not None, "partial content results silently looked complete"
+        assert "incomplete" in res.warning.lower()
+
+    def test_locked_subtree_with_partial_error_warns(self, method, tmp_path):
+        # The reported scenario: an unreadable SUBTREE, not just a single file.
+        for i in range(3):
+            (tmp_path / f"f{i}.txt").write_text("needle\n")
+        locked_dir = tmp_path / "lockeddir"
+        locked_dir.mkdir()
+        (locked_dir / "x.txt").write_text("needle\n")
+        os.chmod(locked_dir, 0o000)
+        try:
+            res = _search(_ops(tmp_path), method, "needle",
+                          tmp_path, output_mode="count")
+        finally:
+            os.chmod(locked_dir, 0o755)  # let pytest clean up tmp_path
+        assert res.error is None
+        assert res.total_count == 3
+        assert res.warning is not None, "locked subtree silently shrank the count"
+        assert "incomplete" in res.warning.lower()
 
 
 class TestSearchContentNewlineWarning:

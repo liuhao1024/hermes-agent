@@ -214,12 +214,19 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
     """Parse rg/grep ``| head`` output into a SearchResult (shared by both engines).
     Exit codes: 0=matches, 1=none, 2=error — but both tools return 2 on PARTIAL
     errors (one unreadable file), so an error is surfaced only when exit==2 AND no
-    usable payload remains. ``warning`` is attached to files_only/content results."""
+    usable payload remains; a partial failure instead becomes an explicit
+    incomplete-results warning on every output mode (#145638). A caller-passed
+    ``warning`` is preserved and attached to all modes."""
     stdout, limit_reason = _search_stdout_and_limit(result)
     diagnostics, payload = _split_tool_diagnostics(stdout)
     if result.exit_code == 2 and not payload.strip():
         error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
         return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
+    if result.exit_code == 2 and diagnostics.strip():
+        partial_note = (
+            "Results may be incomplete: some paths could not be searched "
+            f"({diagnostics.strip().splitlines()[0]})")
+        warning = f"{warning} {partial_note}" if warning else partial_note
     lines = [ln for ln in payload.strip().split('\n') if ln]
     if output_mode == "files_only":
         return SearchResult(
@@ -236,7 +243,7 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
                     pass
         return SearchResult(
             counts=counts, total_count=sum(counts.values()),
-            truncated=bool(limit_reason), limit_reason=limit_reason)
+            truncated=bool(limit_reason), limit_reason=limit_reason, warning=warning)
     matches = []
     for line in lines:
         if line == "--":
