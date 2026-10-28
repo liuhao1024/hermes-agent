@@ -9,6 +9,7 @@ provider credential should route through :func:`save_provider_env_credential` /
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 __all__ = [
@@ -17,18 +18,35 @@ __all__ = [
     "save_provider_env_credential",
 ]
 
+# ``DEEPSEEK_API_KEY_2`` → base ``DEEPSEEK_API_KEY``. n >= 2 mirrors
+# ``agent.credential_pool._env_key_var_candidates``, which seeds rotation
+# siblings ``<VAR>_2``, ``<VAR>_3``, ... for every declared var.
+_NUMBERED_SIBLING_RE = re.compile(r"^(?P<base>.+)_(?P<n>[2-9][0-9]*)$")
+
 
 def _providers_for_env_var(env_var: str) -> list[str]:
-    """Provider ids whose registered api_key_env_vars include ``env_var``."""
+    """Provider ids whose registered api_key_env_vars include ``env_var``.
+
+    A numbered rotation sibling (``<VAR>_2``, ...) resolves to the provider
+    owning its base var, mirroring how ``_seed_from_env`` seeds it; without
+    this the save path skipped the unsuppress + ``load_pool()`` for
+    ``env:<VAR>_N``, so a re-added sibling stayed suppressed forever (#146059).
+    """
     try:
         from hermes_cli.auth_plugin_providers import canonical_registry_rows
+
         rows = canonical_registry_rows()
     except Exception:
         return []
+    candidates = [env_var]
+    sibling = _NUMBERED_SIBLING_RE.match(env_var)
+    if sibling:
+        candidates.append(sibling.group("base"))
     hits: list[str] = []
     for pid, cfg in rows:
         try:
-            if env_var in (cfg.api_key_env_vars or ()):
+            declared = cfg.api_key_env_vars or ()
+            if any(c in declared for c in candidates):
                 hits.append(pid)
         except Exception:
             continue

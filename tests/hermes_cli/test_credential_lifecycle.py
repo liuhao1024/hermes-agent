@@ -306,9 +306,120 @@ def test_scrub_never_touches_providers_base_url_alias(hermes_home):
 
 # ---------------------------------------------------------------------------
 # Suppression round-trip: delete sticks, re-add lifts it
+# Numbered rotation siblings (<VAR>_2) ride the same round-trip (#146059):
+# they seed a pool row via _env_key_var_candidates, but they matched NO
+# provider in _providers_for_env_var — so the re-add after a delete never
+# lifted the suppression and the key was silently ignored while the save
+# reported ok.
 # ---------------------------------------------------------------------------
 
+FAKE_DEEPSEEK_KEY = "sk-dsk-" + "h" * 24
+FAKE_DEEPSEEK_SIBLING = "sk-dsk-" + "i" * 24
 
+
+def test_put_api_env_seeds_numbered_sibling_immediately(hermes_home):
+    """First-time PUT of <VAR>_2 must materialize the pool row right away.
+
+    Pre-fix: _providers_for_env_var("DEEPSEEK_API_KEY_2") matched nothing
+    (the registry declares only DEEPSEEK_API_KEY), so the save only touched
+    .env and the sibling surfaced in the pool only after the NEXT background
+    load_pool() — unlike the base var, which materializes immediately
+    (#96058).
+    """
+    _write_auth(hermes_home, {})
+    _write_env(hermes_home, DEEPSEEK_API_KEY=FAKE_DEEPSEEK_KEY)
+
+    resp = client.put(
+        "/api/env",
+        json={"key": "DEEPSEEK_API_KEY_2", "value": FAKE_DEEPSEEK_SIBLING},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+
+    # auth.json must hold the seeded row NOW: the save itself runs
+    # load_pool() for the owning provider (the #96058 contract). Pre-fix the
+    # sibling matched no provider, so the row only appeared after the NEXT
+    # load_pool() — this assertion pins the immediacy on disk, before any
+    # further load_pool() call could paper over the gap.
+    pool = _read_auth(hermes_home).get("credential_pool", {}).get("deepseek", [])
+    assert any(
+        isinstance(e, dict) and e.get("source") == "env:DEEPSEEK_API_KEY_2"
+        for e in pool
+    ), (
+        "first-time PUT of a numbered sibling did not materialize the pool "
+        f"row on disk; got {pool!r} (#146059)"
+    )
+
+    # And the live pool must surface the just-saved token (re-hydrated from
+    # .env — the sanitized disk row never carries the raw secret).
+    from agent.credential_pool import load_pool
+
+    matched = [
+        e
+        for e in load_pool("deepseek").entries()
+        if e.source == "env:DEEPSEEK_API_KEY_2"
+    ]
+    assert matched and matched[0].access_token == FAKE_DEEPSEEK_SIBLING, (
+        "load_pool('deepseek') did not surface the just-saved sibling token "
+        f"(#146059); got {[e.source for e in load_pool('deepseek').entries()]!r}"
+    )
+
+
+def test_readd_numbered_sibling_lifts_suppression(hermes_home):
+    """save → remove → save on <VAR>_2 must end with the key usable again.
+
+    Pre-fix: the delete suppressed env:DEEPSEEK_API_KEY_2 (the prune side
+    walks the pools it actually touched), but the re-add matched no provider,
+    so the source stayed in suppressed_sources and load_pool() never ran —
+    failover to the second key silently stopped working (#146059).
+    """
+    _write_auth(hermes_home, {})
+    _write_env(hermes_home, DEEPSEEK_API_KEY=FAKE_DEEPSEEK_KEY)
+
+    from agent.credential_pool import load_pool
+    from hermes_cli.auth import is_source_suppressed
+
+    # First save. On pre-fix code the pool row lands only via the live
+    # runtime's periodic load_pool(); drive it once explicitly, exactly as
+    # the issue's reproducer does, so the remove below has something to
+    # prune — this test targets the re-add, not the materialization gap.
+    resp = client.put(
+        "/api/env",
+        json={"key": "DEEPSEEK_API_KEY_2", "value": FAKE_DEEPSEEK_SIBLING},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    load_pool("deepseek")
+
+    resp = client.request(
+        "DELETE", "/api/env", json={"key": "DEEPSEEK_API_KEY_2"}, headers=HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    assert is_source_suppressed("deepseek", "env:DEEPSEEK_API_KEY_2")
+
+    # The re-add is an explicit re-add: suppression must lift and the pool
+    # row must come back carrying the saved token.
+    resp = client.put(
+        "/api/env",
+        json={"key": "DEEPSEEK_API_KEY_2", "value": FAKE_DEEPSEEK_SIBLING},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("ok") is True
+
+    assert not is_source_suppressed("deepseek", "env:DEEPSEEK_API_KEY_2"), (
+        "re-adding a removed numbered sibling left env:DEEPSEEK_API_KEY_2 "
+        "suppressed; the new credential is silently never used (#146059)"
+    )
+    entries = [
+        e
+        for e in load_pool("deepseek").entries()
+        if e.source == "env:DEEPSEEK_API_KEY_2"
+    ]
+    assert entries and entries[0].access_token == FAKE_DEEPSEEK_SIBLING, (
+        "the re-added numbered sibling never surfaced in the pool; failover "
+        "to the second key silently stopped working (#146059)"
+    )
 
 
 # ---------------------------------------------------------------------------
