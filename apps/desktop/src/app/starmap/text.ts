@@ -49,7 +49,10 @@ export function nodeFooter(node: StarmapNode): null | string {
   return null
 }
 
-// Greedy word-wrap for the tooltip title so long memory lines don't blow out.
+// Keep ordinary words together, but break oversized CJK/token runs at grapheme
+// boundaries. Splitting UTF-16 units would tear emoji and combining characters.
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
 export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
   const words = text.split(/\s+/).filter(Boolean)
   const lines: string[] = []
@@ -58,11 +61,24 @@ export function wrapText(ctx: CanvasRenderingContext2D, text: string, maxW: numb
   for (const word of words) {
     const next = line ? `${line} ${word}` : word
 
-    if (!line || ctx.measureText(next).width <= maxW) {
+    if (ctx.measureText(next).width <= maxW) {
       line = next
-    } else {
+
+      continue
+    }
+
+    if (line) {
       lines.push(line)
-      line = word
+      line = ''
+    }
+
+    for (const { segment } of graphemes.segment(word)) {
+      if (line && ctx.measureText(line + segment).width > maxW) {
+        lines.push(line)
+        line = ''
+      }
+
+      line += segment
     }
   }
 
