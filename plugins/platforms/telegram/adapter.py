@@ -180,7 +180,28 @@ _MEDIA_KIND_KEYS = {
     "video file": "platform.telegram.media.kind_video"}
 
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
-from plugins.platforms.telegram.telegram_entities import expand_link_entities
+from plugins.platforms.telegram.telegram_entities import expand_link_entities, rich_message_text
+
+
+class _RichMessageFilter:
+    """Filter matching messages whose content rides ``api_kwargs.rich_message``.
+
+    ``filters.TEXT`` never fires for these (the Bot API field python-telegram-bot does not model
+    leaves ``Message.text`` empty), so without a dedicated handler they are dropped silently
+    (#146067). Duck-typed to PTB's ``filters.MessageFilter`` contract — ``MessageHandler`` only
+    calls ``check_update`` — so the class also survives the test-suite's telegram mock, where
+    there is no real base class to inherit from. Mutually exclusive with the plain text filter
+    by construction.
+    """
+
+    name = "RichMessage"
+
+    def filter(self, message: Any) -> bool:
+        return not message.text and bool(rich_message_text(message))
+
+    def check_update(self, update: Any) -> bool:
+        message = getattr(update, "effective_message", None)
+        return self.filter(message) if message is not None else False
 from plugins.platforms.telegram.telegram_held_inbound import TelegramHeldInboundMixin
 from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id, parse_send_target, parse_telegram_message_id
 from plugins.platforms.telegram.telegram_topic_transfer import TopicTransferFn, apply_root_dm_topic_transfer
@@ -2899,6 +2920,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         table = getattr(app, "handlers", None)
         core_before = {g: len(hs) for g, hs in table.items()} if isinstance(table, dict) else {}
         app.add_handler(TelegramMessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message))
+        app.add_handler(TelegramMessageHandler(_RichMessageFilter(), self._handle_text_message))
         app.add_handler(TelegramMessageHandler(filters.COMMAND, self._handle_command))
         app.add_handler(TelegramMessageHandler(
             filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION), self._handle_location_message))
@@ -6493,7 +6515,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text; buffers client-split chunks into one MessageEvent."""
         msg = self._effective_update_message(update)
-        if not msg or not msg.text:
+        if not msg or (not msg.text and not rich_message_text(msg)):
             return
         # Auth check first: blocked users must not reach batching, the observed transcript, or the agent.
         if not self._is_user_authorized_from_message(msg):
