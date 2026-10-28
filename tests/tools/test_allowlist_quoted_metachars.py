@@ -96,6 +96,39 @@ class TestHasAllowlistShellOperator:
         assert not _has_allowlist_shell_operator("python -c 'import sys'")
 
 
+class TestTestVSubscriptReexpansion:
+    # `test -v` / `[[ -v` operands are evaluated as array subscripts by
+    # bash >= 4.2, so a quoted `$(...)` or backtick inside the operand is
+    # re-expanded at check time even though the single quotes make it
+    # literal to the outer shell. The allowlist shortcut must refuse
+    # these commands instead of skipping detect_dangerous_command.
+
+    @pytest.mark.parametrize("cmd", [
+        "test -v 'a[$(rm -rf ~/x)]'",
+        "test -v 'a[`rm -rf ~/x`]'",
+        "[[ -v 'a[$(id)]' ]]",
+    ])
+    def test_quoted_substitution_in_test_v_operand(self, cmd):
+        assert _has_allowlist_shell_operator(cmd)
+
+    @pytest.mark.parametrize("cmd", [
+        "test -f foo",
+        "test -v foo",
+        "test -v 'a[x]'",
+        '[[ -v "a[x]" ]]',
+    ])
+    def test_plain_test_operands_stay_simple(self, cmd):
+        assert not _has_allowlist_shell_operator(cmd)
+
+    def test_cargo_bench_regex_stays_simple(self):
+        assert not _has_allowlist_shell_operator("cargo bench -- '^a(b|c)$'")
+
+    def test_test_v_substitution_denied_allowlist_glob(self, monkeypatch):
+        import tools.approval as mod
+        monkeypatch.setattr(mod, "_permanent_approved", {"test *"})
+        assert not _command_matches_permanent_allowlist("test -v 'a[$(id)]'")
+
+
 class TestAllowlistGlobWithQuotedArgs:
     def test_cargo_glob_matches_quoted_regex_filter(self, monkeypatch):
         import tools.approval as mod

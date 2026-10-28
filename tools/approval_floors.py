@@ -136,18 +136,31 @@ _SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
 
 _REINTERPRETED_ARGUMENT_RE = re.compile(r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)")
 
+# bash >= 4.2 evaluates a `test -v`/`[[ -v` operand as an array subscript, so a
+# quoted `$(...)` or backtick inside it is re-expanded at check time even though
+# the single quotes make it literal to the outer shell.
+_TEST_SUBSCRIPT_COMMANDS = frozenset(("test", "[", "[["))
+_TEST_V_FLAG_RE = re.compile(r"(?:^|[ \t])-v(?:[ \t]|$)")
+
 
 def _has_allowlist_shell_operator(command: str) -> bool:
     """Return True when a command is too compound for the allowlist shortcut.
     Quote-aware: metacharacters inside quotes or behind a backslash are literal
     arguments (``cargo bench -- '^a(b|c)$'``), not shell syntax. Still
     disqualifying: ``$`` or backtick inside DOUBLE quotes (expansion stays
-    active), and any quoted/escaped control character when the command also
+    active), any quoted/escaped control character when the command also
     carries a ``-c``/``-e``/``--command``/``--eval``-style option that would
-    hand the quoted text to another interpreter."""
+    hand the quoted text to another interpreter, and a quoted substitution
+    inside a ``test -v``/``[[ -v`` operand (the subscript is re-expanded)."""
     command = command or ""
     quote = None  # None | "'" | '"'
     has_reinterpretable = False
+    tokens = command.split()
+    test_v_active = (
+        bool(tokens)
+        and tokens[0] in _TEST_SUBSCRIPT_COMMANDS
+        and bool(_TEST_V_FLAG_RE.search(command))
+    )
     i = 0
     n = len(command)
     while i < n:
@@ -163,6 +176,10 @@ def _has_allowlist_shell_operator(command: str) -> bool:
                 quote = None
             elif quote == '"' and ch in ("`", "$"):
                 return True  # expansion is active inside double quotes
+            elif test_v_active and (
+                ch == "`" or (ch == "$" and command[i + 1 : i + 2] == "(")
+            ):
+                return True  # the -v subscript re-evaluates the quoted substitution
             elif ch in _SHELL_CONTROL_CHARS:
                 has_reinterpretable = True
         elif ch in ("'", '"'):
