@@ -134,7 +134,7 @@ def test_committed_entry_identity_comes_from_locked_store(
     match = memory_tool_store._find_unique_match
 
     @contextmanager
-    def checked_lock(path):
+    def checked_lock(path, timeout=None):
         nonlocal locked
         with lock(path):
             locked = True

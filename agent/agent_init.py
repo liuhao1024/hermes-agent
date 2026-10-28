@@ -1235,7 +1235,10 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         # Memory is optional — don't break agent init
         with suppress(Exception):
             from tools.memory_tool import (
-                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
+                DEFAULT_LOCK_TIMEOUT,
+                MemoryStore,
+                get_builtin_memory_config,
+                get_builtin_memory_store_flags,
             )
             mem_config = get_builtin_memory_config(_agent_cfg)
             agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(
@@ -1248,6 +1251,9 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                     memory_enabled=agent._memory_enabled,
                     user_profile_enabled=agent._user_profile_enabled,
+                    lock_timeout=mem_config.get(
+                        "lock_timeout_seconds", DEFAULT_LOCK_TIMEOUT
+                    ),
                 )
                 agent._memory_store.load_from_disk()
 

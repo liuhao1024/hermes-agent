@@ -865,6 +865,7 @@ memory:
   user_profile_enabled: true
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
+  lock_timeout_seconds: 10  # give up a contended memory lock after this many seconds (0 = fail immediately, negative = wait forever)
   write_approval: false     # true = require approval before any memory write
 ```
 

@@ -1,12 +1,17 @@
 """Tests for tools/memory_tool.py — MemoryStore, security scanning, and tool dispatcher."""
 
+import errno
 import json
 import os
 import stat
+import time
 import pytest
 from pathlib import Path
 
+import tools.memory_tool as _memory_tool_module
 from tools.memory_tool import (
+    FAILURE_CLASS,
+    MemoryLockTimeout,
     MemoryStore,
     memory_tool,
     _scan_memory_content,
@@ -147,6 +152,97 @@ class TestMemoryFileLockPermissions:
                 pass
 
         assert outside.read_text(encoding="utf-8") == "do not touch"
+
+
+class TestMemoryFileLockTimeout:
+    """#146076: a stalled .lock holder (stuck sibling agent, SIGSTOP'ed process, leaked
+    fd) must not park every mutating memory write forever — cron agents are threads of
+    ONE gateway process, so the blocking flock() was uninterruptible there."""
+
+    class _AlwaysContendedFcntl:
+        """flock stub: non-blocking acquires always lose; blocking un/locks succeed."""
+
+        LOCK_EX = 2
+        LOCK_UN = 8
+        LOCK_NB = 4
+
+        def __init__(self):
+            self.blocking_calls = 0
+            self.nonblocking_attempts = 0
+
+        def flock(self, fd, cmd):
+            if cmd & self.LOCK_NB:
+                self.nonblocking_attempts += 1
+                raise BlockingIOError(errno.EWOULDBLOCK, "Resource temporarily unavailable")
+            self.blocking_calls += 1
+
+    def test_file_lock_raises_after_deadline(self, tmp_path, monkeypatch):
+        stub = self._AlwaysContendedFcntl()
+        monkeypatch.setattr("tools.memory_tool.fcntl", stub)
+        started = time.monotonic()
+        with pytest.raises(MemoryLockTimeout, match="held by another agent"):
+            with MemoryStore._file_lock(tmp_path / "MEMORY.md", timeout=0.05):
+                pass
+        assert time.monotonic() - started < 5
+        assert stub.nonblocking_attempts > 1  # retried with backoff before giving up
+
+    def test_mutate_returns_locked_error_instead_of_hanging(self, store, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.fcntl", self._AlwaysContendedFcntl())
+        store.lock_timeout = 0.05
+        started = time.monotonic()
+        result = store.add("memory", "survives a stalled lock holder")
+        assert time.monotonic() - started < 5
+        assert result["success"] is False
+        assert "held by another agent" in result["error"]
+        assert "No operations were applied" in result["error"]
+
+    def test_timeout_zero_fails_after_single_attempt(self, store, monkeypatch):
+        stub = self._AlwaysContendedFcntl()
+        monkeypatch.setattr("tools.memory_tool.fcntl", stub)
+        store.lock_timeout = 0
+        result = store.add("memory", "immediate refusal")
+        assert result["success"] is False
+        assert "held by another agent" in result["error"]
+        assert stub.nonblocking_attempts == 1
+
+    def test_locked_error_is_a_named_failure_class(self, store, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.fcntl", self._AlwaysContendedFcntl())
+        store.lock_timeout = 0
+        store.add("memory", "classified refusal")
+        assert FAILURE_CLASS.get() == "locked"
+
+    def test_negative_timeout_restores_legacy_blocking(self, store, monkeypatch):
+        stub = self._AlwaysContendedFcntl()
+        monkeypatch.setattr("tools.memory_tool.fcntl", stub)
+        store.lock_timeout = -1  # legacy: one blocking flock, no deadline, no error
+        result = store.add("memory", "legacy blocking behaviour")
+        assert result["success"] is True
+        assert stub.blocking_calls >= 1
+
+    @pytest.mark.skipif(_memory_tool_module.fcntl is None, reason="fcntl unavailable (Windows)")
+    def test_lock_recoverable_after_timeout(self, tmp_path, monkeypatch):
+        # Real fcntl contention (two open() fds in one process conflict): the timed-out
+        # add must leave the .lock usable for the next writer once the holder lets go.
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        import fcntl
+
+        lock_path = tmp_path / "MEMORY.md.lock"
+        holder = open(lock_path, "a+")
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            held_store = MemoryStore(
+                memory_char_limit=500, user_char_limit=300, lock_timeout=0.1
+            )
+            held_store.load_from_disk()
+            result = held_store.add("memory", "blocked while held")
+            assert result["success"] is False
+            assert "held by another agent" in result["error"]
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            holder.close()
+        released_store = MemoryStore(memory_char_limit=500, user_char_limit=300)
+        released_store.load_from_disk()
+        assert released_store.add("memory", "lands after release")["success"] is True
 
 
 class TestMemoryStoreAdd:

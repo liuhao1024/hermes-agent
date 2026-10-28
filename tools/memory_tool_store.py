@@ -37,6 +37,15 @@ def _scan_memory_content(content: str) -> Optional[str]:
 FAILURE_CLASS: ContextVar[str] = ContextVar("memory_failure_class", default="other")
 _BACKUP_FAILED = " (BACKUP FAILED — file unchanged on disk)"
 
+# Matches the bound Windows already had: msvcrt.LK_LOCK retries ~10 x 1s before raising.
+DEFAULT_LOCK_TIMEOUT = 10.0
+
+
+class MemoryLockTimeout(TimeoutError):
+    """The .lock sidecar stayed held past ``lock_timeout`` — a stalled sibling agent,
+    SIGSTOP'ed process or leaked descriptor. Raised BEFORE anything is read or written;
+    ``_mutate`` turns it into a "locked" error the model can retry later."""
+
 
 def _error(message: str, failure_class: str, **extra) -> dict[str, Any]:
     FAILURE_CLASS.set(failure_class)
@@ -185,12 +194,20 @@ class MemoryStore:
     # See #42405.
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, *,
-                 memory_enabled: bool = True, user_profile_enabled: bool = True):
+    def __init__(
+        self,
+        memory_char_limit: int = 2200,
+        user_char_limit: int = 1375,
+        *,
+        memory_enabled: bool = True,
+        user_profile_enabled: bool = True,
+        lock_timeout: Optional[float] = DEFAULT_LOCK_TIMEOUT,
+    ):
         self.memory_entries: list[str] = []
         self.user_entries: list[str] = []
         self.memory_char_limit, self.user_char_limit = memory_char_limit, user_char_limit
         self.memory_enabled, self.user_profile_enabled = memory_enabled, user_profile_enabled
+        self.lock_timeout = lock_timeout
         self._system_prompt_snapshot: dict[str, str] = {"memory": "", "user": ""}
         self._consolidation_failures = 0  # per turn; reset by reset_consolidation_failures()
 
@@ -256,9 +273,15 @@ class MemoryStore:
 
     @staticmethod
     @contextmanager
-    def _file_lock(path: Path):
+    def _file_lock(path: Path, timeout: Optional[float] = DEFAULT_LOCK_TIMEOUT):
         """Exclusive lock on a separate .lock file so the memory file itself can
-        still be atomically replaced."""
+        still be atomically replaced.
+
+        ``timeout`` bounds the acquire (cron agents are threads of ONE gateway process,
+        so a single stalled holder used to park every other agent's memory write in an
+        uninterruptible flock() forever — #146076): ``0`` fails immediately, ``None``
+        or negative restores the legacy unbounded block. Raises ``MemoryLockTimeout``
+        when the deadline passes; nothing has been read or written at that point."""
         from tools import memory_tool as _mt  # fcntl/msvcrt live (and are patched) there
         fcntl, msvcrt = _mt.fcntl, _mt.msvcrt
         lock_path = path.with_suffix(path.suffix + ".lock")
@@ -284,18 +307,51 @@ class MemoryStore:
             os.close(raw_fd)
             raise
         with fd:
-            def _flock(unlock: bool):
+            def _lock_once() -> bool:
+                """One non-blocking attempt; False when someone else holds the lock."""
+                try:
+                    if fcntl:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        fd.seek(0)
+                        msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+                    return True
+                except OSError:  # EWOULDBLOCK / EACCES / EDEADLK — held by another holder
+                    return False
+
+            def _lock_blocking():
                 if fcntl:
-                    fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
                 else:
                     fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
-            _flock(False)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+
+            def _unlock():
+                if fcntl:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                else:
+                    fd.seek(0)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+
+            waited = time.monotonic()
+            if timeout is None or timeout < 0:
+                _lock_blocking()
+            else:
+                deadline = waited + timeout
+                delay = 0.01
+                while not _lock_once():
+                    if time.monotonic() >= deadline:
+                        raise MemoryLockTimeout(
+                            f"{lock_path.name} held by another agent for >{timeout:g}s")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.25)
+            if (waited := time.monotonic() - waited) > 1.0:
+                logger.warning("memory lock %s was contended for %.1fs", lock_path, waited)
             try:
                 yield
             finally:
                 with suppress(OSError):
-                    _flock(True)
+                    _unlock()
 
     @staticmethod
     def _path_for(target: str) -> Path:
@@ -359,40 +415,44 @@ class MemoryStore:
         returns is passed through verbatim and nothing is persisted: error dicts, or the
         success payload of a read-only closure (``resolve_entry``, ``resolve_batch_entries``)."""
         path = self._path_for(target)
-        with self._file_lock(path):
-            raw, read_ok = self._read_raw_checked(path)
-            if not read_ok:
-                return _read_failed_error(path)
-            oversized = not skip_drift and self._has_oversized_entry(target, raw)
-            before = list(dict.fromkeys(self._parse_entries(raw)))
-            self._set_entries(target, before)
-            FAILURE_CLASS.set("other")  # read below: only this closure's refusal counts
-            result = mutate(self._entries_for(target), self._char_limit(target))
-            if isinstance(result, dict):
-                # Over budget beside an oversized entry: that entry is the obstacle, so report
-                # the drift (with its snapshot) rather than a budget the model cannot meet.
-                if oversized and result.get("success") is False and FAILURE_CLASS.get() == "over_budget":
-                    return _drift_error(path, self._drift_backup(target, raw))
-                return result
-            extra_fields = dict(result[2]) if len(result) > 2 else {}
-            # An oversized entry is either free text appended without a delimiter or an entry written before the limit was lowered. Pruning is the way
-            # back under a lowered limit, so a write that only deletes entries proceeds; one that
-            # drops an oversized entry keeps the snapshot first, as it may hold appended text.
-            if oversized:
-                if not set(result[0]) <= set(before):
-                    return _drift_error(path, self._drift_backup(target, raw))
-                limit = self._char_limit(target)
-                if any(len(e) > limit for e in before if e not in result[0]):
-                    bak = self._drift_backup(target, raw)
-                    if bak.endswith(_BACKUP_FAILED):  # no copy, no delete of possibly glued text
-                        return _drift_error(path, bak)
-                    extra_fields["drift_backup"] = bak
-            self._set_entries(target, result[0])
-            from hermes_constants import mkdir_under_hermes_home
+        try:
+            with self._file_lock(path, timeout=self.lock_timeout):
+                raw, read_ok = self._read_raw_checked(path)
+                if not read_ok:
+                    return _read_failed_error(path)
+                oversized = not skip_drift and self._has_oversized_entry(target, raw)
+                before = list(dict.fromkeys(self._parse_entries(raw)))
+                self._set_entries(target, before)
+                FAILURE_CLASS.set("other")  # read below: only this closure's refusal counts
+                result = mutate(self._entries_for(target), self._char_limit(target))
+                if isinstance(result, dict):
+                    # Over budget beside an oversized entry: that entry is the obstacle, so report
+                    # the drift (with its snapshot) rather than a budget the model cannot meet.
+                    if oversized and result.get("success") is False and FAILURE_CLASS.get() == "over_budget":
+                        return _drift_error(path, self._drift_backup(target, raw))
+                    return result
+                extra_fields = dict(result[2]) if len(result) > 2 else {}
+                # An oversized entry is either free text appended without a delimiter or an entry written before the limit was lowered. Pruning is the way
+                # back under a lowered limit, so a write that only deletes entries proceeds; one that
+                # drops an oversized entry keeps the snapshot first, as it may hold appended text.
+                if oversized:
+                    if not set(result[0]) <= set(before):
+                        return _drift_error(path, self._drift_backup(target, raw))
+                    limit = self._char_limit(target)
+                    if any(len(e) > limit for e in before if e not in result[0]):
+                        bak = self._drift_backup(target, raw)
+                        if bak.endswith(_BACKUP_FAILED):  # no copy, no delete of possibly glued text
+                            return _drift_error(path, bak)
+                        extra_fields["drift_backup"] = bak
+                self._set_entries(target, result[0])
+                from hermes_constants import mkdir_under_hermes_home
 
-            mkdir_under_hermes_home(path.parent)
-            self._write_file(path, result[0])
-            return self._success_response(target, result[1], **extra_fields)
+                mkdir_under_hermes_home(path.parent)
+                self._write_file(path, result[0])
+                return self._success_response(target, result[1], **extra_fields)
+        except MemoryLockTimeout as exc:
+            return _error(f"{exc}. No operations were applied; retry later.", "locked",
+                          usage=self._usage(target))
 
     def add(self, target: str, content: str) -> dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
