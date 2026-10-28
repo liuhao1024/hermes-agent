@@ -847,6 +847,63 @@ class TestResizeImageForVision:
             )
             assert result.startswith("data:image/jpeg;base64,"), mode
 
+    @pytest.mark.parametrize(
+        "size,axis",
+        [((32766, 43), "width"), ((43, 32766), "height")],
+        ids=["excel-strip-wide", "excel-strip-tall"],
+    )
+    def test_strip_thinner_than_the_floor_shrinks_under_the_cap(
+        self, tmp_path, size, axis
+    ):
+        """A strip flatter than 64px can't clear the cap through the floor's aspect
+        re-derivation: it UPSCALES the strip (32766×43 → 48768×64), the loop then reproduces
+        the same size and breaks, and the recovery marks the part unshrinkable — the stuck
+        turn re-fails every turn (#145922). The cap wins over the floor: the strip keeps its
+        aspect and lands under max_dimension."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        import base64 as _b64
+        from io import BytesIO
+
+        path = tmp_path / "strip.png"
+        Image.new("RGB", size, "white").save(path, "PNG")
+
+        result = _resize_image_for_vision(
+            path, mime_type="image/png",
+            max_base64_bytes=4 * 1024 * 1024, max_dimension=8000,
+        )
+        with Image.open(BytesIO(_b64.b64decode(result.partition(",")[2]))) as out:
+            assert max(out.size) <= 8000, out.size
+            assert out.size != (48768, 64)
+            # The floor never grew the image past its original long edge.
+            assert max(out.size) <= max(size), out.size
+
+    def test_strip_recovery_replaces_the_stuck_history_part(self):
+        """End to end: the image-shrink recovery can now rescue a history holding the
+        ultra-wide paste bitmap, so the session stops re-failing the same 400 (#145922)."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        import base64 as _b64
+        from io import BytesIO
+
+        buf = BytesIO()
+        Image.new("RGB", (32766, 43), "white").save(buf, "PNG")
+        url = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode("ascii")
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "rows"},
+            {"type": "image_url", "image_url": {"url": url}},
+        ]}]
+
+        from agent.conversation_compression import try_shrink_image_parts_in_messages
+        assert try_shrink_image_parts_in_messages(msgs, max_dimension=8000) is True
+        out_url = msgs[0]["content"][1]["image_url"]["url"]
+        with Image.open(BytesIO(_b64.b64decode(out_url.partition(",")[2]))) as out:
+            assert max(out.size) <= 8000, out.size
+
 
 # ---------------------------------------------------------------------------
 # _image_exceeds_dimension — proactive embed-time pixel-cap detector

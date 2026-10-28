@@ -482,10 +482,23 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
         if attempt > 0:
             # Halve, then re-derive from whichever axis hit the 64px floor so both shrink equally.
             new_w, new_h = max(int(img.width * 0.5), 64), max(int(img.height * 0.5), 64)
-            if new_w == 64 and img.width > 0:
-                new_h = max(int(img.height * (64 / img.width)), 64)
-            elif new_h == 64 and img.height > 0:
-                new_w = max(int(img.width * (64 / img.height)), 64)
+            # A strip flatter than 64px (a pasted Excel row range) gets UPSCALED by the floor's aspect
+            # re-derivation — 32766×43 → 48768×64, past the provider cap and never smaller afterwards
+            # (the re-derivation reproduces the same size, so the loop breaks) — the recovery marks the
+            # part unshrinkable and the stuck turn re-fails every turn (#145922). The provider cap is a
+            # hard constraint, the 64px floor a legibility preference: while the long edge is still over
+            # a live max_dimension, keep the plain halve instead of letting the floor grow the image.
+            if (
+                (new_w > img.width or new_h > img.height)
+                and max_dimension is not None
+                and max(img.width, img.height) > max_dimension
+            ):
+                new_w, new_h = max(int(img.width * 0.5), 1), max(int(img.height * 0.5), 1)
+            else:
+                if new_w == 64 and img.width > 0:
+                    new_h = max(int(img.height * (64 / img.width)), 64)
+                elif new_h == 64 and img.height > 0:
+                    new_w = max(int(img.width * (64 / img.height)), 64)
             if (new_w, new_h) == prev_dims:
                 break
             img = img.resize((new_w, new_h), Image.LANCZOS)
