@@ -127,6 +127,43 @@ def test_restore_llamacpp_session_keeps_launch_base_url_for_same_provider(monkey
     assert calls == []
 
 
+def test_restore_canonical_anthropic_url_is_not_explicit_override(monkeypatch):
+    """#146226: a stored base_url equal to the provider's canonical endpoint is session
+    bookkeeping, not a user override. Keeping it in _explicit_base_url pins credential
+    resolution onto the explicit --base-url ladder rung, whose Anthropic resolver reads only
+    env vars and OAuth pool rows — a pooled api_key entry is invisible there, so the first
+    turn dies with "No Anthropic credentials found" where a fresh session resolves the same
+    pool fine. The URL must still drive the wire via self.base_url."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kw: {})
+    stub = _make_stub()
+    stub._restore_session_model(_row(model_config={
+        "gateway_runtime": {"provider": "anthropic",
+                            "base_url": "https://api.anthropic.com",
+                            "api_mode": "anthropic_messages"}}))
+    assert stub.provider == "anthropic"
+    assert stub.base_url == "https://api.anthropic.com"
+    assert stub.api_mode == "anthropic_messages"
+    # Not an explicit override: the credential pool rung stays reachable.
+    assert stub._explicit_base_url is None
+
+
+def test_restore_session_model_noncanonical_anthropic_url_stays_explicit(monkeypatch):
+    """A proxy/relay endpoint is a real user override: resume must keep it explicit so the
+    ambient provider's pool keys are never sent to that host."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kw: {})
+    stub = _make_stub()
+    stub._restore_session_model(_row(model_config={
+        "gateway_runtime": {"provider": "anthropic",
+                            "base_url": "https://relay.internal/anthropic",
+                            "api_mode": "anthropic_messages"}}))
+    assert stub.base_url == "https://relay.internal/anthropic"
+    assert stub._explicit_base_url == "https://relay.internal/anthropic"
+
+
 def test_restore_session_model_explicit_cli_flag_wins():
     stub = _make_stub(model="cli-flag-model", _explicit_model_override=True)
     stub._restore_session_model(_row())

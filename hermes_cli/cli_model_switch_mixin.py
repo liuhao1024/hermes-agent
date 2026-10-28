@@ -593,6 +593,17 @@ class CLIModelSwitchMixin:
             # the session DB — runtime provider resolution owns credentials.
             self._explicit_api_key = None
             self._explicit_base_url = stored_base_url
+            # A stored URL equal to the provider's canonical endpoint is route bookkeeping, not a
+            # user override (#146226): keeping it in _explicit_base_url pins credential resolution
+            # onto the explicit --base-url ladder rung, whose Anthropic resolver reads only env
+            # vars and OAuth pool rows — a pooled api_key entry is invisible there, so the first
+            # turn dies with "No Anthropic credentials found" where a fresh session resolves the
+            # same pool fine. The URL still drives the wire via self.base_url above.
+            from hermes_cli.auth import PROVIDER_REGISTRY
+            pconfig = PROVIDER_REGISTRY.get(str(stored_provider or "").strip().lower())
+            if stored_base_url and pconfig is not None \
+                    and stored_base_url.rstrip("/") == (pconfig.inference_base_url or "").rstrip("/"):
+                self._explicit_base_url = None
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
                 resolved = resolve_runtime_provider(requested=stored_provider, target_model=self.model or None)
