@@ -198,25 +198,30 @@ def _delivery_platform_routed_from_primary_gateway(platform_name: str) -> bool:
 
 class SharedRouteAdapters:
     """Read-only adapter map for a credentialless satellite profile. ``get(platform, target)``
-    resolves the PRIMARY adapter iff the inbound route matcher (``ProfileRoute.matches``) accepts
-    the target; anything else (unmatched target, disabled route, other profile, or target-less
-    ``get(platform)``) is a miss — fail closed, never the default bot.
+    resolves the adapter of the bot the matched route names — the route's ``bot_profile``'s own
+    adapter when it names one, the PRIMARY's otherwise — iff the inbound route matcher
+    (``ProfileRoute.matches``) accepts the target; anything else (unmatched target, disabled
+    route, other profile, or target-less ``get(platform)``) is a miss — fail closed, never the
+    wrong bot.
 
-    See #101113.
+    See #101113, #145971.
     """
 
-    def __init__(self, primary_adapters, routes) -> None:
+    def __init__(self, primary_adapters, routes, profile_adapters=None) -> None:
         self._primary = dict(primary_adapters or {})
         self._routes = list(routes or [])
+        # Live per-profile adapter maps keyed by profile name: a route with ``bot_profile``
+        # serves its conversation through THAT profile's bot, not the default profile's (#145971).
+        self._profile_adapters = {
+            name: dict(adapters or {})
+            for name, adapters in (profile_adapters or {}).items()
+        }
 
     def __bool__(self) -> bool:
         return bool(self._primary) and bool(self._routes)
 
     def get(self, platform, target=None, default=None):
         if not target:
-            return default
-        adapter = self._primary.get(platform)
-        if adapter is None:
             return default
         platform_key = str(getattr(platform, "value", platform)).lower()
         chat_id = str(target.get("chat_id") or "") or None
@@ -232,9 +237,21 @@ class SharedRouteAdapters:
                 continue  # guild-only routes are not target-exact
             if route.matches(
                 str(route.platform), guild_id=route.guild_id, chat_id=chat_id, thread_id=thread_id,
+                # The route itself is the authority on which bot serves this conversation, so
+                # match it against its own ``bot_profile`` — inbound callers pass the live
+                # receiving profile instead (#145971).
+                adapter_profile=route.bot_profile,
             ):
-                return adapter
+                return self._adapter_for(platform, route.bot_profile, default)
         return default
+
+    def _adapter_for(self, platform, bot_profile, default):
+        """The matched route's bot: the named profile's own adapter when the route sets
+        ``bot_profile``, the PRIMARY's otherwise. A named profile without a live adapter for
+        the platform fails closed (``default``) — never the default profile's bot."""
+        if bot_profile:
+            return (self._profile_adapters.get(bot_profile) or {}).get(platform, default)
+        return self._primary.get(platform, default)
 
 
 def has_credential_platform(adapters, owned=None) -> bool:

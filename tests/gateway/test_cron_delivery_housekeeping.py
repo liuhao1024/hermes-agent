@@ -135,8 +135,8 @@ def test_multiplex_housekeeping_uses_primary_routes_for_credentialless_satellite
         yield
 
     class FakeSharedRouteAdapters:
-        def __new__(cls, adapters, routes):
-            calls.append(("routed", adapters, routes))
+        def __new__(cls, adapters, routes, profile_adapters=None):
+            calls.append(("routed", adapters, routes, profile_adapters))
             return routed
 
     monkeypatch.setattr(gateway_run, "_profile_runtime_scope", fake_scope)
@@ -156,7 +156,9 @@ def test_multiplex_housekeeping_uses_primary_routes_for_credentialless_satellite
 
     assert calls == [
         ("drain", root_adapters),
-        ("routed", root_adapters, ["route-to-secondary"]),
+        # #145971: the shared view also carries the runner's per-profile adapter maps, so a
+        # route with ``bot_profile`` resolves the bot it names instead of the default's.
+        ("routed", root_adapters, ["route-to-secondary"], {"secondary": {}}),
         ("drain", routed),
     ]
 
