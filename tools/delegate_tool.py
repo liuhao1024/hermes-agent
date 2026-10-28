@@ -65,12 +65,17 @@ def _parent_live_home(parent_agent: Any) -> Optional[Path]:
     """Resolve the live transcripts' profile home from parent-owned state.
 
     The parent's per-profile SessionDB sits directly under its profile home
-    (``<home>/state.db``), so the db path's parent IS the home. Returns None
-    when the parent exposes no usable SessionDB — the caller then falls back
-    to the ambient resolve, which is exactly the #91996 failure mode, so the
-    skip is logged rather than silent.
+    (``<home>/state.db``), so the db path's parent IS the home. A managed
+    worker's parent (gateway turns, Kanban workers) instead carries an
+    owner-scoped RuntimeSessionStore (or ChildSessionStore), which has no
+    db_path but exposes the bootstrap-validated profile home as
+    ``scope['profile_id']`` — pin to that. Returns None when the parent
+    exposes neither — the caller then falls back to the ambient resolve,
+    which is exactly the #91996 failure mode, so the skip is logged rather
+    than silent.
     """
-    parent_db = getattr(getattr(parent_agent, "_session_db", None), "db_path", None)
+    store = getattr(parent_agent, "_session_db", None)
+    parent_db = getattr(store, "db_path", None)
     # Concrete str/Path only — NOT the os.PathLike protocol: MagicMock (and any
     # duck-typed test double) registers __fspath__ and so IS PathLike, which is
     # how a Mock "home" slipped through and transcripts landed at
@@ -85,6 +90,16 @@ def _parent_live_home(parent_agent: Any) -> Optional[Path]:
             parent_db,
         )
         return None
+    from agent.runtime_session_store import RuntimeSessionStore
+
+    if isinstance(store, RuntimeSessionStore):
+        scope = getattr(store, "scope", None)
+        home = scope.get("profile_id") if isinstance(scope, dict) else None
+        # validate_bootstrap guarantees profile_id is the worker frame's
+        # absolute home; the concrete-type + absolute guards keep a malformed
+        # scope on the logged ambient fallback instead of a bogus pin.
+        if isinstance(home, (str, Path)) and Path(home).is_absolute():
+            return Path(home)
     logger.warning(
         "delegate_task: parent agent exposes no _session_db; live-transcript "
         "home pinning skipped, falling back to ambient HERMES_HOME resolve "

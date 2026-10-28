@@ -386,6 +386,124 @@ def test_parent_db_path_accepts_str_paths():
     assert _parent_live_home(parent) == Path("/prof")
 
 
+def _runtime_store_parent(profile_id=None, scope=None, store_cls=None):
+    """A managed-worker parent: _session_db is a real RuntimeSessionStore
+    (owner-scoped, no db_path) whose scope carries the bootstrap-validated
+    profile home (#146000)."""
+    from agent.runtime_session_store import RuntimeSessionStore
+
+    cls = store_cls or RuntimeSessionStore
+    scope = (
+        dict(scope)
+        if scope is not None
+        else (
+            {
+                "profile_id": profile_id,
+                "session_id": "s",
+                "execution_id": "e",
+                "generation": 0,
+                "pid": 1,
+                "birth": 0,
+                "secret": "x",
+                "epoch": 0,
+            }
+            if profile_id is not None
+            else None
+        )
+    )
+    store = cls.__new__(cls)
+    store.scope = scope
+    parent = MagicMock(spec=["_session_db"])
+    parent._session_db = store
+    return parent
+
+
+def test_worker_store_scope_pins_home(tmp_path, monkeypatch, caplog):
+    """A managed worker's RuntimeSessionStore has no db_path; the pin must
+    come from the bootstrap-validated scope['profile_id'] home instead of the
+    ambient HERMES_HOME resolve (#146000). The scope home wins over ambient."""
+    import logging as _logging
+
+    from tools.delegate_tool import _parent_live_home
+
+    ambient_home = tmp_path / "ambient-profile"
+    store_home = tmp_path / "worker-profile"
+    ambient_home.mkdir()
+    store_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(ambient_home))
+
+    with caplog.at_level(_logging.WARNING, logger="tools.delegate_tool"):
+        assert _parent_live_home(_runtime_store_parent(store_home)) == store_home
+    assert not [
+        r for r in caplog.records if "home pinning skipped" in r.getMessage()
+    ], "a pinned managed-worker delegation must not warn about the ambient fallback"
+
+
+def test_worker_child_store_scope_pins_home(tmp_path):
+    """ChildSessionStore inherits the parent scope's profile_id; the isinstance
+    pin must cover it too (#146000 nested delegation)."""
+    from agent.runtime_session_child import ChildSessionStore
+    from tools.delegate_tool import _parent_live_home
+
+    store_home = tmp_path / "worker-profile"
+    store_home.mkdir()
+    assert (
+        _parent_live_home(
+            _runtime_store_parent(store_home, store_cls=ChildSessionStore)
+        )
+        == store_home
+    )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        None,  # no scope attribute at all
+        {},  # scope without profile_id
+        {"profile_id": None},  # None home
+        {"profile_id": "relative/home"},  # relative home
+        {"profile_id": 12345},  # non-path home
+    ],
+)
+def test_worker_store_malformed_scope_still_warns_and_skips(caplog, scope):
+    """A scope that fails the concrete-absolute guard must stay on the logged
+    ambient fallback, never pin to a bogus home (#146000)."""
+    import logging as _logging
+
+    from tools.delegate_tool import _parent_live_home
+
+    parent = _runtime_store_parent(scope=scope)
+
+    with caplog.at_level(_logging.WARNING, logger="tools.delegate_tool"):
+        assert _parent_live_home(parent) is None
+    assert any("home pinning skipped" in r.getMessage() for r in caplog.records), (
+        "the ambient fallback must leave a warning trace"
+    )
+
+
+def test_worker_store_scope_home_pins_transcripts(tmp_path, monkeypatch):
+    """End to end: a managed worker with ambient HERMES_HOME on profile A and
+    the store scope on profile B creates its live transcripts under B (#146000,
+    the pin #91996 asked for on the busiest path)."""
+    ambient_home = tmp_path / "ambient-profile"
+    store_home = tmp_path / "worker-profile"
+    ambient_home.mkdir()
+    store_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(ambient_home))
+
+    from tools.delegate_tool import _parent_live_home
+
+    home = _parent_live_home(_runtime_store_parent(store_home))
+    _id, _writers, paths = create_live_transcripts(
+        [{"goal": "worker-pinned repro"}], home=home
+    )
+
+    expected_root = store_home / "cache" / "delegation" / "live"
+    assert paths, "transcripts were created"
+    for p in paths:
+        assert Path(p).is_relative_to(expected_root), p
+
+
 def test_prune_sweeps_the_pinned_root_not_ambient(tmp_path, monkeypatch):
     """Retention must clean where the dispatch writes: stale dirs under the
     pinned home are removed by that home's dispatches; a stale dir under the
