@@ -1346,7 +1346,12 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         if connection is not None:
             # The gateway runs the side agent on this session's route (prompt.background); this
             # process never builds one.
-            task_id, wait = gateway_side.start(connection, self.session_id, "background", prompt)
+            from hermes_cli import gateway_client
+            try:
+                task_id, wait = gateway_side.start(connection, self.session_id, "background", prompt)
+            except gateway_client.GatewayClientError as exc:
+                # A refusal is the gateway's own answer about this session, not a crash: say it.
+                return _cp(f"  /bg: {gateway_side.refusal_message(exc)}")
             _cp(f"  {_t('background.started', number=task_num, preview=preview)}",
                 f"  {_t('background.task_id', task_id=task_id)}", f"  {_t('background.keep_chatting')}\n")
             return self._start_background_worker(task_id, task_num, preview, wait)
@@ -1518,7 +1523,12 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         if connection is not None:
             # The gateway answers from its own copy of the conversation (prompt.btw): the live
             # agent's fork when it has one, else the stored transcript.
-            _task_id, wait = gateway_side.start(connection, self.session_id, "btw", question)
+            from hermes_cli import gateway_client
+            try:
+                _task_id, wait = gateway_side.start(connection, self.session_id, "btw", question)
+            except gateway_client.GatewayClientError as exc:
+                # A refusal is the gateway's own answer about this session, not a crash: say it.
+                return _cp(f"  /btw: {gateway_side.refusal_message(exc)}")
             preview = _ellipsize(question, 60)
             _cp(*_lines(_gt("btw.started", preview=preview)), "")
             self._side_worker(wait, name="btw-side-question", fail_label="/btw",
