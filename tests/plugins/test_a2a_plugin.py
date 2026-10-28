@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import re
 import os
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1180,11 +1182,14 @@ class TestInboundRoundTrip:
         asyncio.run(run())
 
     def test_timeout_returns_failed_not_completed(self, monkeypatch):
-        """When the agent never replies, the task must FAIL (and count as a
-        failure), not report success."""
+        """With the A2A_FAIL_ON_REPLY_TIMEOUT kill switch set, the legacy behaviour
+        holds: a wait deadline FAILS the task (and counts as a failure), never
+        reports success. Without the switch the task stays working — see
+        TestReplyTimeoutKeepsTaskAlive."""
         monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
         monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
         monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        monkeypatch.setenv("A2A_FAIL_ON_REPLY_TIMEOUT", "1")
         adapter, base = _make_live_adapter(monkeypatch, reply_fn=lambda e: None)
 
         async def run():
@@ -1388,6 +1393,154 @@ def test_no_token_listener_serves_its_public_url_host(monkeypatch):
             await adapter.disconnect()
 
     assert asyncio.run(run()) == [200, 403]
+
+
+# --------------------------------------------------------------------------
+# Reply-wait deadline ends the wait, not the task (#145789)
+# --------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestReplyTimeoutKeepsTaskAlive:
+    """Hitting A2A_REPLY_TIMEOUT ends the *wait*, not the task: the task stays working,
+    its waiter stays registered so the late reply still lands (GetTask / subscribe / push),
+    and the orphan sweeper remains what fails a task whose agent really died.
+    A2A_FAIL_ON_REPLY_TIMEOUT=1 restores the legacy fail-at-deadline behaviour."""
+
+    def test_wait_deadline_returns_working_and_keeps_waiter(self, monkeypatch):
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        adapter, base = _make_live_adapter(monkeypatch, reply_fn=lambda e: None)
+
+        async def run():
+            assert await adapter.connect() is True
+            failed_before = protocol.metrics.tasks_failed
+            late_before = protocol.metrics.late_replies
+            resp = await asyncio.to_thread(_post_json, base + "/", _send_body("are you there"))
+            task = resp["result"]
+            assert task["status"]["state"] == "TASK_STATE_WORKING"
+            assert protocol.metrics.tasks_failed == failed_before
+            assert protocol.metrics.late_replies == late_before + 1
+            # The store still shows a live task and the waiter is still registered.
+            rec = adapter.tasks.get(task["id"])
+            assert rec["state"] == "TASK_STATE_WORKING"
+            assert task["id"] in adapter._pending
+            await adapter.disconnect()
+
+        asyncio.run(run())
+
+    def test_late_reply_completes_the_task(self, monkeypatch):
+        """A reply that arrives after the wait deadline is recorded on the task:
+        GetTask sees completed, metrics count it, the waiter is released."""
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        holder = {}
+
+        def reply_fn(event):
+            holder["ctx"] = event.source.chat_id
+            # returning nothing (None) = never reply: the agent keeps working past the deadline
+
+        adapter, base = _make_live_adapter(monkeypatch, reply_fn=reply_fn)
+
+        async def run():
+            assert await adapter.connect() is True
+            completed_before = protocol.metrics.tasks_completed
+            resp = await asyncio.to_thread(_post_json, base + "/", _send_body("slow question"))
+            task = resp["result"]
+            assert task["status"]["state"] == "TASK_STATE_WORKING"
+            # The agent finally answers after the wait deadline.
+            await adapter.send(holder["ctx"], "the late answer", metadata={"notify": True})
+            rec = adapter.tasks.get(task["id"])
+            assert rec["state"] == "TASK_STATE_COMPLETED"
+            assert rec.get("reply") == "the late answer"
+            assert protocol.metrics.tasks_completed == completed_before + 1
+            assert task["id"] not in adapter._pending
+            await adapter.disconnect()
+
+        asyncio.run(run())
+
+    def test_orphan_sweeper_still_reaps_a_dead_late_waiter(self, monkeypatch):
+        """A late-wait waiter whose agent never resolves is still failed by the orphan
+        sweeper once the orphan grace passes, and the waiter is then released."""
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        adapter, base = _make_live_adapter(monkeypatch, reply_fn=lambda e: None)
+
+        async def run():
+            assert await adapter.connect() is True
+            failed_before = protocol.metrics.tasks_failed
+            resp = await asyncio.to_thread(_post_json, base + "/", _send_body("die silently"))
+            task = resp["result"]
+            assert task["status"]["state"] == "TASK_STATE_WORKING"
+            # Age the task and the waiter past the orphan grace, then sweep.
+            from plugins.platforms.a2a import adapter as adapter_mod
+            grace = adapter_mod._orphan_timeout()
+            adapter.tasks._tasks[task["id"]]["created_at"] = time.time() - grace - 2
+            adapter._late_waiters[task["id"]] = time.time() - grace - 1
+            assert task["id"] in adapter._fail_orphans_once()
+            rec = adapter.tasks.get(task["id"])
+            assert rec["state"] == "TASK_STATE_FAILED"
+            assert protocol.metrics.tasks_failed == failed_before + 1
+            assert task["id"] not in adapter._pending
+            await adapter.disconnect()
+
+        asyncio.run(run())
+
+    def test_stream_wait_deadline_closes_on_working(self, monkeypatch):
+        """message/stream past the reply deadline closes the stream on a non-terminal
+        working status instead of a fabricated failure."""
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        adapter, _base = _make_live_adapter(monkeypatch, reply_fn=lambda e: None)
+
+        class _FakeSSEHandler:
+            def __init__(self):
+                self.wfile = io.BytesIO()
+                self.close_connection = False
+
+            def send_response(self, *args):
+                pass
+
+            def send_header(self, *args):
+                pass
+
+            def end_headers(self):
+                pass
+
+        async def run():
+            assert await adapter.connect() is True
+            body = _send_body("slow stream")
+            body["method"] = "message/stream"
+            handler = _FakeSSEHandler()
+            await asyncio.to_thread(adapter._rpc_message_stream, handler, "1", body["params"], "peer-a")
+            raw = handler.wfile.getvalue().decode()
+            assert "TASK_STATE_WORKING" in raw
+            assert "TASK_STATE_FAILED" not in raw
+            await adapter.disconnect()
+
+        asyncio.run(run())
+
+    def test_fail_on_reply_timeout_kill_switch_restores_legacy(self, monkeypatch):
+        monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("A2A_PEER_TOKENS", raising=False)
+        monkeypatch.setenv("A2A_REPLY_TIMEOUT", "1")
+        monkeypatch.setenv("A2A_FAIL_ON_REPLY_TIMEOUT", "1")
+        adapter, base = _make_live_adapter(monkeypatch, reply_fn=lambda e: None)
+
+        async def run():
+            assert await adapter.connect() is True
+            failed_before = protocol.metrics.tasks_failed
+            resp = await asyncio.to_thread(_post_json, base + "/", _send_body("are you there"))
+            task = resp["result"]
+            assert task["status"]["state"] == "TASK_STATE_FAILED"
+            assert protocol.metrics.tasks_failed == failed_before + 1
+            assert task["id"] not in adapter._pending
+            await adapter.disconnect()
+
+        asyncio.run(run())
 
 
 # --------------------------------------------------------------------------

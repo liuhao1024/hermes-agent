@@ -280,7 +280,7 @@ class Metrics:
     and outbound tools; not persisted)."""
 
     _COUNTERS = ("inbound_total", "outbound_total", "streams_started", "push_sent", "push_failed",
-                 "tasks_completed", "tasks_failed", "anti_loop_triggers", "rate_limit_triggers")
+                 "tasks_completed", "tasks_failed", "late_replies", "anti_loop_triggers", "rate_limit_triggers")
 
     def __init__(self) -> None:
         for name in self._COUNTERS:

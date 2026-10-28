@@ -71,6 +71,14 @@ def _reply_timeout() -> float:
         return 300.0
 
 
+_REPLY_TIMEOUT_MSG = "[agent did not reply in time]"
+
+
+def _fail_on_reply_timeout() -> bool:
+    """Legacy kill switch: fail the task at the wait deadline instead of leaving it open."""
+    return os.getenv("A2A_FAIL_ON_REPLY_TIMEOUT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _orphan_timeout() -> float:
     """Orphan grace must never expire before a configured reply window, but stays bounded."""
     return min(float(_MAX_ORPHAN_TIMEOUT), max(float(_MIN_ORPHAN_TIMEOUT), _reply_timeout()))
@@ -310,9 +318,14 @@ class A2AAdapter(BasePlatformAdapter):
         self._pending_order: dict[str, deque[str]] = {}
         # Request ownership outlives reply Futures and also covers synchronous profile forwards.
         self._active_tasks: set[str] = set()
+        # Waiters left open past the reply deadline (#145789): task_id -> when the wait ended.
+        # The orphan sweeper reaps those the agent never resolved, once the orphan grace passes.
+        self._late_waiters: dict[str, float] = {}
         # Admission ids this process already forwarded; a resend of one is a retry, not a new turn.
         self._forwarded_inputs: OrderedDict[str, None] = OrderedDict()
-        self._pending_lock = threading.Lock()
+        # Reentrant: a late-reply lander runs inside resolve's critical section and pops its own
+        # pending entry on the way out.
+        self._pending_lock = threading.RLock()
 
     @property
     def name(self) -> str:
@@ -360,13 +373,15 @@ class A2AAdapter(BasePlatformAdapter):
                 self._httpd.shutdown()
                 self._httpd.server_close()
             self._httpd = None
-        # Fail any in-flight replies so blocked HTTP threads don't hang.
+        # Fail any in-flight replies so blocked HTTP threads don't hang. Late-wait waiters
+        # (#145789) resolve through the same path: their lander records the shutdown failure.
         with self._pending_lock:
             for tid in list(self._pending):
                 self._resolve_locked(tid, protocol.STATE_FAILED, "[agent shutting down]")
             self._pending.clear()
             self._pending_order.clear()
             self._active_tasks.clear()
+            self._late_waiters.clear()
 
     def _watchdog_loop(self) -> None:
         """Background thread that fails orphaned tasks (keeps them queryable)."""
@@ -377,12 +392,18 @@ class A2AAdapter(BasePlatformAdapter):
                 logger.debug("A2A: watchdog error", exc_info=True)
 
     def _fail_orphans_once(self) -> list[str]:
-        """Fail stale tasks that no request still owns."""
+        """Fail stale tasks that no request still owns. Waiters left open past the reply
+        deadline (#145789) keep the task owned while the agent works, but once the orphan
+        grace passes without a reply the agent is assumed dead and the waiter is released."""
         with self._pending_lock:
             active_tasks = set(self._active_tasks)
+            dead_cut = time.time() - _orphan_timeout()
+            dead_waiters = {tid for tid, opened in self._late_waiters.items() if opened <= dead_cut}
         timeout = _orphan_timeout()
-        failed = self.tasks.fail_orphans(timeout, exclude=active_tasks)
+        failed = self.tasks.fail_orphans(timeout, exclude=active_tasks - dead_waiters)
         for tid in failed:
+            if tid in dead_waiters:
+                self._pop_pending(tid)  # release the waiter the dead agent never resolved
             logger.warning("A2A: orphaned task %s marked failed (timeout %gs)", tid, timeout)
             protocol.metrics.tasks_failed += 1
         return failed
@@ -694,15 +715,50 @@ class A2AAdapter(BasePlatformAdapter):
             except Exception:
                 return on_timeout
 
-    def _await_reply(self, pending: dict, keepalive=None) -> tuple[str, str]:
-        return self._await_future(pending["future"], pending["started"] + _reply_timeout(), keepalive,
-                                  (protocol.STATE_FAILED, "[agent did not reply in time]"))
+    def _await_reply(self, pending: dict, keepalive=None) -> tuple[str, Optional[str]]:
+        """Wait for the agent's answer. A ``None`` reply means the wait deadline passed
+        without one: the task stays working and its waiter stays registered, so the late
+        reply still lands on the task (#145789) — unless A2A_FAIL_ON_REPLY_TIMEOUT
+        restores the legacy fail-at-deadline behaviour."""
+        state, reply = self._await_future(pending["future"], pending["started"] + _reply_timeout(), keepalive,
+                                          (protocol.STATE_FAILED, _REPLY_TIMEOUT_MSG))
+        if state == protocol.STATE_FAILED and reply == _REPLY_TIMEOUT_MSG and not _fail_on_reply_timeout():
+            with self._pending_lock:
+                self._late_waiters[pending["task_id"]] = time.time()
+            pending["future"].add_done_callback(self._make_late_reply_lander(pending))
+            protocol.metrics.late_replies += 1
+            logger.info("A2A: wait deadline for task %s ends the wait, not the task — the reply can still land "
+                        "via tasks/get, subscribe or push", pending["task_id"])
+            return protocol.STATE_WORKING, None
+        return state, reply
+
+    def _make_late_reply_lander(self, pending: dict):
+        """Done-callback that records a reply arriving after the wait deadline with the same
+        redaction, input-required detection, audit, metrics and push path as a normal one."""
+        def _land_late_reply(fut: Future) -> None:
+            try:
+                result = fut.result()
+            except Exception:
+                result = (protocol.STATE_FAILED, "[agent processing failed]")
+            self._late_waiters.pop(pending["task_id"], None)
+            if result[0] == protocol.STATE_CANCELED:
+                self._pop_pending(pending["task_id"])  # the cancel path already recorded itself
+                return
+            self._finalize_task(pending, *result)
+        return _land_late_reply
 
     def _rpc_message_send(self, req_id: Any, params: dict, peer: str, agent: Optional[dict] = None, v1_response: bool = False) -> dict:
         task, pending = self._prepare_task(params, peer, agent=agent)
         if task is None:
-            state, reply = self._finalize_task(pending, *self._await_reply(pending))
-            task = protocol.build_task(pending["task_id"], pending["context_id"], state, reply, created_at=pending["created_iso"])
+            state, reply = self._await_reply(pending)
+            if reply is None:
+                # Wait deadline passed: return the live task and keep the waiter registered.
+                task = protocol.build_task(pending["task_id"], pending["context_id"], state,
+                                           created_at=pending["created_iso"])
+            else:
+                state, reply = self._finalize_task(pending, state, reply)
+                task = protocol.build_task(pending["task_id"], pending["context_id"], state, reply,
+                                           created_at=pending["created_iso"])
         return _ok(req_id, protocol.send_message_response(task) if v1_response else task)
 
     @staticmethod
@@ -746,7 +802,14 @@ class A2AAdapter(BasePlatformAdapter):
             submitted = protocol.build_task(task_id, context_id, protocol.STATE_SUBMITTED, created_at=pending["created_iso"])
             self._sse_write(handler, protocol.sse_data(protocol.stream_task(submitted), req_id))
             self._sse_write(handler, protocol.sse_data(protocol.status_update(task_id, context_id, protocol.STATE_WORKING), req_id))
-            state, reply = self._finalize_task(pending, *self._await_reply(pending, keepalive=self._keepalive(handler)))
+            state, reply = self._await_reply(pending, keepalive=self._keepalive(handler))
+            if reply is None:
+                # Wait deadline passed: close the stream on the live working status. The
+                # waiter stays registered, so GetTask / subscribe / push still collect
+                # the answer once it lands (#145789).
+                self._sse_write(handler, protocol.sse_data(protocol.status_update(task_id, context_id, state), req_id))
+                self._sse_write(handler, protocol.sse_done())
+                return
             pending = None
             self._emit_terminal(handler, task_id, context_id, state, reply, req_id=req_id)
         except (BrokenPipeError, ConnectionResetError):
