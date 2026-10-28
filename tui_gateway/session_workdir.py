@@ -425,6 +425,31 @@ def _effective_terminal_backend() -> str:
     return backend or "local"
 
 
+def _known_repo_root_for_dead_cwd(session: dict) -> str:
+    """The repo a session whose cwd just died belonged to: the row's stored ``git_repo_root`` (the common root the
+    async probe recorded while the session worked in its linked worktree), else the main checkout
+    ``_reconcile_session_cwd_from_terminal`` recorded before the move. A candidate must still exist and probe as a
+    repo; "" when neither source knows one."""
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        with _session_db(session) as db:
+            row = (
+                db.get_session(str(session.get("session_key") or ""))
+                if db is not None and hasattr(db, "get_session")
+                else None
+            ) or {}
+            candidates.append(str(row.get("git_repo_root") or "").strip())
+    candidates.append(str(session.get("cwd_prior_repo_root") or "").strip())
+    for root in candidates:
+        if (
+            root
+            and os.path.isdir(root)
+            and (git_probe.common_repo_root(root) or git_probe.repo_root(root))
+        ):
+            return root
+    return ""
+
+
 def _display_session_cwd(session: dict | None) -> str:
     """Session cwd for display/probe surfaces, healed past deleted worktrees (healed value persisted back; local only)."""
     cwd = _session_cwd(session)
@@ -432,6 +457,12 @@ def _display_session_cwd(session: dict | None) -> str:
         return cwd
     healed = _heal_dead_cwd(cwd)
     if healed and healed != cwd and session is not None:
+        # A heal landing on a NON-repo ancestor is the removed out-of-repo worktree case (#145910): keeping the plain
+        # parent (`~/Projects/_worktrees`) dropped the chat out of its Desktop project and the persist below cleared
+        # the row's git identity. The repo the session worked in is still known — heal there instead; only a repo
+        # nobody knows keeps the plain parent.
+        if not (git_probe.common_repo_root(healed) or git_probe.repo_root(healed)):
+            healed = _known_repo_root_for_dead_cwd(session) or healed
         session["cwd"] = healed
         _persist_session_cwd_and_schedule_git_meta(session, healed)
     return healed
@@ -473,7 +504,10 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
     if not landed_common or landed_common != git_probe.common_repo_root(current):
         return False
     # This is the session's workspace now (a desktop launch-artifact cwd earns a real row); the settle marker keeps it
-    # overridable by the NEXT settle.
+    # overridable by the NEXT settle. The main checkout BEFORE the move is recorded so a later removal of this
+    # worktree heals the session back here (#145910), even before the async probe publishes the row's git metadata.
+    if current_root and not session.get("cwd_prior_repo_root"):
+        session["cwd_prior_repo_root"] = current_root
     session.update(cwd=resolved, explicit_cwd=True, cwd_from_settle=True)
     _register_session_cwd(session)
     _persist_session_cwd_and_schedule_git_meta(session, resolved)

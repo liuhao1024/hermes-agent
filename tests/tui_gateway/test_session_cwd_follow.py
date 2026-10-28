@@ -8,7 +8,9 @@ exercise the backend half against real git worktrees on disk.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -19,6 +21,20 @@ from tui_gateway import server
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _row_db(monkeypatch, row):
+    """A fake profile/session store whose ``get_session`` returns ``row``."""
+
+    class _Row:
+        def get_session(self, _key):
+            return row
+
+    @contextlib.contextmanager
+    def _fake_db(_session):
+        yield _Row()
+
+    monkeypatch.setattr(server, "_session_db", _fake_db)
 
 
 @pytest.fixture
@@ -224,3 +240,116 @@ def test_os_normalized_paths_are_not_a_move(session, repo_with_worktree):
     terminal_tool.record_session_cwd(session["session_key"], str(repo) + os.sep)
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
+
+
+def test_a_removed_out_of_repo_worktree_heals_to_the_stored_repo(
+    repo_with_worktree, tmp_path, monkeypatch
+):
+    """#145910: removing an out-of-repo worktree (`~/Projects/_worktrees/<name>`) must not
+    strand the session on the non-repo parent: the row's stored git_repo_root (the main
+    checkout, probed while the session worked in the worktree) heals the chat back into
+    its Desktop project."""
+    repo, worktree = repo_with_worktree
+    holding = tmp_path / "_worktrees"
+    holding.mkdir()
+    moved = holding / "feature"
+    shutil.move(str(worktree), str(moved))  # the worktree now lives OUTSIDE the repo
+    session = {"session_key": "sess-heal-row", "cwd": str(moved), "source": "desktop"}
+    _row_db(monkeypatch, {"git_repo_root": str(repo)})
+    shutil.rmtree(moved)  # `git worktree remove` cleanup
+
+    assert server._display_session_cwd(session) == str(repo)
+    assert session["cwd"] == str(repo)
+
+
+def test_a_removed_out_of_repo_worktree_heals_to_the_reconcile_recorded_repo(
+    repo_with_worktree, tmp_path, monkeypatch
+):
+    """The main checkout recorded by the settle reconcile heals the same way when the row
+    carries no git metadata (probe not published yet)."""
+    repo, worktree = repo_with_worktree
+    holding = tmp_path / "_worktrees2"
+    holding.mkdir()
+    moved = holding / "feature"
+    shutil.move(str(worktree), str(moved))
+    session = {
+        "session_key": "sess-heal-memory",
+        "cwd": str(moved),
+        "source": "desktop",
+        "cwd_prior_repo_root": str(repo),
+    }
+    _row_db(monkeypatch, {"git_repo_root": ""})
+    shutil.rmtree(moved)
+
+    assert server._display_session_cwd(session) == str(repo)
+    assert session["cwd"] == str(repo)
+
+
+def test_healing_without_a_known_repo_keeps_the_ancestor_fallback(
+    repo_with_worktree, tmp_path, monkeypatch
+):
+    """No repo known (empty row, no settle record): the plain existing parent stays, as before."""
+    _repo, worktree = repo_with_worktree
+    holding = tmp_path / "_worktrees3"
+    holding.mkdir()
+    moved = holding / "feature"
+    shutil.move(str(worktree), str(moved))
+    session = {
+        "session_key": "sess-heal-unknown",
+        "cwd": str(moved),
+        "source": "desktop",
+    }
+    _row_db(monkeypatch, {"git_repo_root": ""})
+    shutil.rmtree(moved)
+
+    assert server._display_session_cwd(session) == str(holding)
+    assert session["cwd"] == str(holding)
+
+
+def test_a_known_repo_that_stopped_existing_keeps_the_ancestor_fallback(
+    repo_with_worktree, tmp_path, monkeypatch
+):
+    """A stored root pointing at a since-deleted checkout must not resurrect a dead cwd."""
+    _repo, worktree = repo_with_worktree
+    holding = tmp_path / "_worktrees4"
+    holding.mkdir()
+    moved = holding / "feature"
+    shutil.move(str(worktree), str(moved))
+    gone_repo = tmp_path / "gone-repo"
+    gone_repo.mkdir()
+    session = {"session_key": "sess-heal-gone", "cwd": str(moved), "source": "desktop"}
+    _row_db(monkeypatch, {"git_repo_root": str(gone_repo)})
+    shutil.rmtree(moved)
+    shutil.rmtree(gone_repo)
+
+    assert server._display_session_cwd(session) == str(holding)
+
+
+def test_a_dead_subdir_of_the_repo_still_heals_to_the_repo_root(
+    repo_with_worktree, monkeypatch
+):
+    """Regression guard: a dead cwd INSIDE the repo keeps healing to the repo root and
+    never consults the row."""
+    repo, _ = repo_with_worktree
+    sub = repo / "sub"
+    sub.mkdir()
+    session = {"session_key": "sess-heal-sub", "cwd": str(sub), "source": "desktop"}
+
+    def _fail(_session):
+        raise AssertionError("a repo-rooted heal must not consult the session store")
+
+    monkeypatch.setattr(server, "_session_db", _fail)
+    shutil.rmtree(sub)
+
+    assert server._display_session_cwd(session) == str(repo)
+    assert session["cwd"] == str(repo)
+
+
+def test_settling_records_the_prior_repo_for_healing(session, repo_with_worktree):
+    """The settle reconcile stamps the main checkout it moved FROM, so a later removal of
+    that worktree can heal without waiting for the async git probe."""
+    repo, worktree = repo_with_worktree
+    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+
+    assert server._reconcile_session_cwd_from_terminal(session) is True
+    assert session.get("cwd_prior_repo_root") == str(repo)
