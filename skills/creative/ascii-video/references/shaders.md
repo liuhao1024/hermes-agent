@@ -517,11 +517,11 @@ def sh_kaleidoscope(c, folds=6):
 ```python
 def sh_mirror_h(c):
     """Horizontal mirror — left half reflected to right."""
-    w = c.shape[1]; c[:, w//2:] = c[:, :w//2][:, ::-1]; return c
+    w = c.shape[1]; half = w // 2; c[:, w-half:] = c[:, :half][:, ::-1]; return c
 
 def sh_mirror_v(c):
     """Vertical mirror — top half reflected to bottom."""
-    h = c.shape[0]; c[h//2:, :] = c[:h//2, :][::-1, :]; return c
+    h = c.shape[0]; half = h // 2; c[h-half:, :] = c[:half, :][::-1, :]; return c
 
 def sh_mirror_quad(c):
     """4-fold mirror — top-left quadrant reflected to all four."""
@@ -761,7 +761,7 @@ def sh_radial_blur(c, strength=0.03, center=None):
 ```python
 def sh_grain(c, amt=10):
     """2x-downsampled film grain. Audio-reactive in dispatch (amt scaled by rms)."""
-    noise = np.random.randint(-amt, amt+1, (c.shape[0]//2, c.shape[1]//2, 1), dtype=np.int16)
+    noise = np.random.randint(-amt, amt+1, ((c.shape[0]+1)//2, (c.shape[1]+1)//2, 1), dtype=np.int16)
     noise = np.repeat(np.repeat(noise, 2, axis=0), 2, axis=1)[:c.shape[0], :c.shape[1]]
     return np.clip(c.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 ```
@@ -770,7 +770,7 @@ def sh_grain(c, amt=10):
 ```python
 def sh_static_noise(c, density=0.05, color=True):
     """Random pixel noise overlay (TV static)."""
-    mask = np.random.random((c.shape[0]//2, c.shape[1]//2)) < density
+    mask = np.random.random(((c.shape[0]+1)//2, (c.shape[1]+1)//2)) < density
     mask = np.repeat(np.repeat(mask, 2, axis=0), 2, axis=1)[:c.shape[0], :c.shape[1]]
     out = c.copy()
     if color:
@@ -1014,10 +1014,23 @@ def tr_canvas_crossfade(canvas_a, canvas_b, blend):
     return np.clip(canvas_a * (1-blend) + canvas_b * blend, 0, 255).astype(np.uint8)
 ```
 
-### Wipe (directional)
+### Wipe (radial)
+
+This character-array example supports only `direction="radial"` (the default);
+other values raise `ValueError`. For the separate grid-mask horizontal/vertical
+wipe helpers, see `composition.md` (`mask_wipe_h` / `mask_wipe_v`); they are not
+additional directions implemented by `tr_wipe`.
+
+The radial mask retains the existing strict `d < threshold` comparison.
+`blend=1` is not guaranteed to select B everywhere: the farthest boundary
+cells remain A, and a 1x1 input remains A for `blend` in [0, 1]. This example
+does not change those endpoints.
+
 ```python
-def tr_wipe(ch_a, co_a, ch_b, co_b, blend, direction="left"):
-    """direction: left, right, up, down, radial, diagonal"""
+def tr_wipe(ch_a, co_a, ch_b, co_b, blend, direction="radial"):
+    """This example implements radial wipe only."""
+    if direction != "radial":
+        raise ValueError("This example supports radial wipe only")
     rows, cols = ch_a.shape
     if direction == "radial":
         cx, cy = cols/2, rows/2
