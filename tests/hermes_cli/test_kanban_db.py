@@ -301,6 +301,95 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
         assert row["consecutive_failures"] == 0
 
 
+def test_stale_claim_reclaim_reads_rate_limit_trailer_without_counting_failure(
+    kanban_home,
+    monkeypatch,
+):
+    """A host-local worker that exited rate-limited (rc=75, trailer in its log)
+    but whose claim expired before ``detect_crashed_workers`` could settle it
+    must be booked ``rate_limited`` by ``release_stale_claims`` — no failure
+    count, cooldown-eligible outcome (#145820). Two such reclaims in a row must
+    not block the card: every run only met a rate limit."""
+    with kbc.connect() as conn:
+        t = kb.create_task(conn, title="rate limited then stale", assignee="a")
+        host = kb._claimer_id().split(":", 1)[0]
+        log_path = kb.worker_log_path(t)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        for _ in range(2):
+            kb.claim_task(conn, t, claimer=f"{host}:worker")
+            kbd._set_worker_pid(conn, t, 12345)
+            # The worker wrote its own exit trailer, then exited (rc=75).
+            log_path.write_text(
+                "working...\n[kanban-worker-exit] rc=75\n",
+                encoding="utf-8",
+            )
+            conn.execute(
+                "UPDATE tasks SET claim_expires = ? WHERE id = ?",
+                (int(time.time()) - 3600, t),
+            )
+            assert (
+                kb.release_stale_claims(
+                    conn,
+                    signal_fn=lambda _p, _s: None,
+                    failure_limit=2,
+                )
+                == 1
+            )
+            run = conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id = ? "
+                "ORDER BY ended_at DESC LIMIT 1",
+                (t,),
+            ).fetchone()
+            assert run["outcome"] == "rate_limited"
+            row = conn.execute(
+                "SELECT status, consecutive_failures FROM tasks WHERE id = ?",
+                (t,),
+            ).fetchone()
+            assert row["consecutive_failures"] == 0
+        assert row["status"] != "blocked"
+        # The booking must feed the respawn guard's rate-limit cooldown, same as
+        # the detect_crashed_workers path (#145820: run B used to start in the
+        # same pass because the outcome was ``reclaimed``).
+        assert kbd.check_respawn_guard(conn, t) == "rate_limit_cooldown"
+        events = [e.kind for e in kb.list_events(conn, t)]
+        assert "rate_limited" in events
+
+
+def test_stale_claim_reclaim_nonzero_trailer_still_counts_failure(
+    kanban_home,
+    monkeypatch,
+):
+    """Only a rate-limit trailer (rc=75) is exempt from the breaker: a stale
+    claim whose worker exited with any other code keeps the #111306 booking
+    (``reclaimed`` + a failure count)."""
+    with kbc.connect() as conn:
+        t = kb.create_task(conn, title="crashed then stale", assignee="a")
+        host = kb._claimer_id().split(":", 1)[0]
+        log_path = kb.worker_log_path(t)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("[kanban-worker-exit] rc=1\n", encoding="utf-8")
+        kb.claim_task(conn, t, claimer=f"{host}:worker")
+        kbd._set_worker_pid(conn, t, 12345)
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
+            (int(time.time()) - 3600, t),
+        )
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        assert kb.release_stale_claims(conn, signal_fn=lambda _p, _s: None) == 1
+        run = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? "
+            "ORDER BY ended_at DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert run["outcome"] == "reclaimed"
+        row = conn.execute(
+            "SELECT consecutive_failures FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["consecutive_failures"] == 1
+
+
 
 
 
