@@ -453,3 +453,75 @@ class TestRealSSHBackend:
         assert _run(f"wc -c < {shlex.quote(path)}")["output"].strip() == str(len(content.encode()))
         read = json.loads(read_file_tool(path, task_id="ssh_test"))
         assert "beta: ünïcödé ✓" in read["content"], read
+
+
+class TestClientStderrSeparation:
+    """#146135: the ssh client's own stderr must never masquerade as remote output,
+    but a failed connection must still surface the client's diagnostic."""
+
+    def test_run_bash_merges_remote_stderr_remotely_and_pipes_client_stderr(self, monkeypatch):
+        monkeypatch.setattr(ssh_env.SSHEnvironment, "_establish_connection", lambda self: None)
+        captured = {}
+
+        def _fake_popen(cmd, stdin_data=None, **kwargs):
+            captured["cmd"] = cmd
+            captured["stderr"] = kwargs.get("stderr")
+            return MagicMock()
+
+        monkeypatch.setattr(ssh_env, "_popen_bash", _fake_popen)
+        ssh_env.SSHEnvironment(host="h", user="u")._run_bash("echo ok")
+
+        # The remote login shell merges the remote command's stderr into its stdout ...
+        assert captured["cmd"][-3] == "-c"
+        assert captured["cmd"][-1] == "2>&1"
+        # ... while the client's own stderr is piped separately.
+        assert captured["stderr"] == subprocess.PIPE
+
+    def _wire_fake_ssh(self, monkeypatch, tmp_path, script):
+        monkeypatch.setattr(ssh_env.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(ssh_env.shutil, "which", lambda _name: "/usr/bin/ssh")
+        monkeypatch.setattr(ssh_env.SSHEnvironment, "_establish_connection", lambda self: None)
+        monkeypatch.setattr(ssh_env.SSHEnvironment, "_detect_remote_home", lambda self: "/home/u")
+        monkeypatch.setattr(ssh_env.SSHEnvironment, "_build_ssh_command",
+                            lambda self, extra_args=None, send_env=(): [str(script)])
+        return ssh_env.SSHEnvironment(host="h", user="u", sync_files=False)
+
+    def test_client_warning_is_excluded_from_successful_output(self, monkeypatch, tmp_path):
+        """The identity-file warning scenario from #146135: the connection succeeds via
+        agent auth, the client prints an unconditional stderr warning, and positional
+        consumers of ``output`` (sha256sum's digest token, ``stdout.strip() == 'yes'``)
+        must not see it."""
+        script = tmp_path / "fake-ssh-warn"
+        script.write_text(
+            "#!/bin/sh\n"
+            "echo 'Warning: Identity file /home/u/.ssh/id_rsa not accessible: "
+            "No such file or directory.' >&2\n"
+            "echo 'remote-ok'\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        env = self._wire_fake_ssh(monkeypatch, tmp_path, script)
+
+        result = env._wait_for_process(env._run_bash("echo hi"), timeout=10)
+
+        assert result["returncode"] == 0
+        assert "remote-ok" in result["output"]
+        assert "Warning: Identity file" not in result["output"]
+        assert "client diagnostics" not in result["output"]
+
+    def test_client_diagnostics_surface_when_command_fails(self, monkeypatch, tmp_path):
+        """A refused connection only reports through the client's stderr; with the stream
+        separated, ``_wait_for_process`` must re-attach it so rc=255 is not unexplained."""
+        script = tmp_path / "fake-ssh-fail"
+        script.write_text(
+            "#!/bin/sh\n"
+            "echo 'ssh: connect to host h port 22: Connection refused' >&2\n"
+            "exit 255\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        env = self._wire_fake_ssh(monkeypatch, tmp_path, script)
+
+        result = env._wait_for_process(env._run_bash("echo hi"), timeout=10)
+
+        assert result["returncode"] == 255
+        assert result["client_stderr"].strip() == "ssh: connect to host h port 22: Connection refused"
+        assert "Connection refused" in result["output"]

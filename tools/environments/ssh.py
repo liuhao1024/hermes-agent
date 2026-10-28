@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -40,6 +41,40 @@ def _ensure_ssh_available() -> None:
 def _sync_error(reason: str, subject: str, what: str = "the SSH connection") -> EnvironmentConnectionError:
     return EnvironmentConnectionError(
         reason, retry_hint=f"{subject} failed — verify {what} is healthy, then retry.")
+
+
+def _drain_client_stderr(proc: subprocess.Popen) -> None:
+    """Drain the ssh client's own stderr on a daemon thread and record it on ``proc``.
+
+    ``_run_bash`` pipes the client's stderr away from the remote command's merged output
+    (#146135); something must read that pipe or a chatty client (banner, host-key notice)
+    could fill it and deadlock. The text is kept on ``proc._hermes_client_stderr`` —
+    ``_wait_for_process`` appends it to the result only when the command failed, so a
+    refused connection still shows its cause while the successful-but-noisy path
+    (``Warning: Identity file ...`` on a healthy agent-auth connection) stays silent."""
+    stream = proc.stderr
+    if stream is None:
+        return
+
+    def _read():
+        text = ""
+        try:
+            text = stream.read() or ""
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        text = text.strip()
+        if text:
+            proc._hermes_client_stderr = text
+            logger.warning("ssh client diagnostics (excluded from tool output): %s", text)
+
+    thread = threading.Thread(target=_read, daemon=True)
+    proc._hermes_client_stderr_thread = thread
+    thread.start()
 
 
 class SSHEnvironment(BaseEnvironment):
@@ -284,9 +319,17 @@ class SSHEnvironment(BaseEnvironment):
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
-        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login)
+        # ``2>&1`` rides the remote login shell, merging the remote command's stderr into its
+        # stdout exactly as before; the ssh client's OWN stderr is piped separately below so a
+        # client-side diagnostic can no longer masquerade as the first line of remote output
+        # and break positional consumers (#146135).
+        cmd = (self._build_ssh_command(send_env=values)
+               + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login) + ["2>&1"])
         client_env = client_env_with(values)
-        return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
+        proc = (_popen_bash(cmd, stdin_data, env=client_env, stderr=subprocess.PIPE)
+                if client_env is not None else _popen_bash(cmd, stdin_data, stderr=subprocess.PIPE))
+        _drain_client_stderr(proc)
+        return proc
 
     def cleanup(self):
         if self._sync_manager:

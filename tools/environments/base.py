@@ -607,6 +607,14 @@ class BaseEnvironment(ABC):
         if stdin_errors := getattr(proc, "_hermes_stdin_errors", None):
             result["stdin_error"] = err = str(stdin_errors[0])
             result["output"] = rendered + f"\n[stdin write failed: {err}]"
+        # A backend that pipes its client's stderr away (SSH, #146135) records it on the proc;
+        # on failure it IS the error message, so surface it instead of an unexplained rc.
+        client_stderr_thread = getattr(proc, "_hermes_client_stderr_thread", None)
+        if client_stderr_thread is not None:
+            client_stderr_thread.join(timeout=2)
+        if (client_stderr := getattr(proc, "_hermes_client_stderr", "")) and proc.returncode:
+            result["client_stderr"] = client_stderr
+            result["output"] = result["output"] + f"\n[client diagnostics: {client_stderr}]"
         return result
 
     _finalize_wait_result = staticmethod(_finalize_wait_result)

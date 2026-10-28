@@ -251,12 +251,15 @@ def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
 def _popen_bash(cmd: list[str], stdin_data: str | None = None, **kwargs) -> subprocess.Popen:
     """Spawn a subprocess with standard stdout/stderr/stdin setup; *stdin_data* is written
     asynchronously via :func:`_pipe_stdin`. Backends with special Popen needs (e.g. local's
-    ``preexec_fn``) can bypass this and call :func:`_pipe_stdin` directly."""
+    ``preexec_fn``) can bypass this and call :func:`_pipe_stdin` directly. ``stderr``
+    merges into stdout by default but may be overridden — the SSH backend pipes the
+    client's own diagnostics separately so they never masquerade as remote output (#146135)."""
     kwargs.setdefault("creationflags", windows_hide_flags())
+    stderr = kwargs.pop("stderr", subprocess.STDOUT)
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=stderr,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
         text=True, encoding="utf-8", errors="replace",
         **kwargs)
