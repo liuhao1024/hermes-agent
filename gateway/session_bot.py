@@ -663,13 +663,18 @@ def relay_operation(connection, operation, params):
     fields = {'roster': {'agents'}, 'outbox': set(), 'reply': {'id', 'reply', 'error', 'reason'}}
     if set(params) - fields[operation]:
         raise RuntimeStoreError('invalid_params')
+    # Relay state is install-wide (the Desktop drains the install root only): the session door
+    # serves the same shared mailbox as the tui_gateway door, not the session profile's home
+    # (#146035).
+    from tools.bot_relay import install_relay_root
+    mailbox = install_relay_root()
     from tools.bot_relay import write_remote_roster, claim_pending_envelopes, write_reply
     if operation == 'roster':
-        return {'count': write_remote_roster(home, params.get('agents'))}
+        return {'count': write_remote_roster(mailbox, params.get('agents'))}
     if operation == 'outbox':
-        return {'envelopes': claim_pending_envelopes(home)}
+        return {'envelopes': claim_pending_envelopes(mailbox)}
     try:
-        write_reply(home, params.get('id'), reply=params.get('reply', ''),
+        write_reply(mailbox, params.get('id'), reply=params.get('reply', ''),
                     error=params.get('error', ''), reason=params.get('reason', ''))
     except ValueError as exc:
         raise RuntimeStoreError('admission_conflict') from exc
