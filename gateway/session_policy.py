@@ -419,6 +419,11 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     from hermes_constants import get_hermes_home
 
     source = params.get('source', 'cli')
+    # ``desktop`` is the label SURFACES['gui'] stores and human pickers show; third-party clients
+    # echo that stored label back as their create source, so alias it to ``gui`` here the way
+    # SURFACE_GROUPS already treats the two as one row.
+    if source == 'desktop':
+        source = 'gui'
     if source == 'a2a':
         from gateway.session_a2a import build_forward_policy
         return build_forward_policy(params, config, private_secrets=private_secrets)

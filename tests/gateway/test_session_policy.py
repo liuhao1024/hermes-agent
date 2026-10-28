@@ -23,6 +23,13 @@ def test_policy_selects_surface_and_isolates_cwd(tmp_path):
     assert all('desktop_ui' not in p.toolsets for p in policies[:2])
     # Platform-gated toolsets (catalog) ride on the Desktop surface only, like the native TUI factory.
     assert 'catalog' in policies[2].toolsets and all('catalog' not in p.toolsets for p in policies[:2])
+    # ``desktop`` is the stored label of the ``gui`` surface; third-party clients echo it back as
+    # their create source, so it must land on the same policy as ``--source gui`` (#145847).
+    desktop_cwd = tmp_path / 'desktop'
+    desktop_cwd.mkdir()
+    aliased = build_policy({'source': 'desktop', 'cwd': str(desktop_cwd), 'model': 'gui'}, cfg)
+    assert (aliased.source, aliased.platform) == ('gui', 'desktop')
+    assert aliased.toolsets == policies[2].toolsets
     cfg['platform_toolsets']['cli'].clear()
     assert 'terminal' in policies[0].toolsets
 
