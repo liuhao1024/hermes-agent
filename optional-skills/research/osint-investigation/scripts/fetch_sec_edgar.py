@@ -36,11 +36,15 @@ COLUMNS = [
 
 
 def _ua() -> str:
-    ua = os.environ.get("SEC_USER_AGENT", "").strip()
+    # Accept the skill-wide contact var first so users only set one UA; SEC's
+    # own name stays as a fallback for standalone use.
+    ua = (
+        os.environ.get("HERMES_OSINT_UA") or os.environ.get("SEC_USER_AGENT") or ""
+    ).strip()
     if not ua:
         raise SystemExit(
             "SEC requires a User-Agent with contact info. "
-            "Set SEC_USER_AGENT='Your Name your@email'."
+            "Set HERMES_OSINT_UA='Your Name your@email' (or SEC_USER_AGENT)."
         )
     return ua
 

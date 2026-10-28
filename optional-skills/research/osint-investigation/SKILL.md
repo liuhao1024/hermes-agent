@@ -10,6 +10,27 @@ metadata:
     tags: [osint, investigation, public-records, sec, sanctions, corporate-registry, property, courts, due-diligence, journalism]
     category: research
     related_skills: [domain-intel, arxiv]
+required_environment_variables:
+  - name: HERMES_OSINT_UA
+    prompt: Contact User-Agent for fair-use sources (e.g. "your-app/1.0 (you@email)")
+    help: "Sent as User-Agent by every fetch script; Wikimedia and SEC fair-use guidance ask callers to identify themselves."
+    required_for: "SEC EDGAR (declines requests without a contact UA) and polite use of Wikimedia/Wayback"
+    optional: true
+  - name: SEC_USER_AGENT
+    prompt: Legacy SEC-specific contact User-Agent (e.g. "Your Name you@email")
+    help: "Only used if HERMES_OSINT_UA is unset. Set HERMES_OSINT_UA instead to cover all sources."
+    required_for: "SEC EDGAR, when HERMES_OSINT_UA is not set"
+    optional: true
+  - name: COURTLISTENER_TOKEN
+    prompt: CourtListener API token (free at courtlistener.com)
+    help: "Anonymous /search requests now return 401; a token is required for search and raises rate limits."
+    required_for: "CourtListener court-record search"
+    optional: true
+  - name: SENATE_LDA_TOKEN
+    prompt: Senate LDA API token (free, registered email)
+    help: "Anonymous filing queries may return 403; a token lifts that and raises the rate limit."
+    required_for: "Senate lobbying-disclosure (LDA) filings"
+    optional: true
 ---
 
 # OSINT Investigation — Public Records Cross-Reference
@@ -22,8 +43,11 @@ confidence, run statistical timing tests, and produce structured evidence
 chains.
 
 **Python stdlib only.** Zero install. Works on Linux, macOS, Windows. Most
-sources work with no API key (OpenCorporates has an optional free token
-that raises rate limits).
+sources work with no API key; two no longer do (CourtListener search now
+returns 401 and Senate LDA often 403 without a token — both free to
+register), and OpenCorporates has an optional free token that raises rate
+limits. Scripts fail fast with a clear message when a source demands a
+key.
 
 Adapted from the MIT-licensed ShinMegamiBoson/OpenPlanter project; expanded
 to cover identity / property / litigation / archives / news sources that
@@ -108,6 +132,7 @@ python SKILL_DIR/scripts/fetch_usaspending.py --recipient "EXAMPLE CORP" \
     --fy 2024 --out data/contracts.csv
 
 # Senate LD-1 / LD-2 lobbying disclosures
+# (anonymous queries often get 403 — set SENATE_LDA_TOKEN or pass --token)
 python SKILL_DIR/scripts/fetch_senate_ld.py --client "EXAMPLE CORP" \
     --year 2024 --out data/lobbying.csv
 
@@ -136,6 +161,7 @@ python SKILL_DIR/scripts/fetch_opencorporates.py --query "Example Corp" \
     --jurisdiction us_ny --out data/opencorporates.csv
 
 # CourtListener — federal + state court opinions, PACER dockets
+# (search now requires a token — set COURTLISTENER_TOKEN or pass --token)
 python SKILL_DIR/scripts/fetch_courtlistener.py --query "Smith v. Example Corp" \
     --type opinions --out data/courts.csv
 
@@ -163,11 +189,11 @@ flags when the company-name resolver matched an individual Form 3/4/5 filer
 rather than a corporate registrant.
 
 Rate-limit notes are in each source's wiki entry. Default fetchers sleep
-politely between paginated requests. **API keys raise rate limits** for
-sources that support them (`SEC_USER_AGENT`, `SENATE_LDA_TOKEN`,
-`OPENCORPORATES_API_TOKEN`, `COURTLISTENER_TOKEN`). All scripts surface
-429 responses immediately with the upstream's quota message so the user
-knows to slow down or supply a key.
+politely between paginated requests. **API keys are required** for
+CourtListener search and Senate LDA filings and **raise rate limits** for
+the rest (`SEC_USER_AGENT`/`HERMES_OSINT_UA`, `OPENCORPORATES_API_TOKEN`).
+All scripts surface 429, 401 and 403 responses immediately with the
+upstream's message so the user knows to slow down or supply a key.
 
 ### 3. Resolve entities across sources
 

@@ -82,6 +82,17 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+def _resolve_sdn_type(raw: str) -> str:
+    """Normalize an SDN row's sdn_type cell to our entity_type vocabulary.
+
+    OFAC writes null as "-0-" (blank after _strip_quotes), and plain entity
+    rows carry sdn_type = -0- — a blank type means "entity", otherwise the
+    `--entity-type entity` filter would drop every entity row.
+    """
+    lowered = _strip_quotes(raw).lower()
+    return _TYPE_MAP.get(lowered) or lowered or "entity"
+
+
 def fetch(
     program: str | None,
     entity_type: str | None,
@@ -114,7 +125,7 @@ def fetch(
         ent_num = _strip_quotes(r["ent_num"])
         if not ent_num:
             continue
-        sdn_type = _TYPE_MAP.get(_strip_quotes(r["sdn_type"]).lower(), _strip_quotes(r["sdn_type"]))
+        sdn_type = _resolve_sdn_type(_strip_quotes(r["sdn_type"]))
         if entity_type and sdn_type != entity_type:
             continue
         progs = _strip_quotes(r["program"])
