@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from gateway.run_profile_reconcile import profile_serve_signature
 from gateway.status import flush_runtime_status
@@ -575,3 +575,60 @@ async def test_hot_added_profile_cannot_double_claim_a_live_secondary_token(tmp_
         await runner.reconcile_served_profiles()
     fp = GatewayRunner._adapter_credential_fingerprint(_Adapter("shared"))
     assert seen_claims["dupe"].get((Platform.DISCORD, fp)) == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_removed_duplicate_credential_skip_parks_disabled_not_stale_fatal(tmp_path, monkeypatch):
+    """Issue #146125: a ``<profile>:<platform>`` entry parked fatal (duplicate_credential) must not
+    outlive the duplicate credential's removal. The deliberate no-credential skip publishes a
+    ``disabled`` entry — the status aggregate reads that as informational — instead of leaving the
+    stale fatal verdict degrading every profile served by the gateway."""
+    from gateway.status import publish_runtime_status
+
+    home = tmp_path / ".hermes"
+    profile_home = home / "profiles" / "b"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(multiplex_profiles=True)
+    runner.session_authorities = None
+    runner._running = True
+    runner._primary_profile_name = "default"
+    runner.adapters = {}
+    runner._profile_adapters = {}
+    runner._profile_failed_platforms = {}
+    runner._failed_platforms = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner.pairing_store = MagicMock()
+    runner.pairing_stores = {}
+    runner._adapter_disconnect_timeout_secs = lambda: 0.5
+    runner._profile_configs = {}
+    runner._profile_bot_platforms = {}
+
+    # The scenario's precondition: boot refused the duplicate claim and parked this entry fatal.
+    publish_runtime_status(
+        platform="b:telegram",
+        platform_state="fatal",
+        error_code="duplicate_credential",
+        error_message="Profile 'default' and 'b' both configure telegram with the same credential.",
+    )
+    flush_runtime_status()
+
+    # The operator removed the credential from b's .env: the re-scan reloads a token-less config.
+    async def _load(profile_name, profile_home_):
+        return GatewayConfig(
+            platforms={Platform.TELEGRAM: PlatformConfig(enabled=True)}
+        )
+
+    runner._load_secondary_profile_config = _load
+
+    connected = await runner._start_one_profile_adapters("b", profile_home, {})
+    assert connected == 0
+    flush_runtime_status()
+    entry = json.loads((home / "gateway_state.json").read_text(encoding="utf-8"))[
+        "platforms"
+    ]["b:telegram"]
+    assert entry["state"] == "disabled"
+    assert entry["error_code"] == "not_configured"

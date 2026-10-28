@@ -1280,6 +1280,15 @@ class GatewayAdapterLifecycleMixin:
             if multiplex and not has_credential:
                 if platform is Platform.WHATSAPP:
                     self._note_unserved_secondary_platform(profile_name, platform)
+                else:
+                    # Publish the deliberate skip: a stale fatal entry (e.g. duplicate_credential
+                    # from a credential since removed) would otherwise outlive its cause and keep
+                    # the status pill degraded for every profile served by this gateway (#146125).
+                    self._update_platform_runtime_status(
+                        f"{profile_name}:{platform.value}", platform_state="disabled",
+                        error_code="not_configured",
+                        error_message="no bot credential in this profile's secrets",
+                    )
                 logger.info(
                     "[MULTIPLEX] Profile '%s': skipping %s - no bot credential "
                     "in this profile's secrets", profile_name, platform.value,
