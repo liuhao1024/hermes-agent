@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hermes_platform import declaration
-from tools.registry import invalidate_check_fn_cache, tool_error
+from tools.registry import fresh_check_fn, invalidate_check_fn_cache, tool_error
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
 from tools import mcp_tool_loop as _loop
@@ -864,7 +864,9 @@ def _make_check_fn(server_name: str):
         if not _connected():
             return False
         return _declared_app_offerable(server_name)
-    return _check
+    # Reads in-memory connection state only: re-evaluate fresh on every pass so a False
+    # verdict cached while the session was down cannot outlive the reconnect (#146213).
+    return fresh_check_fn(_check)
 
 
 def _declared_app_offerable(server_name: str) -> bool:

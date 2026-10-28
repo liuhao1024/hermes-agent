@@ -343,6 +343,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_resolved_identity",
         "_rpc_lock",
         "_sampling",
+        "_session",
         "_session_proven",
         "_shutdown_event",
         "_sse_fallback",
@@ -354,13 +355,31 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_was_parked",
         "initialize_result",
         "name",
-        "session",
         "tool_timeout",
     )
 
+    @property
+    def session(self) -> Optional[Any]:
+        return self._session
+
+    @session.setter
+    def session(self, value: Any) -> None:
+        was_live = self._session is not None
+        self._session = value
+        if value is not None and not was_live:
+            # A regained session flips every MCP check_fn back to True with no registry
+            # mutation, so quiet-mode tool-def lists computed while the server was offline
+            # stay pinned under the old generation (#146213). Treat the reconnect as a
+            # registry change instead. Dropping the session does NOT bump: a short
+            # reconnect keeps serving the cached list, a long outage removes the tools
+            # via parking.
+            from tools.registry import registry as _registry  # lazy: import cycle
+
+            _registry.bump_generation()
+
     def __init__(self, name: str):
         self.name = name
-        self.session: Optional[Any] = None
+        self._session: Optional[Any] = None
         self.tool_timeout: float = _DEFAULT_TOOL_TIMEOUT
         self._task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()

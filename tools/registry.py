@@ -267,11 +267,23 @@ _check_fn_core_drop_warned: set[tuple[Callable, Optional[str]]] = set()  # once-
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
 _NO_CACHE_CHECK_FNS: set[Callable] = set()
+_FRESH_CHECK_FNS: set[Callable] = set()
 
 
 def no_cache_check_fn(fn: Callable) -> Callable:
     """Mark a local, config-backed availability check as uncached."""
     _NO_CACHE_CHECK_FNS.add(fn)
+    return fn
+
+
+def fresh_check_fn(fn: Callable) -> Callable:
+    """Mark a probe that reads only in-memory state as re-evaluated on every pass.
+
+    Skips the TTL verdict *read* — a False cached while an MCP server's session
+    was down would otherwise outlive the reconnect (#146213) — while keeping the
+    failure grace and verdict logging below unchanged.
+    """
+    _FRESH_CHECK_FNS.add(fn)
     return fn
 
 
@@ -350,7 +362,9 @@ def _check_fn_cached(fn: Callable) -> bool:
     cache_key = (fn, scope)
     with _check_fn_cache_lock:
         _prune_check_fn_caches(now)  # leaves only entries within TTL
-        cached = _check_fn_cache.get(cache_key)
+        # Fresh probes (in-memory connection state only) skip the verdict read: a False
+        # stored during an MCP reconnect gap must not serve after the reconnect (#146213).
+        cached = None if fn in _FRESH_CHECK_FNS else _check_fn_cache.get(cache_key)
         if cached is not None:
             return cached[1]
     exc_info = None
@@ -557,6 +571,16 @@ class ToolRegistry:
                     "Toolset alias collision: '%s' (%s) overwritten by %s", alias, existing, toolset
                 )
             self._toolset_aliases[alias] = toolset
+            self._generation += 1
+
+    def bump_generation(self) -> None:
+        """Invalidate get_tool_definitions() memos without touching registrations.
+
+        For state flips that change check_fn verdicts with no registry mutation
+        (an MCP server regaining its session, #146213): lists memoized under the
+        old generation stay pinned forever, and fresh computes need a new key.
+        """
+        with self._lock:
             self._generation += 1
 
     def get_registered_toolset_aliases(self) -> dict[str, str]:
