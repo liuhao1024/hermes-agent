@@ -565,6 +565,55 @@ class TestDeleteSkill:
         assert not (tmp_path / "devops").exists()
 
 
+    def test_hard_delete_response_names_the_ledger_rollback_handle(self, tmp_path):
+        """A foreground rmtree must hand back its own undo (#146048).
+
+        The ledger holds a byte-exact package snapshot, but the response used
+        to read just "deleted." — a model that meant to edit assumed no copy
+        survived and rebuilt by hand while the restore handle sat one ledger
+        row away. The response must now name the entry and the rollback verb.
+        """
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = json.loads(skill_manage(action="delete", name="my-skill"))
+        assert result["success"] is True
+        restore = result.get("_restore") or {}
+        entry_id = restore.get("ledger_entry")
+        assert entry_id, (
+            "hard delete did not return a ledger rollback handle (#146048); "
+            f"got {result!r}"
+        )
+        assert f"hermes curator rollback {entry_id}" in result["message"]
+        assert restore.get("files", 0) >= 1
+        # The handle must be real: the entry exists and carries the package
+        # snapshot, so the promised rollback can actually restore it.
+        from tools.skill_ledger import get_entry
+
+        entry = get_entry(entry_id)
+        assert entry and entry.get("skill") == "my-skill", (
+            f"rollback handle {entry_id!r} does not resolve to a ledger entry"
+        )
+        assert entry.get("before"), "ledger entry has no package snapshot to roll back to"
+
+    def test_archived_delete_does_not_promise_hard_delete_rollback(self, tmp_path):
+        """Background-review deletes archive (already recoverable via curator
+        restore); they must not advertise the hard-delete ledger rollback."""
+        from tools.skill_manager_tool import _record_success
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            before = [{"path": "SKILL.md", "sha256": "a" * 64}]
+            archived = {"success": True, "_archived": True,
+                        "message": "Skill 'my-skill' archived (test)."}
+            _record_success("delete", "my-skill", archived, file_path=None,
+                            absorbed_into=None, task_id=None, session_id=None,
+                            ledger_before=before)
+        assert "_restore" not in archived, (
+            "an archived delete must not promise the hard-delete rollback"
+        )
+        assert "rollback" not in archived["message"]
+
+
     def test_delete_with_absorbed_into_equals_self_rejected(self, tmp_path):
         with _skill_dir(tmp_path):
             _create_skill("narrow", VALID_SKILL_CONTENT)

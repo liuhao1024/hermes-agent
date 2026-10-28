@@ -754,9 +754,25 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
         _evidence = ({"absorbed_into": absorbed_into, "archived": bool(result.get("_archived"))}
                      if action == "delete" else {})
         _evidence.update({k: v for k, v in (("session_id", session_id), ("file_path", file_path)) if v})
-        _ledger.record_mutation(
+        _entry_id = _ledger.record_mutation(
             action, name, before=ledger_before if ledger_before is not None else [],
             after_root=_post["path"] if _post else None, evidence=_evidence)
+        # A foreground hard delete is the one destructive path whose undo exists yet is
+        # invisible at the point of use: the response read "deleted.", a model that meant
+        # to edit assumed no copy survived and rebuilt by hand while the ledger held a
+        # byte-exact package snapshot one row away (#146048). Hand back the restore handle
+        # so the natural next move is a rollback, not a reconstruction. Only promised when
+        # the pre-capture actually produced files — an empty snapshot cannot restore.
+        hard_delete = action == "delete" and not result.get("_archived")
+        if hard_delete and _entry_id and ledger_before:
+            result["message"] += (
+                " Full package snapshotted to the skill ledger — undo with "
+                f"`hermes curator rollback {_entry_id}`."
+            )
+            result["_restore"] = {
+                "ledger_entry": _entry_id,
+                "files": len(ledger_before),
+            }
     with suppress(Exception):
         from agent.prompt_builder import clear_skills_system_prompt_cache
         clear_skills_system_prompt_cache(clear_snapshot=True)
