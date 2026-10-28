@@ -253,7 +253,7 @@ def extract_schema(workflow: dict) -> dict:
         "output_node_count": len(output_nodes),
         "model_dep_count": len(model_deps),
         "embedding_dep_count": len(embedding_deps),
-        "has_negative_prompt": "negative_prompt" in parameters,
+        "has_negative_prompt": "negative_prompt" in parameters or any(p.startswith("negative_prompt_") for p in parameters),
         "has_seed": "seed" in parameters or any(p.startswith("seed_") for p in parameters),
         "is_video_workflow": any(
             workflow.get(n, {}).get("class_type", "") in {

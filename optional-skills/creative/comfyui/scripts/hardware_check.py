@@ -363,7 +363,7 @@ def classify(gpu: dict | None, ram_gb: float, free_disk_gb: float, *, wsl: bool,
     if vram < GREAT_VRAM_GB:
         notes.append(f"{name} ({vram} GB VRAM) — SDXL comfortable, Flux possible with optimizations.")
         return "ok", gpu["vendor"], notes
-    notes.append(f"{name} ({vram} GB VRAM) — can run everything including Flux/video.")
+    notes.append(f"{name} ({vram} GB VRAM) — hardware heuristic only; verify the exact checkpoint, precision, dimensions, sequence length and memory concurrency for the intended workload.")
     return "ok", gpu["vendor"], notes
 
 

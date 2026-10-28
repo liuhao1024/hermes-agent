@@ -356,7 +356,7 @@ def check_deps(
                 ),
             })
 
-    if emb_err and emb_installed is None:
+    if seen_emb and emb_err and emb_installed is None:
         folder_errors.setdefault("embeddings", emb_err)
 
     is_ready = (
@@ -364,6 +364,7 @@ def check_deps(
         and not missing_nodes
         and not missing_models
         and not missing_embeddings
+        and not folder_errors
     )
 
     return {
