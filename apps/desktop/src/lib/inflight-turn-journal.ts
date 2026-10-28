@@ -540,7 +540,17 @@ function userMessagesMatch(left: ChatMessage, right: ChatMessage): boolean {
     right.role === 'user' &&
     (left.rowId === undefined || right.rowId === undefined || left.rowId === right.rowId) &&
     normalizedText(chatMessageText(left)) === normalizedText(chatMessageText(right)) &&
-    attachmentSignature(left) === attachmentSignature(right)
+    (attachmentSignature(left) === attachmentSignature(right) ||
+      // Inside the crash window the two copies of one prompt can disagree on
+      // refs alone: the persisted row only carries lifted refs when the
+      // backend's persist-time rewrite saw the attachment files, and an
+      // optimistic/projected row may carry refs the durable form never
+      // gained. Refs missing on either side are not counter-evidence once the
+      // texts are equal — but when BOTH rows carry refs they must agree, so a
+      // genuine repeat under the same caption with different attachments
+      // stays two turns (#145965).
+      !left.attachmentRefs?.length ||
+      !right.attachmentRefs?.length)
   )
 }
 

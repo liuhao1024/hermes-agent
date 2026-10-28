@@ -769,6 +769,85 @@ describe('mergeInFlightMessages', () => {
     expect(result.applied).toBe(false)
     expect(result.caughtUp).toBe(false)
   })
+
+  // #145965: a backend crash mid-turn rehydrates against the persisted row,
+  // and the two copies of the prompt can disagree on attachment refs alone —
+  // the durable row only carries lifted refs when the persist-time rewrite
+  // saw the files, while the optimistic row keeps whatever the composer had.
+  // Refs-only disagreement used to defeat the anchor, so the whole tail (the
+  // user prompt included) was appended below the persisted row: the prompt
+  // painted twice and never recovered.
+  it('anchors a crash journal whose prompt matches the persisted row except for refs', () => {
+    const tail: ChatMessage[] = [
+      {
+        id: 'user-1727',
+        role: 'user',
+        parts: [{ type: 'text', text: 'analyze this image' }],
+        attachmentRefs: ['@image:/tmp/cat.png']
+      },
+      assistantWithTool('assistant-stream-1', '', { pending: true })
+    ]
+
+    const base: ChatMessage[] = [
+      user('u0', 'earlier'),
+      { id: 'db-user', role: 'user', rowId: 26382, parts: [{ type: 'text', text: 'analyze this image' }] }
+    ]
+
+    const result = mergeInFlightMessages(base, tail)
+
+    expect(result.applied).toBe(true)
+    expect(result.messages.map(message => message.id)).toEqual(['u0', 'db-user', 'assistant-stream-1'])
+  })
+
+  it('anchors in the mirror direction: persisted refs the optimistic row never had', () => {
+    const tail = [user('user-1727', 'analyze this image'), assistantWithTool('assistant-stream-1', '', { pending: true })]
+
+    const base: ChatMessage[] = [
+      user('u0', 'earlier'),
+      {
+        id: 'db-user',
+        role: 'user',
+        rowId: 26382,
+        parts: [{ type: 'text', text: 'analyze this image' }],
+        attachmentRefs: ['@image:/tmp/cat.png']
+      }
+    ]
+
+    const result = mergeInFlightMessages(base, tail)
+
+    expect(result.applied).toBe(true)
+    expect(result.messages.map(message => message.id)).toEqual(['u0', 'db-user', 'assistant-stream-1'])
+  })
+
+  it('keeps two turns distinct when both rows carry different attachments under one caption', () => {
+    const tail: ChatMessage[] = [
+      {
+        id: 'user-1728',
+        role: 'user',
+        parts: [{ type: 'text', text: 'analyze this image' }],
+        attachmentRefs: ['@image:/tmp/dog.png']
+      },
+      assistantWithTool('assistant-stream-2', '', { pending: true })
+    ]
+
+    const base: ChatMessage[] = [
+      user('u0', 'earlier'),
+      {
+        id: 'db-user',
+        role: 'user',
+        rowId: 26382,
+        parts: [{ type: 'text', text: 'analyze this image' }],
+        attachmentRefs: ['@image:/tmp/cat.png']
+      }
+    ]
+
+    const result = mergeInFlightMessages(base, tail)
+
+    // Both rows carry refs and they disagree: a genuine repeat with a
+    // different attachment must stay its own turn, so the tail appends whole.
+    expect(result.applied).toBe(true)
+    expect(result.messages.map(message => message.id)).toEqual(['u0', 'db-user', 'user-1728', 'assistant-stream-2'])
+  })
 })
 
 describe('mid-turn redirect corrections', () => {
