@@ -226,11 +226,11 @@ def fx_scene_name(r, f, t, S) -> canvas:
     """
 ```
 
-**Local time convention:** Scene functions receive `t` starting at 0.0 for the first frame of the scene, regardless of where the scene appears in the timeline. The render loop subtracts the scene's start time before calling the function:
+**Local time convention:** Scene functions receive `t` starting at 0.0 for the first frame of the scene, regardless of where the scene appears in the timeline. The render loop subtracts the scene's first frame (its start time quantized to the frame grid, `frame_start = int(start * FPS)`) before calling the function; features and shaders keep global time `fi / FPS`:
 
 ```python
 # In render_clip:
-t_local = fi / FPS - scene_start
+t_local = (fi - seg["frame_start"]) / FPS
 canvas = fx_fn(r, feat, t_local, S)
 ```
 
@@ -501,11 +501,12 @@ def render_clip(seg, features, clip_path):
                             stdout=subprocess.DEVNULL, stderr=stderr_fh)
 
     for fi in range(seg["frame_start"], seg["frame_end"]):
-        t = fi / FPS
+        t = fi / FPS                               # global: features, shaders
+        t_local = (fi - seg["frame_start"]) / FPS  # scene-local: 0.0 on first frame
         feat = {k: float(features[k][fi]) for k in features}
 
         # 1. Scene renders canvas
-        canvas = fx_fn(r, feat, t, S)
+        canvas = fx_fn(r, feat, t_local, S)
 
         # 2. Tonemap normalizes brightness
         canvas = tonemap(canvas, gamma=seg.get("gamma", 0.75))
@@ -570,10 +571,12 @@ if args.test_frame >= 0:
     fi = min(int(args.test_frame * FPS), N_FRAMES - 1)
     t = fi / FPS
     feat = {k: float(features[k][fi]) for k in features}
-    scene = next(sc for sc in reversed(SCENES) if t >= sc["start"])
+    # Same frame-quantized boundaries as segments: frame_start = int(start * FPS)
+    scene = next(sc for sc in reversed(SCENES) if fi >= int(sc["start"] * FPS))
+    t_local = (fi - int(scene["start"] * FPS)) / FPS
     r = Renderer()
     r.set_grid(scene["grid"])
-    canvas = scene["fx"](r, feat, t, r.S)
+    canvas = scene["fx"](r, feat, t_local, r.S)
     canvas = tonemap(canvas, gamma=scene.get("gamma", 0.75))
     chain = ShaderChain()
     for sn, kw in scene.get("shaders", []):
