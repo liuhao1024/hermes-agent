@@ -1468,7 +1468,9 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
             0, _parse_config_int(cfg.get("proactive_prune_min_reclaim_tokens", 4096), 4096)
         ),
         protect_first=protect_first,
-        abort_on_summary_failure=_cfg_flag(cfg, "abort_on_summary_failure", False),
+        # default=True MUST match DEFAULT_CONFIG (a mismatched fallback here would silently
+        # re-open the dropped-middle hole the default closes, #146088).
+        abort_on_summary_failure=_cfg_flag(cfg, "abort_on_summary_failure", True),
         # Per-model threshold overrides: keys substring-matched against the model name
         # (longest match wins); {} = global threshold for all models.
         model_thresholds={

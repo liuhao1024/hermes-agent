@@ -644,10 +644,12 @@ DEFAULT_CONFIG = {
         # Non-system head messages always kept verbatim, in ADDITION to the (always protected)
         # system prompt. 0 = pin nothing but system prompt + summary + tail.
         "protect_first_n": 3,
-        # When True, auto-compression whose summary fails (aux error / non-JSON / timeout) aborts
-        # instead of dropping the middle with a "summary unavailable" placeholder; the session
-        # freezes at its size until /compress (bypasses the cooldown) or /new.
-        "abort_on_summary_failure": False,
+        # When True (default), auto-compression whose summary fails (aux error / non-JSON /
+        # timeout) aborts instead of silently dropping the middle with a "summary unavailable"
+        # placeholder: the session freezes at its size until /compress (bypasses the cooldown)
+        # or /new, and the gateway surfaces the failure on-channel instead of only in agent.log.
+        # False restores the silent deterministic-fallback degrade (#146088).
+        "abort_on_summary_failure": True,
         # (Historical key name.) When True, gpt-5.4/5.5/5.6 and gpt-6 Astra (any slug containing
         # "astra" without "900k") on the ChatGPT Codex OAuth route raise their compaction trigger to
         # 85%: Codex hard-caps them at a 272K window, so the global 50% would compact at ~136K. False = global `threshold`. Only that route; the same models via

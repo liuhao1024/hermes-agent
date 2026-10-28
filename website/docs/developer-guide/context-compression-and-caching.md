@@ -187,8 +187,9 @@ attempt anyway:
 - Manual `/compress` (`force=True`) — clears the cooldown and retries.
 - The same-turn `fallback_chain` retry after a stalled primary route — the
   cancelled primary's own stall cooldown must not suppress it (`bypass_cooldown`).
-  If that pinned route's summary call fails, compress() still commits its
-  deterministic fallback summary (default `abort_on_summary_failure: false`);
+  If that pinned route's summary call fails, compress() aborts and keeps the
+  transcript unchanged (default `abort_on_summary_failure: true`); with the
+  key set to `false` it still commits its deterministic fallback summary and
   the log then says "committed a deterministic fallback summary", not
   "recovered".
 - **Repeated stall → deterministic fallback.** A first stall keeps the
