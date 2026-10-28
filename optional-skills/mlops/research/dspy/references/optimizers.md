@@ -390,24 +390,44 @@ print(f"Average score: {sum(scores) / len(scores):.2f}")
 
 ### Comparing Optimizers
 
+This comparison and the Optimization Workflow below target **DSPy 3.4.1**
+(release tag `3.4.1`, commit `099982b3c3eec9fc4ec4796d49915af42367a253`); the
+interfaces were checked against that source, not by running it. They are independent examples,
+not a claim that the other, legacy snippets on this page have been migrated.
+Prerequisites: an already configured LM, a compatible `module`, a declared
+`metric`, and nonempty, disjoint `trainset`, `valset`, and untouched `testset`.
+MIPROv2 also requires DSPy's optional `optuna` dependency. Running optimization
+can call the configured LM; this guide does not grant provider or cost approval.
+
+Use development scores for comparisons that may guide a choice. This block only
+prints scores; it does not itself select a winner. The validation set is reused
+for tuning and comparison, so its scores are not unbiased held-out estimates.
+`Evaluate(...).score` is a percentage (0–100 for metrics in [0, 1]).
+
 ```python
+from dspy.evaluate import Evaluate
+from dspy.teleprompt import BootstrapFewShot, MIPROv2
+
+evaluator = Evaluate(devset=valset, metric=metric)
 results = {}
 
 for opt_name, optimizer in [
     ("baseline", None),
     ("fewshot", BootstrapFewShot(metric=metric)),
-    ("mipro", MIPRO(metric=metric)),
+    ("mipro_v2", MIPROv2(metric=metric, auto="light")),
 ]:
     if optimizer is None:
         module_opt = module
+    elif opt_name == "mipro_v2":
+        module_opt = optimizer.compile(module, trainset=trainset, valset=valset)
     else:
+        # BootstrapFewShot.compile does not accept valset in this version.
         module_opt = optimizer.compile(module, trainset=trainset)
 
-    score = evaluator(module_opt, devset=testset)
+    score = evaluator(module_opt, devset=valset).score
     results[opt_name] = score
 
-print(results)
-# {'baseline': 0.65, 'fewshot': 0.78, 'mipro': 0.85}
+print(results)  # Development percentages from your run, not benchmark claims.
 ```
 
 ## Advanced Patterns
@@ -466,42 +486,71 @@ ensemble = EnsembleModule([opt1, opt2, opt3])
 
 ## Optimization Workflow
 
+This is a separate example for the **same pinned DSPy source ref** and uses
+ the prerequisites declared in
+Comparing Optimizers. Use only train/dev data to tune prompts, metrics and
+preprocessing. Here the baseline is a reference for reporting improvement;
+the predeclared selection compares only the two optimized candidates, keeps
+few-shot on a tie, and does not promise either beats the baseline. If you want
+the baseline to be eligible, declare that selection rule before seeing test data.
+Development-score differences below are **percentage points**, not relative gains.
+
 ### 1. Start with Baseline
 
 ```python
-# No optimization
+import dspy
+from dspy.evaluate import Evaluate
+from dspy.teleprompt import BootstrapFewShot, MIPROv2
+
+evaluator = Evaluate(devset=valset, metric=metric)
 baseline = dspy.ChainOfThought("question -> answer")
-baseline_score = evaluator(baseline, devset=testset)
-print(f"Baseline: {baseline_score}")
+baseline_score = evaluator(baseline, devset=valset).score
+print(f"Baseline (dev): {baseline_score:.2f}")
 ```
 
 ### 2. Try BootstrapFewShot
 
 ```python
-# Quick optimization
 fewshot = BootstrapFewShot(metric=metric, max_bootstrapped_demos=3)
 optimized = fewshot.compile(baseline, trainset=trainset)
-fewshot_score = evaluator(optimized, devset=testset)
-print(f"Few-shot: {fewshot_score} (+{fewshot_score - baseline_score:.2f})")
+fewshot_score = evaluator(optimized, devset=valset).score
+print(f"Few-shot (dev): {fewshot_score:.2f} ({fewshot_score - baseline_score:+.2f} pp)")
 ```
 
-### 3. If More Data Available, Try MIPRO
+### 3. Try MIPROv2
 
 ```python
-# State-of-the-art optimization
-mipro = MIPRO(metric=metric, num_candidates=10)
+# auto="light" sets the search budget; do not also set num_candidates/num_trials.
+mipro = MIPROv2(metric=metric, auto="light")
 optimized_mipro = mipro.compile(baseline, trainset=trainset, valset=valset)
-mipro_score = evaluator(optimized_mipro, devset=testset)
-print(f"MIPRO: {mipro_score} (+{mipro_score - baseline_score:.2f})")
+mipro_score = evaluator(optimized_mipro, devset=valset).score
+print(f"MIPROv2 (dev): {mipro_score:.2f} ({mipro_score - baseline_score:+.2f} pp)")
 ```
 
 ### 4. Save Best Model
 
 ```python
+from pathlib import Path
+
 if mipro_score > fewshot_score:
-    optimized_mipro.save("models/best_model.json")
+    best = optimized_mipro
 else:
-    optimized.save("models/best_model.json")
+    best = optimized
+Path("models").mkdir(exist_ok=True)
+best.save("models/best_model.json")
+```
+
+### 5. Report Once on Untouched Test Data
+
+Freeze the choice above, preprocessing and metric before this step. Evaluate
+only that chosen program once on the untouched test set and report the result
+separately. Do not feed this result back into model selection or retuning; if you
+do, it becomes development feedback and a new independent test set is needed.
+This example demonstrates a protocol, not measured performance or production admission.
+
+```python
+test_score = evaluator(best, devset=testset).score
+print(f"Frozen candidate (test): {test_score:.2f}")
 ```
 
 ## Common Pitfalls
@@ -509,11 +558,13 @@ else:
 ### 1. Overfitting to Training Data
 
 ```python
-# ❌ Bad: Too many demos
-optimizer = BootstrapFewShot(max_bootstrapped_demos=20)  # Overfits!
+# A larger bootstrapped-demo cap to compare on development data; not proof of overfitting.
+optimizer = BootstrapFewShot(max_bootstrapped_demos=20)
 
-# ✅ Good: Moderate demos
-optimizer = BootstrapFewShot(max_bootstrapped_demos=3-5)
+# An integer starting point; try values in the range 3 to 5 on development data.
+# This caps bootstrapped demos, not all demos; max_labeled_demos is separate.
+# Neither this value nor a larger cap guarantees quality or prevents overfitting.
+optimizer = BootstrapFewShot(max_bootstrapped_demos=3)
 ```
 
 ### 2. Metric Doesn't Match Task
@@ -525,7 +576,8 @@ def bad_metric(example, pred, trace=None):
 
 # ✅ Good: Graded metric
 def good_metric(example, pred, trace=None):
-    return f1_score(example.answer, pred.answer)  # Allows partial credit
+    # Uses the object-based helper above; it assumes nonempty gold answers.
+    return f1_score(example, pred, trace)
 ```
 
 ### 3. Insufficient Training Data
