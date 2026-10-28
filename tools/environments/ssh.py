@@ -61,12 +61,13 @@ def _drain_client_stderr(proc: subprocess.Popen) -> None:
         try:
             text = stream.read() or ""
         except Exception:
-            pass
+            logger.debug("ssh client stderr drain failed", exc_info=True)
+            text = ""
         finally:
             try:
                 stream.close()
             except Exception:
-                pass
+                logger.debug("ssh client stderr close failed", exc_info=True)
         text = text.strip()
         if text:
             proc._hermes_client_stderr = text
