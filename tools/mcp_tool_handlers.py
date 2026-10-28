@@ -565,6 +565,29 @@ def _error_result_text(result) -> str:
     return "".join(str(t) for t in texts if t)
 
 
+def _mcp_error_result_message(result, server_name: str) -> str:
+    """Model-facing text of an ``isError`` result. A server whose tool raised an exception with an
+    empty ``str()`` (a bare ``TimeoutError``, a swallowed cancellation) reaches the model as
+    "Error executing tool <name>: " — the SDK's prefix survives while the detail is blank, so a
+    slow tool, a dead one and bad arguments are indistinguishable (#145923). Name the blank where
+    the detail belongs and log it: the moment that matters was previously unobservable at any
+    log level."""
+    text = _sanitize_error(_truncate_mcp_text_result(_error_result_text(result))).strip()
+    if not text:
+        return "MCP tool returned an error with no diagnostic text"
+    if text.endswith(":"):
+        logger.warning(
+            "MCP %s: error result carries an empty exception detail: %r",
+            server_name,
+            text,
+        )
+        return (
+            f"{text} (the server's exception message was empty — "
+            f"check the MCP server's own logs for the actual failure)"
+        )
+    return text
+
+
 def _render_content_blocks(result, server_name: str) -> tuple[str, int, list[str]]:
     """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are
     materialized rather than silently dropped; unsupported blocks become an inline drop notice
@@ -661,7 +684,7 @@ def _render_call_tool_result(result, server_name: str, image_paths: Optional[lis
     used. ``structuredContent`` fills ``result`` when the blocks rendered effectively empty
     (structuredContent-only servers); ``_meta`` minus reserved keys is always surfaced."""
     if mcp_field(result, "is_error", "isError", False):
-        return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
+        return tool_error(_mcp_error_result_message(result, server_name))
     text_result, usable_parts, cached_images = _render_content_blocks(result, server_name)
     if image_paths is not None:
         image_paths.extend(cached_images)

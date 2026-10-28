@@ -176,11 +176,27 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
                                f"(configured timeout: {float(timeout):.1f}s)")
         try:
             return future.result(timeout=min(0.1, remaining))
+        except concurrent.futures.CancelledError:
+            raise _cancelled_call_error(start_time) from None
         except concurrent.futures.TimeoutError:
             # Aliases builtin TimeoutError, so it also fires for the coroutine's own timeout: a done
             # future must yield its outcome.
             if future.done():
+                if (
+                    future.cancelled()
+                ):  # landed cancelled inside this poll window's boundary
+                    raise _cancelled_call_error(start_time) from None
                 return future.result()
+
+
+def _cancelled_call_error(start_time: float) -> RuntimeError:
+    """A cancelled MCP-loop future surfaces as ``CancelledError`` — a ``BaseException`` with an
+    empty ``str()`` that ``except Exception`` upstream never names, so the caller sees an error
+    with no text at all (#145923). Spell out the cancellation and its wait instead."""
+    return RuntimeError(
+        f"MCP call was cancelled on the MCP loop before completing "
+        f"(waited {time.monotonic() - start_time:.1f}s)"
+    )
 
 
 def _signal_reconnect(server: Any) -> bool:
