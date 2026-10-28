@@ -38,17 +38,29 @@ INSTALL_LOCK_TIMEOUT_SECONDS = 10.0
 # A lease file younger than this is never a prune candidate: its creator may still sit between
 # ``O_CREAT|O_EXCL`` and ``flock`` (two syscalls; the window is microseconds, the margin generous).
 @contextmanager
-def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS):
+def runtime_lock(
+    project: Path,
+    *,
+    timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS,
+    quiet: bool = False,
+):
     """Hold the per-install dependency lock; yields True when held, False when the wait expired.
 
     Callers decide what a lost race means: readers skip the work the lock guards and carry on
     (``activate_dependencies`` still selects and leases the committed generation), writers that
     cannot be skipped pass ``timeout=None`` — an install the user asked for is theirs to wait on.
+    ``quiet`` drops the expiry warning for callers whose skip is routine (a boot-time sweep that
+    must neither wait nor log).
     """
     lock = install_state_dir(project) / ".install.lock"
     fd = lock_path(lock, timeout=timeout, create_dir=True)
     if fd is None:
-        LOG.warning("dependency lock still held after %ss; continuing without it (%s)", timeout, lock)
+        if not quiet:
+            LOG.warning(
+                "dependency lock still held after %ss; continuing without it (%s)",
+                timeout,
+                lock,
+            )
         yield False
         return
     try:
@@ -179,14 +191,24 @@ def lease_directory(generation: Path) -> Callable[[], None]:
     return release
 
 
-def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> list[Path]:
-    """Remove unselected lease-managed generations after their readers exit."""
+def collect_generations(
+    project: Path,
+    *,
+    min_age_seconds: float = 86400,
+    lock_timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS,
+) -> list[Path]:
+    """Remove unselected lease-managed generations after their readers exit.
+
+    ``lock_timeout=0`` makes the sweep non-blocking: when another process owns the install the
+    sweep is skipped silently, which is what a boot-time caller wants rather than delaying boot.
+    """
     from pm.environments import selected_venv
+
     removed = []
     root = install_state_dir(project)
     if not root.exists():
         return removed
-    with runtime_lock(project) as held:
+    with runtime_lock(project, timeout=lock_timeout, quiet=lock_timeout == 0) as held:
         if not held:
             return removed  # maintenance: another process owns the install, skip rather than queue
         recover_publication(project)

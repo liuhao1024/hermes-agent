@@ -460,6 +460,37 @@ def _require_own_dependencies(project_root: Path) -> None:
         raise NoCommittedEnvironment("no dependency environment is committed for this install")
 
 
+_boot_sweep_done = False
+
+
+def _sweep_orphan_generations_once(project_root: Path) -> None:
+    """Best-effort orphan sweep on boot, at most once per process.
+
+    Every other collector runs behind a dependency sync or a manual `hermes pm gc`; a
+    long-lived multi-profile host that only rotates selections between profiles never
+    syncs, so unselected generations past the retention window piled up forever
+    (#145958). Non-blocking and silent: a held install lock (another process mid-rebuild)
+    skips the sweep instead of delaying this boot, and a sweep failure must never turn
+    a successful activation into a failed launch.
+    """
+    global _boot_sweep_done
+    if _boot_sweep_done:
+        return
+    _boot_sweep_done = True
+    try:
+        from hermes_cli.runtime_state import collect_generations
+
+        removed = collect_generations(project_root, lock_timeout=0.0)
+    except Exception:
+        return
+    if removed:
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "boot sweep collected %d unused dependency generations", len(removed)
+        )
+
+
 def activate_dependencies(project_root: Path) -> None:
     """Select the committed tree at process boot, before third-party imports.
 
@@ -524,6 +555,9 @@ def activate_dependencies(project_root: Path) -> None:
     prefix = [str(path) for path in directories if path.is_dir()]
     if prefix:
         os.environ["PATH"] = os.pathsep.join([*prefix, os.environ.get("PATH", "")])
+    # Activation is complete and the install lock is released: reclaim what earlier boots
+    # left behind (only generations past the retention window with no live lease go).
+    _sweep_orphan_generations_once(project_root)
 
 
 def activation_environment(project_root: Path) -> dict[str, str]:
