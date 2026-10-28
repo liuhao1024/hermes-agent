@@ -56,20 +56,55 @@ def _authorize_control(authority, actor, ref, params, owner=None):
                 from gateway.session_local_migration import require_history_claim
                 require_history_claim(authority, conn, actor, ref.session_id)
                 cold_history = authorize_history(conn, actor, ref.session_id)
+        unmounted = False
         if not cold_history:
             operation = params.get('operation')
             if operation in {'delete', 'archive', 'sidebar'}:
                 # The read gate mounts a cold row first, so the checks below see what it is.
-                authority.authorize(actor, ref, 'session:read')
+                try:
+                    authority.authorize(actor, ref, 'session:read')
+                except RuntimeStoreError as exc:
+                    # A stored row no restore path mounts (an old local conversation before
+                    # its first resume: no policy binding to restore, no messaging lane to
+                    # route it, no api binding — the read gate answers ``not_found``,
+                    # #146242) still takes a metadata-only control: the receipt writes only
+                    # the row's flags and last_read_at, never a live mount. It is authorized
+                    # against the row's stored owner, the rule ``authorize_history`` applies
+                    # to the rows it adopts.
+                    unmounted = (exc.reason == 'not_found' and operation != 'delete'
+                                 and _authorize_unmounted_control(
+                                     authority, actor, ref.session_id))
+                    if not unmounted:
+                        raise
             from gateway.session_history_mount import is_history_mount
             if operation == 'delete':
                 from gateway.session_history_mount import require_history_leaf
                 require_history_leaf(authority, ref.session_id)
-            if not (operation in {'delete', 'archive', 'sidebar'} and is_history_mount(authority.sessions[ref.session_id])):
+            if not unmounted and not (operation in {'delete', 'archive', 'sidebar'}
+                                      and is_history_mount(authority.sessions[ref.session_id])):
                 # Stored history is read-only, but deleting it retires its own lineage only, and
                 # archiving or pinning it flags that lineage's rows only.
                 authority.authorize(actor, ref, 'session:control')
     return cold_history
+
+
+def _authorize_unmounted_control(authority, actor, session_id):
+    """Whether a metadata-only control (archive, sidebar) may land on a stored row no restore path
+    mounts: the row exists, still unmounted (a refused reader left a mounted row to its own
+    refusal), and its owner stamp names the actor or the row carries no stamp. The read gate has
+    already checked the actor's profile and capabilities; the row-level rule is exactly the one
+    ``authorize_history`` applies to the unrouted rows it adopts."""
+    if session_id in authority.sessions:
+        return False
+    with authority.db._read_ctx() as conn:
+        row = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
+    if row is None:
+        return False
+    from gateway.owner_identity import same_owner
+    from hermes_state_mutation_binding import _owner_user
+    if _owner_user(row) and not same_owner(row['user_id'], actor.subject):
+        raise RuntimeStoreError('permission_denied')
+    return True
 
 
 def _owner_ref(authority, ref, params):

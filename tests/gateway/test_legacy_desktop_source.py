@@ -194,3 +194,57 @@ async def test_renaming_ones_own_branch_leaves_another_logins_parent_title_alone
             await mutate_session(authority, alice, SessionRef('p', 'alice-branch'), params)
         root = db.get_session('root')
         assert (root['title'], root['runtime_revision']) == ('Bob title', before)
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_control_lands_on_a_row_no_restore_path_mounts(tmp_path):
+    """#146242: a stored local row with a chat_id but no policy binding, no routing entry and no
+    api binding cannot be remounted by the read gate, so its unread/archive control answered 404
+    ``not_found`` although the mutation snapshot proves the row exists — and the receipt writes
+    only the row's flags and last_read_at, so the store row is authority enough. An old local row
+    a resume could adopt takes a sidebar edit (this module's contract), whatever unmounted it."""
+    from types import SimpleNamespace
+    from gateway.session_authority import SessionAuthority
+    from gateway.session_contract import SessionRef
+    from gateway.session_mutations import mutate_session
+    from hermes_state_runtime import begin_runtime_epoch
+
+    caps = frozenset({'session:read', 'session:control', 'session:create', 'session:operator'})
+    owner = Principal('uid:1', 'p', caps, 'http')
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
+        authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='p', instance_id='owner',
+                                     db=db, epoch=begin_runtime_epoch(db, instance_id='owner'))
+        # A pre-adoption dashboard/TUI row: a chat_id keeps authorize_history's routeless rule
+        # from adopting it, and no restore path can mount it (no policy binding to restore,
+        # no messaging lane to route it, no api binding).
+        db.create_session('cold-tui', source='tui', chat_id='dashboard:abc', user_id='uid:1')
+        revision = db.get_session('cold-tui')['runtime_revision']
+
+        async def control(sid, rid, operation, payload, generation=None):
+            row = db.get_session(sid)
+            params = {'session_id': sid, 'request_id': rid, 'operation': operation, 'payload': payload,
+                      'expected_revision': row['runtime_revision'] if row else 0}
+            if generation is not None:
+                params['expected_generation'] = generation
+            return await mutate_session(authority, owner, SessionRef('p', sid), params)
+
+        result = await control('cold-tui', 'read', 'sidebar', {'unread': False})
+        assert result['operation'] == 'sidebar'
+        row = db.get_session('cold-tui')
+        assert row['last_read_at'] is not None and row['runtime_revision'] == revision + 1
+        assert not authority.sessions  # the control never mounted the row
+
+        await control('cold-tui', 'pin', 'sidebar', {'pinned': True})
+        assert db.get_session('cold-tui')['pinned'] == 1
+
+        # A row whose owner stamp names nobody the actor is stays refused, by name.
+        db.create_session('stamped-stranger', source='tui', chat_id='dashboard:def', user_id='basic:alice')
+        with pytest.raises(RuntimeStoreError, match='permission_denied'):
+            await control('stamped-stranger', 'pin', 'sidebar', {'pinned': True})
+        # A delete still needs a mount its lineage hangs off: not_found, as before.
+        with pytest.raises(RuntimeStoreError, match='not_found'):
+            await control('cold-tui', 'del', 'delete', {},
+                          generation=db.get_session('cold-tui')['runtime_generation'])
+        # An id the store never had is still not_found.
+        with pytest.raises(RuntimeStoreError, match='not_found'):
+            await control('ghost', 'read', 'sidebar', {'unread': False})
