@@ -355,7 +355,12 @@ async function assertRemoteInstallUpdateClear(ssh, hermesHome, hermesPath = '') 
         .split(/\r?\n/)
         .pop() || ''
   } catch (cause) {
-    const error: any = new Error('Could not prove that the remote Hermes install is clear for SSH startup.')
+    const detail = cause instanceof Error ? cause.message : String(cause)
+
+    const error: any = new Error(
+      `Could not prove that the remote Hermes install is clear for SSH startup. Gate probe failed: ${detail}`
+    )
+
     error.kind = 'update-in-progress'
     error.cause = cause
     throw error

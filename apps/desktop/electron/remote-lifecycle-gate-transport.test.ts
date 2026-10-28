@@ -37,3 +37,19 @@ test('POSIX relaunch gate reaches a verdict over a transport that refuses a larg
   assert.ok(!calls[0].command.includes('marker_verdict'), 'the judge must not be inlined in argv')
   assert.ok(calls[0].command.length < 512, `gate command grew to ${calls[0].command.length} bytes`)
 })
+
+test('a gate transport failure surfaces its cause in the thrown update-in-progress verdict (#146148)', async () => {
+  const ssh = {
+    async exec() {
+      throw new Error('kex_exchange_identification: read: Connection reset by peer')
+    }
+  }
+
+  await assert.rejects(
+    assertRemoteInstallUpdateClear(ssh, '/home/alice/.hermes', '~/.local/bin/hermes'),
+    (error: any) =>
+      error.kind === 'update-in-progress' &&
+      error.message.includes('Could not prove that the remote Hermes install is clear for SSH startup.') &&
+      error.message.includes('kex_exchange_identification: read: Connection reset by peer')
+  )
+})
