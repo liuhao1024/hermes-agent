@@ -106,6 +106,53 @@ def test_runtime_health_is_sanitized_and_recovers() -> None:
     assert "malformed" not in serialized
 
 
+def test_stale_unavailable_signal_expires_from_aggregate(monkeypatch) -> None:
+    """#145761: a one-off open failure on a path that is never touched again must not
+    hold the aggregate at "unavailable" forever; its signal expires like the backoff does."""
+    import gateway.session_db_recovery as recovery
+
+    clock = _Clock()
+    cache = RecoverableHandleCache(clock=clock, initial_retry_delay=1)
+    healthy = RecoverableHandleCache(clock=clock, initial_retry_delay=1)
+    writes: list[dict] = []
+    sim_now = 1000.0
+    monkeypatch.setattr(recovery, "_monotonic", lambda: sim_now)
+
+    def quiet_opener():
+        raise OSError("one-off open failure")
+
+    with patch("gateway.status.publish_runtime_status", side_effect=lambda **kw: writes.append(kw)):
+        assert cache.get(Path("quiet/profile/state.db"), quiet_opener) is None
+        assert writes[-1] == {"session_store": {"status": "unavailable"}}
+        assert healthy.get(Path("busy/profile/state.db"), lambda: object()) is not None
+        assert writes[-1] == {"session_store": {"status": "unavailable"}}
+        sim_now += 2 * recovery._MAX_RETRY_DELAY_SECONDS + 1
+        assert healthy.get(Path("other/profile/state.db"), lambda: object()) is not None
+        assert writes[-1] == {"session_store": {"status": "ok"}}
+
+
+def test_live_failure_keeps_aggregate_unavailable(monkeypatch) -> None:
+    """A path that keeps failing keeps its signal fresh on every retried touch."""
+    import gateway.session_db_recovery as recovery
+
+    clock = _Clock()
+    cache = RecoverableHandleCache(clock=clock, initial_retry_delay=1, max_retry_delay=2)
+    path = Path("flaky/profile/state.db")
+    writes: list[dict] = []
+    sim_now = 1000.0
+    monkeypatch.setattr(recovery, "_monotonic", lambda: sim_now)
+
+    def failing_opener():
+        raise OSError("still broken")
+
+    with patch("gateway.status.publish_runtime_status", side_effect=lambda **kw: writes.append(kw)):
+        assert cache.get(path, failing_opener) is None
+        clock.now = 2.0
+        sim_now += 500.0
+        assert cache.get(path, failing_opener) is None
+        assert writes[-1] == {"session_store": {"status": "unavailable"}}
+
+
 def test_session_store_and_runner_reopen_after_failed_construction(monkeypatch, tmp_path) -> None:
     import hermes_state
     import hermes_state_registry

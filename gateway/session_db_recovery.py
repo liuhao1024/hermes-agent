@@ -12,6 +12,12 @@ from typing import Any, Callable
 
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRY_DELAY_SECONDS = 60.0
+# A health signal older than this no longer counts toward the aggregate: a path whose
+# retries stopped (its profile went quiet) must not pin the aggregate degraded forever,
+# while a live failure keeps its timestamp fresh because every retried touch re-publishes.
+_HEALTH_FRESH_WINDOW_SECONDS = 2.0 * _MAX_RETRY_DELAY_SECONDS
+
+_monotonic = time.monotonic
 
 
 @dataclass
@@ -27,15 +33,22 @@ class _HealthSource:
 
 
 _health_lock = threading.Lock()
-_health_states: weakref.WeakKeyDictionary[_HealthSource, dict[Path, str]]
+_health_states: weakref.WeakKeyDictionary[_HealthSource, dict[Path, tuple[str, float]]]
 _health_states = weakref.WeakKeyDictionary()
 
 
 def _publish_health(source: _HealthSource, path: Path, state: str) -> None:
     """Publish one privacy-safe aggregate (no paths, no errors) across all live caches."""
+    now = _monotonic()
     with _health_lock:
-        _health_states.setdefault(source, {})[path] = state
-        all_states = {value for item in _health_states.values() for value in item.values()}
+        _health_states.setdefault(source, {})[path] = (state, now)
+        all_states: set[str] = set()
+        for item in list(_health_states.values()):
+            for entry_path, (entry_state, seen_at) in list(item.items()):
+                if now - seen_at > _HEALTH_FRESH_WINDOW_SECONDS:
+                    del item[entry_path]
+                else:
+                    all_states.add(entry_state)
         aggregate = next((s for s in ("retrying", "unavailable") if s in all_states), "ok")
     try:
         from gateway.status import publish_runtime_status
