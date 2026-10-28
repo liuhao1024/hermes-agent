@@ -43,6 +43,20 @@ python SKILL_DIR/scripts/domain_intel.py bulk example.com github.com --checks ss
 
 `SKILL_DIR` is the directory containing this SKILL.md file. All output is structured JSON.
 
+### Result interpretation
+
+- `bulk` checks only the first 20 input positions per invocation (including duplicates).
+  `total` counts returned results, `requested_total` counts all requested positions,
+  `has_more` reports omitted inputs, and `omitted_domains` lists those inputs in order.
+  It does not automatically schedule another batch; results may complete out of order.
+- `available` reports WHOIS or network-presence signals, not authoritative registration
+  or purchase advice. Failed/inconclusive observations yield `UNKNOWN`; WHOIS no-match
+  still requires a registrar check for availability and price. Existing `signals` fields
+  remain observations, not proof of absence. `confidence` is `uncalibrated` rather than
+  an unsupported statistical confidence. Consumers matching the old verdict strings or
+  `high`/`medium` confidence values must adapt to these signal descriptions.
+
+
 ## Available commands
 
 | Command | What it does | Data source |

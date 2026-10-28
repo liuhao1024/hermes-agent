@@ -312,14 +312,14 @@ def check_available(domain):
     signals["whois_available"] = whois_avail
     signals["whois_note"] = whois_note
 
-    if not dns_exists and whois_avail is True:
-        verdict, conf = "LIKELY AVAILABLE", "high"
-    elif dns_exists or whois_avail is False or ssl_up:
-        verdict, conf = "REGISTERED / IN USE", "high"
-    elif not dns_exists and whois_avail is None:
-        verdict, conf = "POSSIBLY AVAILABLE", "medium"
+    if whois_avail is False:
+        verdict, conf = "WHOIS REGISTERED SIGNAL — verify current registrar status", "uncalibrated"
+    elif dns_exists or ssl_up:
+        verdict, conf = "NETWORK PRESENCE SIGNAL — registration status unverified", "uncalibrated"
+    elif whois_avail is True:
+        verdict, conf = "WHOIS NO-MATCH SIGNAL — availability/price require registrar check", "uncalibrated"
     else:
-        verdict, conf = "UNCERTAIN", "low"
+        verdict, conf = "UNKNOWN — failed or inconclusive observations are not absence", "uncalibrated"
 
     return {"domain": domain, "verdict": verdict, "confidence": conf, "signals": signals}
 
@@ -357,7 +357,9 @@ def bulk_check(domains, checks=None, max_workers=5):
         for f in as_completed(futures):
             results.append(f.result())
 
-    return {"total": len(results), "checks": checks, "results": results}
+    return {"total": len(results), "requested_total": len(domains),
+            "has_more": len(domains) > 20, "omitted_domains": domains[20:],
+            "checks": checks, "results": results}
 
 
 # ─── CLI Entry Point ───────────────────────────────────────────────────────
