@@ -431,7 +431,7 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
 class TestInScriptToolErrors(unittest.TestCase):
     def test_ignored_helper_error_is_reported_for_that_cell_only(self):
         """A script that drops a helper's {"error": ...} return must not read as a clean success."""
-        def _handle(tool_name, tool_args, task_id=None):
+        def _handle(tool_name, tool_args, task_id=None, session_id=None):
             if tool_name == "write_file":
                 return json.dumps({"error": "Refusing to overwrite a.py: never read"})
             return json.dumps({"ok": True})
@@ -448,7 +448,7 @@ class TestPerCellRpcAuthority(unittest.TestCase):
     """Interpreter state persists across cells; RPC authority must not."""
 
     def _recorder(self, seen):
-        def _handle(tool_name, tool_args, task_id=None):
+        def _handle(tool_name, tool_args, task_id=None, session_id=None):
             from tools.thread_context import _callback_api
 
             (get_approval, _set_a), *_rest = _callback_api()
@@ -456,6 +456,7 @@ class TestPerCellRpcAuthority(unittest.TestCase):
                 {
                     "tool": tool_name,
                     "task_id": task_id,
+                    "session_id": session_id,
                     "approval_cb": get_approval(),
                 }
             )
@@ -528,6 +529,38 @@ class TestPerCellRpcAuthority(unittest.TestCase):
         authority.retire()
         result = authority.dispatch("web_search", {"query": "q"})
         self.assertIn("No active execute_code cell", result)
+
+    def test_nested_rpc_call_carries_the_cell_session_id(self):
+        # A tool call dispatched from inside a cell must reach hooks with the same
+        # session_id the outer execute_code call carries (#145854): an empty value
+        # in the payload is indistinguishable from "this call has no session".
+        seen = []
+
+        def _recorder(tool_name, tool_args, task_id=None, session_id=None):
+            seen.append({"tool": tool_name, "task_id": task_id, "session_id": session_id})
+            return json.dumps({"ok": True})
+
+        cell = "import hermes_tools\nhermes_tools.web_search(query='q')\n"
+        with _kernel_config(), patch("model_tools.handle_function_call", new=_recorder):
+            result = _run(cell, session_id="20261028_120913_cc8ebc")
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["session_id"], "20261028_120913_cc8ebc")
+        self.assertEqual(seen[0]["task_id"], "kernel-test")
+
+    def test_default_dispatch_carries_session_id(self):
+        # The remote per-call / remote-kernel dispatch must forward session_id the
+        # same way (#145854) — both routes build their dispatcher here.
+        from tools.code_execution_rpc import _default_dispatch
+        seen = {}
+
+        def _fake(tool_name, tool_args, task_id=None, session_id=None):
+            seen.update(task_id=task_id, session_id=session_id)
+            return "{}"
+
+        with patch("model_tools.handle_function_call", new=_fake):
+            _default_dispatch("task-1", session_id="sess-9")("web_search", {})
+        self.assertEqual(seen, {"task_id": "task-1", "session_id": "sess-9"})
 
     def test_each_cell_installs_a_fresh_authority(self):
         with _kernel_config():
