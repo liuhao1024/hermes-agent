@@ -345,9 +345,39 @@ def review_unstage(cwd: str, file_path: str | None) -> dict:
 def review_revert(cwd: str, file_path: str | None) -> dict:
     """Discard changes back to the committed state (restore tracked, remove untracked)."""
     target = ["--", file_path or "."]
+    if credentials := _credential_untracked(cwd, target):
+        listed = ", ".join(credentials[:5]) + (
+            f", +{len(credentials) - 5} more" if len(credentials) > 5 else ""
+        )
+        raise RuntimeError(
+            f"refusing to discard credential-looking untracked files ({listed}); "
+            "move or delete them explicitly, then retry"
+        )
     _git(cwd, ["checkout", "HEAD", *target])
     _git(cwd, ["clean", "-fd", *target])
     return {"ok": True}
+
+
+# ``review_revert`` removes untracked files with no stash and no confirmation, and Hermes
+# itself puts a git repo in the user's home directory — one stray discard there would
+# permanently delete untracked SSH private keys and similar credentials (#146032). Names
+# matching the denylist fail closed; the clean's own reach (non-ignored untracked files,
+# pathspec-scoped) is mirrored exactly by the ``ls-files`` query.
+_CREDENTIAL_UNTRACKED_RE = re.compile(
+    r"(?:^|/)(?:id_[^/]+|authorized_keys[^/]*|[^/]*\.(?:pem|key))$", re.IGNORECASE
+)
+
+
+def _credential_untracked(cwd: str, target: list[str]) -> list[str]:
+    """Untracked non-ignored files the pending clean would delete whose names look like credentials."""
+    listing = _git_out(
+        cwd, ["ls-files", "--others", "--exclude-standard", "-z", *target]
+    )
+    return [
+        name
+        for name in listing.split("\0")
+        if name and _CREDENTIAL_UNTRACKED_RE.search(name)
+    ]
 
 
 def review_rev_parse(cwd: str, ref: str | None) -> str | None:
