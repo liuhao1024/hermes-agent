@@ -430,3 +430,66 @@ def test_staged_hint_keeps_command_for_chat_gateway_platform(hermes_home, monkey
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
     r = _stage_one_memory_write()
     assert "/memory pending" in r["message"], r["message"]
+
+
+# ---------------------------------------------------------------------------
+# Staging disk failure surfaces to the caller (#145447)
+# ---------------------------------------------------------------------------
+
+def test_stage_write_raises_when_record_cannot_be_written(hermes_home, monkeypatch):
+    """A failed pending-record write must raise, not return a record whose id points nowhere."""
+    from tools import write_approval as wa
+
+    def boom(path, data):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(wa, "atomic_json_write", boom)
+    with pytest.raises(OSError):
+        wa.stage_write("skills", {"action": "create", "name": "probe"},
+                       summary="s", origin="foreground")
+    assert wa.pending_count("skills") == 0
+
+
+def test_memory_staging_failure_reports_error_not_staged(hermes_home, monkeypatch):
+    """Gate on + failed staging → a tool error, never a staged result with a phantom id."""
+    from tools.memory_tool import memory_tool, MemoryStore
+    from tools import write_approval as wa
+
+    _set_approval("memory", True)
+
+    def boom(path, data):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(wa, "atomic_json_write", boom)
+    store = MemoryStore(); store.load_from_disk()
+    r = json.loads(memory_tool("add", "memory", "doomed fact", store=store))
+    assert r["success"] is False
+    assert "staged" not in r
+    assert "nothing was saved" in r["error"]
+    assert wa.pending_count("memory") == 0
+
+
+def test_skill_staging_failure_reports_error_not_staged(hermes_home, monkeypatch):
+    """Same contract for the skill gate: a staging disk failure fails closed to an error."""
+    from tools.skill_manager_tool import _run_write_gate
+    from tools import write_approval as wa
+
+    class _Decision:
+        allow = False
+        blocked = False
+        message = "staged for review"
+
+    def boom(path, data):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(wa, "evaluate_gate", lambda subsystem, **kw: _Decision())
+    monkeypatch.setattr(wa, "atomic_json_write", boom)
+
+    def _staging(wa_mod):
+        return {"action": "create", "name": "probe"}, "create 'probe'"
+
+    r = json.loads(_run_write_gate(_staging))
+    assert r["success"] is False
+    assert "staged" not in r
+    assert "nothing was saved" in r["error"]
+    assert wa.pending_count("skills") == 0
