@@ -429,6 +429,27 @@ def test_two_profiles_interleaving_tool_calls_and_hooks_stay_in_their_own_stores
     assert len(events) == sum(1 for e in events if e[1] in {str(alpha_home), str(beta_home)})
 
 
+def test_shared_instance_is_refused_for_a_second_profile_without_multiplexing(homes, caplog):
+    # One instance, one profile, whatever the multiplex flag says (#146293): a host that builds
+    # agents for two profile homes in one process without the gateway multiplexer (WebUI, embedders)
+    # must not have the second build's initialize() rebind an instance the first manager keeps
+    # calling into — that silently moves the first profile's reads and writes to the second store.
+    from agent.secret_scope import is_multiplex_active
+
+    alpha_home, beta_home = homes
+    assert not is_multiplex_active()
+    shared = _InstanceScopedProvider()
+    alpha = _manager(alpha_home, shared)
+    beta = _manager(beta_home, shared)
+    assert shared._home == str(alpha_home)
+    assert alpha.providers == [shared] and beta.providers == []
+    with _Scope(alpha_home):
+        assert json.loads(alpha.handle_tool_call(_HOOK_TOOL, {})) == {"ok": True}
+    assert [e[1] for e in _InstanceScopedProvider.events] == [str(alpha_home)]
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.name == "agent.memory_caller_scope")
+    assert "memory_provider_instance_shared" in logged and str(beta_home) in logged, logged
+
+
 def test_one_provider_instance_is_never_served_to_a_second_profile(homes, multiplexed, caplog):
     # A plugin that hands every agent the SAME instance keeps one binding for the whole process.
     # It stays with the profile that initialized it; another profile's manager refuses it.

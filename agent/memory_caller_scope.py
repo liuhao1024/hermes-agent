@@ -109,9 +109,11 @@ def _forget(pid: int, ref: weakref.ref) -> None:
 
 
 def claim_instance(provider: Any, home: Any) -> bool:
-    """Record that ``provider`` (the instance) is bound to ``home``. False on a multiplexed process
-    when another profile already bound this same instance (initializing it again would rebind the
-    other profile's store), or when the instance can't be tracked at all (no weak reference)."""
+    """Record that ``provider`` (the instance) is bound to ``home``. False when another profile
+    already bound this same instance (initializing it again would rebind the other profile's
+    store) — the rule holds with multiplexing off too (#146293): a process that names a second
+    home serves two profiles, so the first owner keeps its instance. Also False on a multiplexed
+    process when the instance can't be tracked at all (no weak reference)."""
     from agent.secret_scope import is_multiplex_active
     key = _home_key(home) or str(home)
     multiplexed = is_multiplex_active()
@@ -119,7 +121,7 @@ def claim_instance(provider: Any, home: Any) -> bool:
     with _claims_lock:
         entry = _claims.get(pid)
         owner = entry[1] if entry is not None and entry[0]() is provider else None
-        if owner is not None and owner != key and multiplexed:
+        if owner is not None and owner != key:
             logger.warning("Memory provider '%s' refused for profile home %r (%s): this same provider instance "
                            "is already bound to %r; a provider must give every agent its own instance",
                            getattr(provider, "name", "?"), str(home), SHARED_INSTANCE_REFUSAL, owner)
