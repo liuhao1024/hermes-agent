@@ -36,6 +36,14 @@ _SHARED_TRANSPORTS_MAX = 32
 # owning client's in-flight connections on a shared pool.
 HERMES_TRANSPORT_OWNER_EXT = "hermes_transport_owner"
 
+# Idle keepalive connections are closed after this many seconds: httpx's own library default.
+# The previous 20s window outlived short TCP idle timeouts (captive-portal NAT reaps flows after
+# ~8s, #146244), so the first request after an idle gap wrote into a dead socket (BrokenPipe /
+# a 60s wait for the first stream chunk). 5s still reaps well ahead of the reverse-proxy 30-60s
+# idle timeouts it must beat; platform adapters run an even tighter 2s
+# (gateway/platforms/_http_client_limits.py).
+KEEPALIVE_EXPIRY_S = 5.0
+
 
 class _HappyEyeballsSyncBackend:
     """httpcore sync backend with concurrent IPv6/IPv4 connection fallback."""
@@ -272,8 +280,9 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
 
     Explicit no-proxy mounts disable httpx's ``trust_env`` path so macOS system
     proxies (which omit the ExceptionsList) are never applied. ``keepalive_expiry``
-    reaps idle connections before reverse proxies' 30-60 s timeouts (a custom
-    socket_options transport broke streaming and stripped TCP_NODELAY). ``verify``
+    reaps idle connections before reverse proxies' 30-60 s timeouts and before
+    shorter NAT idle timeouts kill the flow outright (#146244); a custom
+    socket_options transport broke streaming and stripped TCP_NODELAY. ``verify``
     goes on the client AND the mounts, since a mounted transport owns its SSL context.
 
     Every call returns a NEW ``httpx.Client`` (per-client close semantics), but sync clients
@@ -288,7 +297,11 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
     try:
         import httpx
         proxy = _get_proxy_for_base_url(base_url)
-        limits = httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=20.0)
+        limits = httpx.Limits(
+            max_keepalive_connections=20,
+            max_connections=100,
+            keepalive_expiry=KEEPALIVE_EXPIRY_S,
+        )
         timeout = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=10.0)  # read=None for SSE streaming
         transport_cls = httpx.AsyncHTTPTransport if async_mode else httpx.HTTPTransport
         client_cls = httpx.AsyncClient if async_mode else httpx.Client
@@ -304,7 +317,9 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
             # fan-out of concurrently streaming children. (Client-level ``limits`` never reach
             # mounted transports — they used to run on httpx defaults, keepalive_expiry=5s.)
             direct_limits = limits if async_mode else httpx.Limits(
-                max_keepalive_connections=50, max_connections=1000, keepalive_expiry=20.0,
+                max_keepalive_connections=50,
+                max_connections=1000,
+                keepalive_expiry=KEEPALIVE_EXPIRY_S,
             )
 
             def _build_direct():
