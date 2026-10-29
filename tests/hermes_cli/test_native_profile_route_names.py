@@ -80,3 +80,20 @@ def test_launch_home_guard_compares_home_keys_not_raw_paths(root, tmp_path):
         native_http._check_registry_scope(_request('DELETE', '/api/profiles/beta'),
                                           str(root / 'profiles' / 'beta'), str(link))
     assert Path(link).resolve() == root / 'profiles' / 'beta'
+
+def _json_request(method, path, body):
+    async def json():
+        return body
+    return SimpleNamespace(method=method, url=SimpleNamespace(path=path), query_params=QueryParams(),
+                           headers=Headers({'content-type': 'application/json'}), json=json)
+
+
+def test_kanban_reassign_body_profile_is_a_handoff_target_not_a_selector(root):
+    """#146237: ReassignBody.profile named the assignee, so the own-profile check
+    403'd every cross-profile reassignment from Desktop. The reassign route reads
+    the value as a handoff target; other routes keep the selector reading."""
+    request = _json_request('POST', '/api/plugins/kanban/tasks/t_1/reassign', {'profile': 'beta'})
+    asyncio.run(native_http._check_profile_scope(request, str(root)))  # no raise
+    request = _json_request('POST', '/api/plugins/kanban/tasks/t_1/comments', {'profile': 'beta'})
+    with pytest.raises(PermissionError):
+        asyncio.run(native_http._check_profile_scope(request, str(root)))

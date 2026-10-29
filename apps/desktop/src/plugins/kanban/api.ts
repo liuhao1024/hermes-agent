@@ -459,8 +459,8 @@ export const bulkTasks = (ids: string[], patch: Record<string, unknown>) =>
 export const addComment = (id: string, body: string) =>
   call(withBoard(`/tasks/${id}/comments`), { method: 'POST', body: { author: 'desktop', body } })
 
-export const reassignTask = (id: string, profile: string) =>
-  nudged(call(withBoard(`/tasks/${id}/reassign`), { method: 'POST', body: { profile, reclaim_first: true } }))
+export const reassignTask = (id: string, assignee: string) =>
+  nudged(call(withBoard(`/tasks/${id}/reassign`), { method: 'POST', body: { assignee, reclaim_first: true } }))
 
 export const reclaimTask = (id: string) => nudged(call(withBoard(`/tasks/${id}/reclaim`), { method: 'POST', body: {} }))
 

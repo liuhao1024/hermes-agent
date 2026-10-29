@@ -729,6 +729,41 @@ def test_bulk_archive(client):
     assert a["id"] not in ids
     assert b["id"] not in ids
 
+def test_reassign_accepts_assignee_key(client):
+    """The reassign endpoint takes the handoff target as ``assignee``, like the
+    create/update/bulk bodies (#146237)."""
+    a = client.post("/api/plugins/kanban/tasks",
+                    json={"title": "a", "assignee": "old"}).json()["task"]
+    r = client.post(f"/api/plugins/kanban/tasks/{a['id']}/reassign",
+                    json={"assignee": "dev", "reclaim_first": True})
+    assert r.status_code == 200
+    assert r.json()["assignee"] == "dev"
+    t = client.get(f"/api/plugins/kanban/tasks/{a['id']}").json()["task"]
+    assert t["assignee"] == "dev"
+
+
+def test_reassign_maps_legacy_profile_key(client):
+    """Desktop clients before #146237 sent the handoff target as body.profile;
+    an upgraded server must map it instead of silently unassigning."""
+    a = client.post("/api/plugins/kanban/tasks",
+                    json={"title": "a", "assignee": "old"}).json()["task"]
+    r = client.post(f"/api/plugins/kanban/tasks/{a['id']}/reassign",
+                    json={"profile": "dev"})
+    assert r.status_code == 200
+    t = client.get(f"/api/plugins/kanban/tasks/{a['id']}").json()["task"]
+    assert t["assignee"] == "dev"
+
+
+def test_reassign_unassign_via_empty_string(client):
+    a = client.post("/api/plugins/kanban/tasks",
+                    json={"title": "a", "assignee": "old"}).json()["task"]
+    r = client.post(f"/api/plugins/kanban/tasks/{a['id']}/reassign",
+                    json={"assignee": ""})
+    assert r.status_code == 200
+    t = client.get(f"/api/plugins/kanban/tasks/{a['id']}").json()["task"]
+    assert t["assignee"] is None
+
+
 def test_bulk_reassign(client):
     a = client.post("/api/plugins/kanban/tasks",
                     json={"title": "a", "assignee": "old"}).json()["task"]

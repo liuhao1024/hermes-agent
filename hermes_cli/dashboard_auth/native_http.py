@@ -75,7 +75,10 @@ async def _check_profile_scope(request, profile_id):
         except (ValueError, UnicodeError):
             body = None  # Route validation still owns malformed JSON.
         if isinstance(body, dict) and 'profile' in body:
-            _own_profile(body['profile'], profile_id, current=current)
+            # A kanban reassign names the assignee in body.profile, not the profile to
+            # work in (#146237): the cross-profile value is the handoff target itself.
+            if not (path.startswith('/api/plugins/kanban/tasks/') and path.endswith('/reassign')):
+                _own_profile(body['profile'], profile_id, current=current)
     if path.startswith('/api/cron/jobs') and not request.query_params.get('profile'):
         # Job-id discovery and the default list scan other profiles. Require an
         # explicit, verified named profile instead of silently changing defaults.

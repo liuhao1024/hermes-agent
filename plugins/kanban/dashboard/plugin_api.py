@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Optional
 from fastapi import (
     APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_workflow
@@ -1031,9 +1031,18 @@ def specify_task_endpoint(task_id: str, payload: SpecifyBody, board: Optional[st
 
 
 class ReassignBody(BaseModel):
-    profile: Optional[str] = None  # "" or None = unassign
+    assignee: Optional[str] = None  # "" or None = unassign
     reclaim_first: bool = False
     reason: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_profile_key(cls, data):
+        # Desktop clients before the #146237 fix sent the handoff target as
+        # body.profile; map it so an upgraded server cannot silently unassign.
+        if isinstance(data, dict) and "assignee" not in data and "profile" in data:
+            data = {**data, "assignee": data.pop("profile")}
+        return data
 
 
 @router.post("/tasks/{task_id}/reassign")
@@ -1042,12 +1051,12 @@ def reassign_task_endpoint(task_id: str, payload: ReassignBody, board: Optional[
     (``hermes kanban reassign <task_id> <profile> [--reclaim]``)."""
     with _board_conn(board) as (board, conn):
         ok = kanban_db.reassign_task(
-            conn, task_id, payload.profile or None, reclaim_first=bool(payload.reclaim_first), reason=payload.reason)
+            conn, task_id, payload.assignee or None, reclaim_first=bool(payload.reclaim_first), reason=payload.reason)
         if not ok:
             raise _conflict(
                 f"cannot reassign {task_id}: unknown id, or still "
                 "running (pass reclaim_first=true to release the claim first)")
-        return {"ok": True, "task_id": task_id, "assignee": payload.profile or None}
+        return {"ok": True, "task_id": task_id, "assignee": payload.assignee or None}
 
 
 # Estimate: rough token/complexity read via the auxiliary model. NOT a dollar cost.
