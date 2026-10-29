@@ -67,3 +67,74 @@ describe("initialProfileScope precedence", () => {
     expect(initialProfileScope(new URLSearchParams("resume=s1"), "")).toBe("served");
   });
 });
+
+describe("dashboardInitialProfile consumes the preselect once per tab (#146342)", () => {
+  const consumedKey = "hermes.bootstrap-profile.consumed";
+
+  function stubSessionStorage(store: Record<string, string> = {}) {
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => (key in store ? store[key] : null),
+      setItem: (key: string, value: string) => {
+        store[key] = value;
+      },
+    });
+    return store;
+  }
+
+  const loadFresh = () => {
+    vi.resetModules();
+    return import("./profile-bootstrap");
+  };
+
+  it("seeds the scope from the preselect on the first load and marks it consumed", async () => {
+    const store = stubSessionStorage();
+    vi.stubGlobal("window", { __HERMES_INITIAL_PROFILE__: "code-monkey" });
+    const mod = await loadFresh();
+    expect(mod.dashboardInitialProfile()).toBe("code-monkey");
+    expect(store[consumedKey]).toBe("1");
+  });
+
+  it("drops the preselect on a later reload in the same tab", async () => {
+    stubSessionStorage({ [consumedKey]: "1" });
+    vi.stubGlobal("window", { __HERMES_INITIAL_PROFILE__: "code-monkey" });
+    const mod = await loadFresh();
+    expect(mod.dashboardInitialProfile()).toBe("");
+  });
+
+  it("marks nothing when the server injected no preselect", async () => {
+    const store = stubSessionStorage();
+    vi.stubGlobal("window", {});
+    const mod = await loadFresh();
+    expect(mod.dashboardInitialProfile()).toBe("");
+    expect(consumedKey in store).toBe(false);
+  });
+
+  it("still honors the preselect when sessionStorage is unavailable", async () => {
+    vi.stubGlobal("window", { __HERMES_INITIAL_PROFILE__: "code-monkey" });
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => {
+        throw new Error("storage disabled");
+      },
+      setItem: () => {
+        throw new Error("storage disabled");
+      },
+    });
+    const mod = await loadFresh();
+    expect(mod.dashboardInitialProfile()).toBe("code-monkey");
+  });
+
+  it("a model-switch reload with default selected stays on default", async () => {
+    // The issue's exact sequence: launch preselect "code-monkey", the user
+    // switches the scope to the dashboard's own profile (spelled as a
+    // profile-less URL), then confirms the model-switch reload. With the
+    // preselect consumed, the profile-less URL resolves to the serving
+    // profile instead of re-seeding "code-monkey".
+    stubSessionStorage({ [consumedKey]: "1" });
+    vi.stubGlobal("window", {
+      __HERMES_INITIAL_PROFILE__: "code-monkey",
+      __HERMES_DASHBOARD_PROFILE__: "default",
+    });
+    const mod = await loadFresh();
+    expect(mod.initialProfileScope(new URLSearchParams(""))).toBe("default");
+  });
+});

@@ -5,9 +5,40 @@ declare global {
   }
 }
 
-export function dashboardInitialProfile(): string {
+/**
+ * The unified-launch preselect (`--open-profile`) is a FIRST-LOAD scope: it
+ * seeds the management scope on the page load that boots the dashboard, and
+ * must not win again on a later reload in the same tab. "default" is spelled
+ * as the ABSENCE of `?profile=`, so without this once-only mark it is the one
+ * scope a reload cannot express — the server-injected preselect would win
+ * `initialProfileScope` again and yank the page back to the launch profile
+ * after every model-switch confirm or manual refresh (#146342).
+ *
+ * sessionStorage is per-tab, so a fresh tab (or a deep link opened into one)
+ * still gets the preselect. The consumption runs once at module load, so
+ * every caller in a page load sees the same answer. When sessionStorage is
+ * unavailable (privacy mode, storage disabled) the preselect degrades to the
+ * old apply-on-every-load behavior rather than being dropped entirely.
+ */
+const BOOTSTRAP_PROFILE_CONSUMED_KEY = "hermes.bootstrap-profile.consumed";
+
+function consumeDashboardInitialProfile(): string {
   if (typeof window === "undefined") return "";
-  return window.__HERMES_INITIAL_PROFILE__ ?? "";
+  const initial = window.__HERMES_INITIAL_PROFILE__;
+  if (!initial) return "";
+  try {
+    if (sessionStorage.getItem(BOOTSTRAP_PROFILE_CONSUMED_KEY)) return "";
+    sessionStorage.setItem(BOOTSTRAP_PROFILE_CONSUMED_KEY, "1");
+  } catch {
+    return initial;
+  }
+  return initial;
+}
+
+const dashboardInitialProfileOnce = consumeDashboardInitialProfile();
+
+export function dashboardInitialProfile(): string {
+  return dashboardInitialProfileOnce;
 }
 
 /**
