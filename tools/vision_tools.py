@@ -512,14 +512,49 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
 # Native fast path: a vision-capable main model gets the image bytes as a multimodal
 # tool-result envelope (the agent loop unwraps it into an OpenAI-style content list on the
 # `tool` role); no aux LLM, no information loss. Providers whose tool results accept image
-# content: Anthropic Messages (and aggregators proxying Claude — assume support), OpenAI
-# Chat/Responses. Gemini is gated on model: only 3.x supports multimodal functionResponse.
+# content: Anthropic Messages, OpenAI Chat/Responses. Gemini is gated on model: only 3.x
+# supports multimodal functionResponse. Routing aggregators listed here resolve per vendor
+# target (see `_aggregator_vendor_accepts_tool_media`) — a blanket allow would feed
+# non-multimodal targets a base64 wall (#146308).
 _TOOL_RESULT_MEDIA_PROVIDERS = frozenset({
     "openrouter", "nous", "vertex", "bedrock", "anthropic-vertex", "google-vertex",
     "anthropic", "claude", "anthropic-direct",
     "openai", "openai-chat", "openai-codex", "azure-openai",
 })
 _GEMINI_PROVIDERS = frozenset({"google", "gemini", "google-gemini", "google-vertex-gemini"})
+_GEMINI_TOOL_MEDIA_MODEL_TAGS = ("gemini-3", "gemini-pro-3", "gemini-flash-3")
+
+# Vendor targets behind a routing aggregator whose upstream APIs accept image content in
+# tool results (Anthropic Messages, OpenAI Chat/Responses; google follows the Gemini 3.x
+# gate below). Any other target must NOT open the native lane: the aggregator accepts the
+# request, then silently serializes image tool parts into text, so the model receives a
+# base64 JSON wall while the tool still "succeeds" (#146308) — no 400 arrives for the
+# session to learn from, and catalog vision capability says nothing about tool-result
+# media support.
+_AGGREGATOR_TOOL_MEDIA_VENDORS = frozenset({"anthropic", "openai"})
+
+
+def _aggregator_vendor_accepts_tool_media(provider: str, model: str) -> Optional[bool]:
+    """``True``/``False`` when *provider* is a routing aggregator and *model* carries a
+    vendor prefix whose tool-media support is known/unknown; ``None`` when the legacy
+    blanket verdict applies (not an aggregator, or a bare model slug with no target)."""
+    try:
+        from hermes_cli.providers import is_routing_aggregator
+
+        if not is_routing_aggregator(provider):
+            return None
+    except Exception:
+        return None
+    vendor, separator, _ = str(model or "").strip().partition("/")
+    if not separator or not vendor.strip():
+        return None
+    v = vendor.strip().lower()
+    if v in _AGGREGATOR_TOOL_MEDIA_VENDORS:
+        return True
+    if v in _GEMINI_PROVIDERS:
+        m = str(model or "").strip().lower()
+        return any(tag in m for tag in _GEMINI_TOOL_MEDIA_MODEL_TAGS)
+    return False
 
 
 def _profile_rejects_tool_media(provider: str, model: str = "") -> bool:
@@ -540,15 +575,20 @@ def _profile_rejects_tool_media(provider: str, model: str = "") -> bool:
 def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     """Whether provider+model accepts image content inside a tool-result message. Unknown
     providers are False (caller falls back to aux-LLM text) unless their ``ProviderProfile``
-    declares ``supports_vision``; ``supports_vision_tool_messages=False`` is a hard veto."""
+    declares ``supports_vision``; ``supports_vision_tool_messages=False`` is a hard veto.
+    Routing-aggregator providers resolve per vendor target instead of blanket-allowing
+    (#146308)."""
     p = provider.strip().lower() if isinstance(provider, str) else ""
     if not p or _profile_rejects_tool_media(p, model):
         return False
     if p in _TOOL_RESULT_MEDIA_PROVIDERS:
+        vendor_verdict = _aggregator_vendor_accepts_tool_media(p, model)
+        if vendor_verdict is not None:
+            return vendor_verdict
         return True
     if p in _GEMINI_PROVIDERS:
         m = model.strip().lower() if isinstance(model, str) else ""
-        return any(tag in m for tag in ("gemini-3", "gemini-pro-3", "gemini-flash-3"))
+        return any(tag in m for tag in _GEMINI_TOOL_MEDIA_MODEL_TAGS)
     try:
         from providers import get_provider_profile
         profile = get_provider_profile(p)
@@ -566,6 +606,12 @@ def _accepts_tool_result_images(provider: str, model: str, cfg: Optional[dict[st
         return False
     if _supports_media_in_tool_results(provider, model):
         return True
+    # An unknown vendor target behind a routing aggregator must stay closed at this outer
+    # gate too: the aggregator silently serializes image tool parts into text instead of
+    # erroring, so the session never learns a 400 and the catalog vision probe would
+    # permanently reopen a lane that feeds the model a base64 wall (#146308).
+    if _aggregator_vendor_accepts_tool_media(provider, model) is False:
+        return False
     from agent.image_routing import _lookup_supports_vision
     return _lookup_supports_vision(provider, model, cfg) is True
 

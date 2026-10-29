@@ -132,6 +132,75 @@ class TestSupportsMediaInToolResults:
             clear_runtime_main()
 
 
+class TestAggregatorVendorToolMedia:
+    """A routing aggregator accepts the request for ANY upstream target, then silently
+    serializes image tool parts into text when the target lacks multimodal function
+    responses — the model gets a base64 JSON wall and the tool still "succeeds"
+    (#146308). No 400 ever arrives, so the session can never learn the incompatibility:
+    the native lane must open only for vendor targets with first-class tool media
+    support and fall back to the aux-LLM description path otherwise."""
+
+    def test_openrouter_unknown_vendor_vision_model_loses_native_lane(self):
+        """A vision-capable catalog entry must not reopen the lane for an unknown
+        vendor target on a routing aggregator."""
+        from tools.vision_tools import _should_use_native_vision_fast_path
+        from agent.auxiliary_client import set_runtime_main, clear_runtime_main
+        from agent import image_routing
+
+        set_runtime_main("openrouter", "vendor-x/some-vision-model")
+        try:
+            with (
+                patch.object(image_routing, "decide_image_input_mode", return_value="native"),
+                patch.object(image_routing, "_lookup_supports_vision", return_value=True),
+            ):
+                assert _should_use_native_vision_fast_path() is False
+        finally:
+            clear_runtime_main()
+
+    def test_openrouter_known_vendor_targets_keep_native(self):
+        assert (
+            _supports_media_in_tool_results("openrouter", "anthropic/claude-opus-4.6")
+            is True
+        )
+        assert _supports_media_in_tool_results("openrouter", "openai/gpt-5.2") is True
+
+    def test_openrouter_google_target_matches_direct_gemini_gating(self):
+        """Only Gemini 3.x supports multimodal function responses — the routed google
+        target follows the same gate as a direct gemini provider."""
+        assert (
+            _supports_media_in_tool_results("openrouter", "google/gemini-3-pro") is True
+        )
+        assert (
+            _supports_media_in_tool_results("openrouter", "google/gemini-2.5-flash")
+            is False
+        )
+
+    def test_non_aggregator_provider_keeps_blanket_allow(self):
+        assert _supports_media_in_tool_results("anthropic", "claude-opus-4-6") is True
+        assert _supports_media_in_tool_results("nous", "Hermes-4-405B") is True
+
+    def test_aggregator_bare_model_id_keeps_catalog_fallback(self):
+        """A custom proxy route whose model slug carries no vendor prefix has no target
+        to resolve — the pre-existing catalog-based verdict stands."""
+        from tools.vision_tools import _accepts_tool_result_images
+
+        with patch("agent.image_routing._lookup_supports_vision", return_value=True):
+            assert _accepts_tool_result_images("custom:myproxy", "my-model", {}) is True
+
+    def test_accepts_tool_result_images_unknown_vendor_stays_closed(self):
+        """The catalog vision probe must not re-open the lane at the outer gate either —
+        `_supports_media_in_tool_results` alone doesn't guard `_accepts_tool_result_images`."""
+        from tools.vision_tools import _accepts_tool_result_images
+
+        with patch("agent.image_routing._lookup_supports_vision", return_value=True):
+            assert (
+                _accepts_tool_result_images(
+                    "openrouter", "vendor-x/some-vision-model", {}
+                )
+                is False
+            )
+
+
 # ─── _build_native_vision_tool_result ────────────────────────────────────────
 
 
