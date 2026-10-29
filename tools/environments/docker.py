@@ -910,6 +910,11 @@ class DockerEnvironment(BaseEnvironment):
             sandbox = get_sandbox_dir() / "docker" / _sandbox_dir_name(task_id)
             self._home_dir = str(sandbox / "home")
             os.makedirs(self._home_dir, exist_ok=True)
+            # Read-only mount points live under /root/.hermes (credential files, skills,
+            # caches). If .hermes does not exist yet, the docker daemon creates it as root
+            # inside the /root bind, and the sandbox user can never write below it — the
+            # browser profile among them. Pre-create it as the host user instead.
+            os.makedirs(os.path.join(self._home_dir, ".hermes"), exist_ok=True)
             self._sandbox_mounts = [(self._home_dir, "/root")]
             if mount_workspace:
                 self._workspace_dir = str(sandbox / "workspace")

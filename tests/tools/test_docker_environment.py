@@ -2,6 +2,7 @@ import logging
 import os
 import re
 from io import StringIO
+from pathlib import Path
 import subprocess
 import tempfile
 
@@ -702,6 +703,26 @@ def test_distinct_session_keys_get_distinct_sandbox_dirs(monkeypatch, tmp_path):
         )
 
     assert len(set(sources)) == 3, f"sandbox sources collided: {sources}"
+
+
+@pytest.mark.platforms("linux")
+def test_persistent_sandbox_precreates_home_hermes_before_docker_run(
+    monkeypatch, tmp_path
+):
+    """The read-only mounts (credential files, skills, caches) target paths under
+    ``/root/.hermes``. When the host side of the ``/root`` bind has no ``.hermes``
+    yet, the docker daemon creates it as root while making those mount points, and
+    the sandbox user (uid 1000) can never write below it — the browser profile
+    among them, so the sandbox's browser can no longer start (#146301). The host
+    must own ``home/.hermes`` before ``docker run`` ever sees the bind."""
+    monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(tmp_path))
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="browser-profile-task", persistent_filesystem=True)
+
+    hermes_dir = Path(env._home_dir) / ".hermes"
+    assert hermes_dir.is_dir(), "home/.hermes must exist on the host before docker run"
 
 
 def test_sandbox_dir_name_keeps_existing_names_verbatim():
