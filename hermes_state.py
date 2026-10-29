@@ -1556,6 +1556,17 @@ class SessionDB(
                 # last descriptor (the capture raises and the handle stays open when it fails).
                 retire_without_close = generation_lost and self._settle_lost_generation_locked()
                 quarantine_reason = None if generation_lost else self._quarantine_reason()
+                # Same close-time-checkpoint hazard the lost-generation path retires for, same
+                # remedy: without setconfig (Python < 3.12) sqlite3's own last-connection checkpoint
+                # runs with no SQL of ours, writing the retained frames under the quarantine's stale
+                # page map. Skipping the explicit PRAGMA is not enough there -- retire unclosed
+                # instead (#146297).
+                if (
+                    quarantine_reason is not None
+                    and not _close_time_checkpoint_configurable()
+                    and self._retire_connection is not None
+                ):
+                    retire_without_close = True
                 if quarantine_reason is not None:
                     logger.warning(
                         "Skipping the close-time WAL checkpoint for %s: this "

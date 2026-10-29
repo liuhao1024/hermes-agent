@@ -126,6 +126,28 @@ class TestQuarantinedHandleStopsTouchingTheFile:
         assert real_conn.getconfig(flag) is True
         db.close()
 
+    def test_close_retires_unclosed_when_checkpoint_cannot_be_disabled(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The <3.12 half of the same hazard: with no setconfig the quarantine's
+        skipped PRAGMA still happens implicitly inside Connection.close(). The
+        lost-generation path retires the connection unclosed on such a runtime;
+        the quarantine branch must agree (#146297)."""
+        db, real_conn = _quarantined_db(tmp_path)
+        retired = []
+        monkeypatch.setattr(
+            "hermes_state._close_time_checkpoint_configurable", lambda: False
+        )
+        db._retire_connection = retired.append
+        recorder = _RecordingConn(real_conn)
+        db._conn = recorder
+        with caplog.at_level("WARNING", logger="hermes_state"):
+            db.close()
+        assert recorder.recorded == []  # no explicit PRAGMA…
+        assert retired == [recorder]  # …and no implicit one either: pinned, not closed
+        assert db._conn is None
+        assert db._connection_pinned is True
+
     def test_reopen_after_close_refused_when_quarantined(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
 
