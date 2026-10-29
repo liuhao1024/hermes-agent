@@ -573,6 +573,9 @@ class BotRelayDeliverParams(Params):
 
     profile: str
     message: str
+    # The Desktop's relay always sends the envelope id and the handler requires it; optional so
+    # clients that predate it still reach the handler's own ``invalid_params`` answer (#146254).
+    id: str | None = None
     from_profile: str | None = None
     from_handle: str | None = None
     from_connection: str | None = None

@@ -1887,6 +1887,7 @@ export interface RelayEnvelope {
 export interface BotRelayDeliverParams {
   profile: string
   message: string
+  id?: string | null
   from_profile?: string | null
   from_handle?: string | null
   from_connection?: string | null

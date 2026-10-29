@@ -165,6 +165,32 @@ def test_deliver_requires_stable_id_and_valid_profile(home, monkeypatch, params)
     assert err["error"]["data"]["reason"] == "invalid_params"
 
 
+def test_deliver_contract_admits_the_desktop_relay_params():
+    """The Desktop's ``relayDeliverParams`` always carries the envelope ``id`` and the
+    ``bot_relay.deliver`` handler requires it, so the legacy contract must admit the field
+    (#146254). Handler-level tests call the method directly and skip the wire validation —
+    which is how a contract forbidding the very field its handler needs slipped through:
+    on a legacy dashboard WebSocket (a Desktop SSH connection) every cross-machine DM died
+    as ``4000 invalid params ... id: Extra inputs`` before ever reaching the handler."""
+    from tui_gateway.contracts.registry import METHODS, validate_params
+
+    desktop_params = {
+        "id": "b" * 32,
+        "profile": "ops",
+        "message": "ping",
+        "from_profile": "default",
+        "from_handle": "hermes",
+        "from_connection": "local",
+    }
+    validated, error = validate_params(METHODS["bot_relay.deliver"], desktop_params)
+    assert validated is not None and error is None, error
+
+    # A client that predates the id stays contract-valid too: the handler owns the
+    # missing-id refusal (its ``invalid_params`` answer), not a 4000 at the wire.
+    _, legacy_error = validate_params(METHODS["bot_relay.deliver"], {"profile": "ops", "message": "ping"})
+    assert legacy_error is None, legacy_error
+
+
 def test_reply_roundtrip_and_id_validation(home):
     envelope_id = "c" * 32
     _result(srv._methods["bot_relay.reply"](1, {"id": envelope_id, "reply": "hi"}))

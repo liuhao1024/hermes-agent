@@ -7282,6 +7282,18 @@
             "title": "Message",
             "type": "string"
           },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
           "from_profile": {
             "anyOf": [
               {
