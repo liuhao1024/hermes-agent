@@ -142,13 +142,15 @@ def test_read_only_401_raises_and_never_retries_with_rotation(monkeypatch, tmp_p
 
 def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(monkeypatch):
     """An explicit Anthropic api_key must not be shadowed by the ambient OAuth singleton, and the
-    Opus/Sonnet weekly windows parse as ``model`` scope (they can never imply the account is out)."""
+    Opus/Sonnet weekly windows parse as ``model`` scope (they can never imply the account is out).
+    The OAuth usage endpoint reports ``utilization`` as a 0-100 percent already, so a just-reset
+    value of 1.0 (or 0.4) passes through unscaled instead of reading as a full window (#146280)."""
     called: dict = {}
 
     def fake_get_json(url, headers, *, timeout):
         called["url"], called["headers"] = url, headers
-        return {"five_hour": {"utilization": 0.3, "resets_at": "2026-10-05T12:00:00Z"},
-                "seven_day": {"utilization": 0.2, "resets_at": "2026-10-08T12:00:00Z"},
+        return {"five_hour": {"utilization": 30.0, "resets_at": "2026-10-05T12:00:00Z"},
+                "seven_day": {"utilization": 20.0, "resets_at": "2026-10-08T12:00:00Z"},
                 "seven_day_opus": {"utilization": 1.0, "resets_at": "2026-10-09T12:00:00Z"},
                 "seven_day_sonnet": {"utilization": 0.4, "resets_at": "2026-10-09T12:00:00Z"}}
 
@@ -164,7 +166,8 @@ def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(
     assert scopes == {"Current session": "account", "Current week": "account",
                       "Opus week": "model", "Sonnet week": "model"}
     percents = {w.label: w.used_percent for w in snapshot.windows}
-    assert percents["Opus week"] == 100.0 and percents["Current session"] == 30.0
+    assert percents["Opus week"] == 1.0 and percents["Sonnet week"] == 0.4
+    assert percents["Current session"] == 30.0 and percents["Current week"] == 20.0
 
 
 def test_read_only_fetch_remembered_under_identity_slot(monkeypatch, tmp_path):
